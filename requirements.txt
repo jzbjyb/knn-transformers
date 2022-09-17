@@ -1,6 +1,7 @@
 torch>=1.9.0
-transformers
+transformers==4.21.3
 datasets
 tqdm
 scipy
 faiss-gpu==1.7.2
+sacrebleu

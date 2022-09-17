@@ -52,6 +52,7 @@ from transformers.utils.versions import require_version
 
 from knnlm import KNNWrapper, KNNSaver, KEY_TYPE, DIST
 from retomaton import RetomatonWrapper
+from memtrans import MemTransWrapper
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.21.0.dev0")
@@ -258,7 +259,7 @@ class KNNArguments:
     """
     knn: bool = field(default=False)
     knn_gpu: bool = field(default=True)
-    dstore_size: int = field(default=19254850, metadata={"help": "The size of the dstore."})
+    dstore_size: int = field(default=None, metadata={"help": "The size of the dstore."})
     knn_keytype: KEY_TYPE.from_string = field(default=KEY_TYPE.last_ffn_input)
     save_knnlm_dstore: bool = field(default=False)
     dstore_dir: str = field(default="checkpoints")
@@ -287,6 +288,9 @@ class KNNArguments:
     num_clusters: int = field(default=1000000)
     sample_size: int = field(default=40000000)
     members: str = field(default=None)
+
+    ## MemTrans args:
+    memtrans: bool = field(default=False)
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -433,34 +437,6 @@ def main():
         raise ValueError("Make sure that `config.decoder_start_token_id` is correctly defined")
 
     prefix = data_args.source_prefix if data_args.source_prefix is not None else ""
-
-    # Injecting KNN
-    dimension = model.config.hidden_size
-    knn_wrapper = None
-    knn_args.seed = training_args.seed
-    if knn_args.retomaton or knn_args.cluster_dstore:
-        knn_wrapper = RetomatonWrapper(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
-            dimension=dimension, 
-            knn_sim_func=knn_args.knn_sim_func, knn_keytype=knn_args.knn_keytype,
-            no_load_keys=knn_args.no_load_keys, move_dstore_to_mem=knn_args.move_dstore_to_mem, knn_gpu=knn_args.knn_gpu,
-            recompute_dists=knn_args.recompute_dists,
-            k=knn_args.k, lmbda=knn_args.lmbda, knn_temp=knn_args.knn_temp, probe=knn_args.probe,
-            no_pointer=knn_args.no_pointer, min_knns=knn_args.min_knns, max_knns=knn_args.max_knns,
-            members=knn_args.members)
-    elif knn_args.knn:
-        knn_wrapper = KNNWrapper(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
-            dimension= dimension, 
-            knn_sim_func=knn_args.knn_sim_func, knn_keytype=knn_args.knn_keytype,
-            no_load_keys=knn_args.no_load_keys, move_dstore_to_mem=knn_args.move_dstore_to_mem, knn_gpu=knn_args.knn_gpu,
-            recompute_dists=knn_args.recompute_dists,
-            k=knn_args.k, lmbda=knn_args.lmbda, knn_temp=knn_args.knn_temp, probe=knn_args.probe, knn_drop=knn_args.knn_drop)
-    elif knn_args.save_knnlm_dstore or knn_args.build_index:
-        training_args.predict_with_generate = False
-        knn_wrapper = KNNSaver(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
-            dimension=dimension, knn_keytype=knn_args.knn_keytype)
-    
-    if knn_wrapper is not None:
-        knn_wrapper.break_into(model)
 
     # Preprocessing the datasets.
     # We need to tokenize inputs and targets.
@@ -645,6 +621,45 @@ def main():
         compute_metrics=compute_metrics if training_args.predict_with_generate else None,
         callbacks=[EarlyStoppingCallback(early_stopping_patience=data_args.patience)] if data_args.patience is not None else None,
     )
+
+    # Injecting KNN
+    dimension = model.config.hidden_size
+    knn_wrapper = None
+    knn_args.seed = training_args.seed
+    if knn_args.memtrans:
+        if knn_args.save_knnlm_dstore or knn_args.build_index:
+            training_args.predict_with_generate = False
+            stage = 'save'
+        else:
+            stage = 'retrieve'
+        knn_wrapper = MemTransWrapper(
+            dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir,
+            move_dstore_to_mem=knn_args.move_dstore_to_mem, cuda=knn_args.knn_gpu,
+            recompute_dists=knn_args.recompute_dists,
+            k=knn_args.k, stage=stage)
+    elif knn_args.retomaton or knn_args.cluster_dstore:
+        knn_wrapper = RetomatonWrapper(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
+            dimension=dimension, 
+            knn_sim_func=knn_args.knn_sim_func, knn_keytype=knn_args.knn_keytype,
+            no_load_keys=knn_args.no_load_keys, move_dstore_to_mem=knn_args.move_dstore_to_mem, knn_gpu=knn_args.knn_gpu,
+            recompute_dists=knn_args.recompute_dists,
+            k=knn_args.k, lmbda=knn_args.lmbda, knn_temp=knn_args.knn_temp, probe=knn_args.probe,
+            no_pointer=knn_args.no_pointer, min_knns=knn_args.min_knns, max_knns=knn_args.max_knns,
+            members=knn_args.members)
+    elif knn_args.knn:
+        knn_wrapper = KNNWrapper(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
+            dimension= dimension, 
+            knn_sim_func=knn_args.knn_sim_func, knn_keytype=knn_args.knn_keytype,
+            no_load_keys=knn_args.no_load_keys, move_dstore_to_mem=knn_args.move_dstore_to_mem, knn_gpu=knn_args.knn_gpu,
+            recompute_dists=knn_args.recompute_dists,
+            k=knn_args.k, lmbda=knn_args.lmbda, knn_temp=knn_args.knn_temp, probe=knn_args.probe)
+    elif knn_args.save_knnlm_dstore or knn_args.build_index:
+        training_args.predict_with_generate = False
+        knn_wrapper = KNNSaver(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
+            dimension=dimension, knn_keytype=knn_args.knn_keytype)
+    
+    if knn_wrapper is not None:
+        knn_wrapper.break_into(model)
 
     # Training
     if training_args.do_train:
