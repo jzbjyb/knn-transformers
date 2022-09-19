@@ -3,8 +3,6 @@ import os
 import logging
 import time
 import types
-import functools
-from xml.sax.handler import property_declaration_handler
 from tqdm import tqdm
 import numpy as np
 import torch
@@ -12,6 +10,7 @@ from torch import nn
 from pathlib import Path
 import faiss
 import faiss.contrib.torch_utils
+from transformers.models.t5.modeling_t5 import T5Attention
 
 from knnlm import get_dstore_path
 
@@ -38,7 +37,7 @@ class MemTransDatastore(object):
         self.move_dstore_to_mem = move_dstore_to_mem
         self.cuda_idx = cuda_idx
         self.cur_idx = 0
-        self.precision = np.float16  # TODO: 32?
+        self.precision = np.float32
         self.load_or_init_dstore()
     
     @property
@@ -159,39 +158,221 @@ class MemTransDatastore(object):
         ret_vs = torch.cat(ret_vs, dim=0)  # (n_heads, batch_size, topk, dim)
         return ret_ks, ret_vs
 
-def memtrans_save(
-    self,
-    key_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
-    value_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
-    dstore: MemTransDatastore = None,
-):
-    # get mask
-    labels = dstore.get_labels().flatten(0, 1)  # (batch * seq_length)
-    mask = labels != -100
+class MemTransAttn(object):
+    def __init__(self, dstore: MemTransDatastore, topk: int, stage: str):
+        assert stage in {'save', 'retrieve'}
+        self.dstore = dstore
+        self.topk = topk
+        self.stage = stage
+
+    def save(
+        self,
+        key_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
+        value_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
+    ):
+        # get mask
+        labels = self.dstore.get_labels().flatten(0, 1)  # (batch * seq_length)
+        mask = labels != -100
+        
+        # remove padding tokens
+        key_states = key_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
+        value_states = value_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
+        key_states = key_states[:, mask, :]  # (n_heads, n_tokens, dim_per_head)
+        value_states = value_states[:, mask, :]  # (n_heads, n_tokens, dim_per_head)
+
+        # save
+        self.dstore.save_key_value(key_states, value_states)
+
+    def retrieve(
+        self,
+        query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
+    ):
+        bs, nh, sl, d = query_states.size()
+        query_states = query_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
+        ret_ks, ret_vs = self.dstore.get_knns(query_states, topk=self.topk)  # (n_heads, batch_size * seq_length, topk, dim_per_head)
+        ret_ks = ret_ks.view(nh, bs, sl, self.topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
+        ret_vs = ret_vs.view(nh, bs, sl, self.topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
+        ret_ks = ret_ks.permute(1, 0, 2, 3, 4)  # (batch_size, n_heads, seq_length, topk, dim_per_head)
+        ret_vs = ret_vs.permute(1, 0, 2, 3, 4)  # (batch_size, n_heads, seq_length, topk, dim_per_head)
+        return ret_ks, ret_vs
     
-    # remove padding tokens
-    key_states = key_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
-    value_states = value_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
-    key_states = key_states[:, mask, :]  # (n_heads, n_tokens, dim_per_head)
-    value_states = value_states[:, mask, :]  # (n_heads, n_tokens, dim_per_head)
+    def update_mask_and_position_bias(
+        self,
+        ori_attn: T5Attention,
+        mask: torch.FloatTensor,  # (batch_size, n_heads, seq_length, key_length)
+        seq_length: int,
+        real_seq_length: int,
+        key_length: int,
+    ):
+        # extend the mask
+        if mask is not None:
+            ext_size = mask.size()[:3] + (self.topk,)
+            # (batch_size, n_heads, seq_length, topk + key_length)
+            mask = torch.cat([torch.zeros(*ext_size).to(mask), mask], dim=3)
+        
+        # update relative positions
+        position_bias = ori_attn.compute_bias(
+            self.topk + real_seq_length, self.topk + key_length)
+        # need to truncate because ret_topk > 0
+        # (batch_size, n_heads, seq_length, topk + key_length)
+        position_bias = position_bias[:, :, -seq_length:, :]
+        if mask is not None:
+            # (batch_size, n_heads, seq_length, topk + key_length)
+            position_bias = position_bias + mask
+        
+        return position_bias
+    
+    @staticmethod
+    def unshape(states):
+        bs, nh, sl, d = states.size()
+        return states.transpose(1, 2).contiguous().view(bs, sl, -1)
 
-    # save
-    dstore.save_key_value(key_states, value_states)
+    def original_attn(
+        self,
+        ori_attn: T5Attention,
+        query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
+        key_states: torch.FloatTensor,  # (batch_size, n_heads, key_length, dim_per_head)
+        value_states: torch.FloatTensor,  # (batch_size, n_heads, key_length, dim_per_head)
+        past_key_value: torch.FloatTensor,
+        position_bias: torch.FloatTensor,  # (batch_size, n_heads, seq_length, key_length)
+        mask: torch.FloatTensor,  # (batch_size, n_heads, seq_length, key_length)
+        layer_head_mask,
+        real_seq_length: int,
+        key_length: int
+    ):
+        new_self = self
+        self = ori_attn
+        
+        # === original attn code (start) ===
+        # compute scores
+        scores = torch.matmul(
+            query_states, key_states.transpose(3, 2)
+        )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
+        
+        if position_bias is None:
+            if not self.has_relative_attention_bias:
+                position_bias = torch.zeros(
+                    (1, self.n_heads, real_seq_length, key_length), device=scores.device, dtype=scores.dtype
+                )
+                if self.gradient_checkpointing and self.training:
+                    position_bias.requires_grad = True
+            else:
+                position_bias = self.compute_bias(real_seq_length, key_length, device=scores.device)
 
-def memtrans_retrieve(
-    self,
-    query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
-    dstore: MemTransDatastore,
-    topk: int,
-):
-    bs, nh, sl, d = query_states.size()
-    query_states = query_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
-    ret_ks, ret_vs = dstore.get_knns(query_states, topk=topk)  # (n_heads, batch_size * seq_length, topk, dim_per_head)
-    ret_ks = ret_ks.view(nh, bs, sl, topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
-    ret_vs = ret_vs.view(nh, bs, sl, topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
-    ret_ks = ret_ks.permute(1, 0, 2, 3, 4).flatten(2, 3)  # (batch_size, n_heads, seq_length * topk, dim_per_head)
-    ret_vs = ret_vs.permute(1, 0, 2, 3, 4).flatten(2, 3)  # (batch_size, n_heads, seq_length * topk, dim_per_head)
-    return ret_ks, ret_vs
+            # if key and values are already calculated
+            # we want only the last query position bias
+            if past_key_value is not None:
+                position_bias = position_bias[:, :, -query_states.size(2) :, :]
+
+            if mask is not None:
+                position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
+
+        scores += position_bias
+        attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
+            scores
+        )  # (batch_size, n_heads, seq_length, key_length)
+        attn_weights = nn.functional.dropout(
+            attn_weights, p=self.dropout, training=self.training
+        )  # (batch_size, n_heads, seq_length, key_length)
+
+        # Mask heads if we want to
+        if layer_head_mask is not None:
+            attn_weights = attn_weights * layer_head_mask
+
+        attn_output = new_self.unshape(torch.matmul(attn_weights, value_states))  # (batch_size, seq_length, dim)
+        attn_output = self.o(attn_output)
+        # === original attn code (end) ===
+
+        return attn_weights, attn_output
+
+    def attn(
+        self,
+        ori_attn: T5Attention,
+        query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
+        key_states: torch.FloatTensor,  # (batch_size, n_heads, key_length, dim_per_head)
+        value_states: torch.FloatTensor,  # (batch_size, n_heads, key_length, dim_per_head)
+        ret_ks: torch.FloatTensor,  # (batch_size, n_heads, seq_length, topk, dim_per_head)
+        ret_vs: torch.FloatTensor,  # (batch_size, n_heads, seq_length, topk, dim_per_head)
+        mask: torch.FloatTensor,  # (batch_size, n_heads, seq_length, key_length)
+        layer_head_mask,
+        real_seq_length: int,
+        key_length: int
+    ):
+        if layer_head_mask is not None:
+            raise NotImplementedError()
+        
+        bs, nh, sl, d = query_states.size()
+        kl = key_states.size(2)
+        multi_token_eval = sl > 1  # multiple tokens per example in the query_states
+
+        if multi_token_eval:
+            assert sl == kl, 'should be in eval mode'
+
+            # compute the original scores over local context
+            # (batch_size, n_heads, seq_length, key_length)
+            scores = torch.matmul(query_states, key_states.transpose(3, 2))
+
+            # compute the extended scores over the retrieved context
+            # (batch_size, n_heads, seq_length, topk)
+            _scores = torch.einsum("bnqd,bnqkd->bnqk", query_states, ret_ks)
+
+            # combine scores
+            # (batch_size, n_heads, seq_length, topk + key_length)
+            scores = torch.cat([_scores, scores], dim=-1)
+
+            # apply bias
+            position_bias = self.update_mask_and_position_bias(
+                ori_attn, mask, seq_length=sl, real_seq_length=real_seq_length, key_length=key_length)
+            scores += position_bias
+
+            # compute attn distribution
+            # (batch_size, n_heads, seq_length, topk + key_length)
+            attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(scores)
+            attn_weights = nn.functional.dropout(attn_weights, p=ori_attn.dropout, training=ori_attn.training)
+
+            # compute output
+            # (batch_size, n_heads, seq_length, key_length, dim_per_head)
+            value_states = value_states.unsqueeze(2).repeat(1, 1, sl, 1, 1)  
+            # (batch_size, n_heads, seq_length, topk + key_length, dim_per_head)
+            value_states = torch.cat([ret_vs, value_states], dim=3)
+            # (batch_size, n_heads, seq_length, dim_per_head)
+            attn_output = torch.einsum("bnqk,bnqkd->bnqd", attn_weights, value_states)  
+            attn_output = self.unshape(attn_output)  # (batch_size, seq_length, dim)
+            attn_output = ori_attn.o(attn_output)
+        
+        else:
+            assert sl == 1, 'should be in decoding mode'
+            assert ret_ks.size(2) == ret_vs.size(2) == sl
+            assert real_seq_length == key_length
+
+            # prepend retrieved keys and values
+            # (batch_size, n_heads, topk + key_length, dim_per_head)
+            key_states = torch.cat([ret_ks.squeeze(2), key_states], dim=2)
+            value_states = torch.cat([ret_vs.squeeze(2), value_states], dim=2)
+
+            # compute attn scores
+            # (batch_size, n_heads, seq_length, topk + key_length)
+            scores = torch.matmul(query_states, key_states.transpose(3, 2))
+
+            # apply bias
+            position_bias = self.update_mask_and_position_bias(
+                ori_attn, mask, seq_length=sl, real_seq_length=real_seq_length, key_length=key_length)
+            scores += position_bias
+
+            # compute attn distribution
+            # (batch_size, n_heads, seq_length, topk + key_length)
+            attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(scores)
+
+            #print(attn_weights[0, 0, 0, :10])
+            #time.sleep(3)
+
+            attn_weights = nn.functional.dropout(attn_weights, p=ori_attn.dropout, training=ori_attn.training)
+            
+            # compute output
+            attn_output = self.unshape(torch.matmul(attn_weights, value_states))  # (batch_size, seq_length, dim)
+            attn_output = ori_attn.o(attn_output)
+
+        return attn_weights, attn_output
 
 def t5attetnion_forward(
         self,
@@ -263,80 +444,20 @@ def t5attetnion_forward(
         hidden_states, self.v, key_value_states, past_key_value[1] if past_key_value is not None else None
     )
 
-    ori_position_bias = ori_key_states = ori_value_states = None
-    if self.memtrans_stage == 'save':
-        self.memtrans_save(key_states, value_states)
-    elif self.memtrans_stage == 'retrieve':
-        ret_ks, ret_vs = self.memtrans_retrieve(query_states)
-
-        # concat the retrieved key/value and the original key/value so retrieved is more far away
-        ret_topk = ret_ks.size(2)
-        real_seq_length += ret_topk
-        key_length += ret_topk
-        ori_key_states = key_states
-        ori_value_states = value_states
-        key_states = torch.cat([ret_ks, key_states], dim=2)
-        value_states = torch.cat([ret_vs, value_states], dim=2)
-
-        # update mask and position_bias
-        if mask is not None:  # extend the mask
-            ext_size = mask.size()[:3] + (ret_topk,)
-            mask = torch.cat([torch.zeros(*ext_size).to(mask), mask], dim=3)
-        if position_bias is not None:  # update relative positions
-            ori_position_bias = position_bias
-            position_bias = self.compute_bias(real_seq_length, key_length, device=position_bias.device)
-            if past_key_value is not None or ret_topk > 0:
-                # for the first generation position where past_key_value is None, we need to truncate position_bias if ret_topk > 0
-                position_bias = position_bias[:, :, -hidden_states.size(1):, :]
-            if mask is not None:
-                position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
-    else:
-        raise ValueError()
-    
-    # compute scores
-    scores = torch.matmul(
-        query_states, key_states.transpose(3, 2)
-    )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
-    
-    if position_bias is None:
-        if not self.has_relative_attention_bias:
-            position_bias = torch.zeros(
-                (1, self.n_heads, real_seq_length, key_length), device=scores.device, dtype=scores.dtype
-            )
-            if self.gradient_checkpointing and self.training:
-                position_bias.requires_grad = True
-        else:
-            position_bias = self.compute_bias(real_seq_length, key_length, device=scores.device)
-
-        # if key and values are already calculated
-        # we want only the last query position bias
-        if past_key_value is not None:
-            position_bias = position_bias[:, :, -hidden_states.size(1) :, :]
-
-        if mask is not None:
-            position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
-
-    scores += position_bias
-    attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
-        scores
-    )  # (batch_size, n_heads, seq_length, key_length)
-    attn_weights = nn.functional.dropout(
-        attn_weights, p=self.dropout, training=self.training
-    )  # (batch_size, n_heads, seq_length, key_length)
-
-    # Mask heads if we want to
-    if layer_head_mask is not None:
-        attn_weights = attn_weights * layer_head_mask
-
-    attn_output = unshape(torch.matmul(attn_weights, value_states))  # (batch_size, seq_length, dim)
-    attn_output = self.o(attn_output)
-
-    if self.memtrans_stage == 'retrieve':
-        if ori_position_bias is not None:  # recover
-            position_bias = ori_position_bias
-        if ori_key_states is not None:
-            key_states = ori_key_states
-            value_states = ori_value_states
+    if self.mta.stage == 'save':
+        self.mta.save(key_states, value_states)
+    elif self.mta.stage == 'retrieve':
+        ret_ks, ret_vs = self.mta.retrieve(query_states)
+        attn_weights, attn_output = self.mta.attn(
+            self, query_states, key_states, value_states, 
+            ret_ks, ret_vs, 
+            mask, layer_head_mask, 
+            real_seq_length=real_seq_length, key_length=key_length)
+    else:  # original attn
+        attn_weights, attn_output = self.mta.original_attn(
+            self, query_states, key_states, value_states, past_key_value,
+            position_bias, mask, layer_head_mask, 
+            real_seq_length=real_seq_length, key_length=key_length)
 
     present_key_value_state = (key_states, value_states) if (self.is_decoder and use_cache) else None
     outputs = (attn_output,) + (present_key_value_state,) + (position_bias,)
@@ -395,13 +516,10 @@ class MemTransWrapper(object):
         if self.stage == 'retrieve':
             self.dstore.load_index()
         
-        # inject functions and variables
+        # inject MemTransAttn
+        self.mta = MemTransAttn(dstore=self.dstore, topk=self.k, stage=self.stage)
         attn_layer.relative_attention_bias = self.get_layer(key='firstattn').relative_attention_bias
-        attn_layer.memtrans_stage = self.stage
-        attn_layer.memtrans_save = types.MethodType(
-            functools.partial(memtrans_save, dstore=self.dstore), attn_layer)
-        attn_layer.memtrans_retrieve = types.MethodType(
-            functools.partial(memtrans_retrieve, dstore=self.dstore, topk=self.k), attn_layer)
+        attn_layer.mta = self.mta
     
     def pre_forward_hook(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
         self.dstore.save_labels(labels)
@@ -413,9 +531,7 @@ class MemTransWrapper(object):
             attn_layer = self.get_layer()
             attn_layer.forward = self.ori_t5attetnion_forward
             del attn_layer.relative_attention_bias
-            del attn_layer.memtrans_stage
-            del attn_layer.memtrans_save
-            del attn_layer.memtrans_retrieve
+            del attn_layer.mta
             self.model.broken_into = None
     
     layer_to_capture = {

@@ -17,7 +17,7 @@ source env.sh
 model=t5-small
 output=checkpoints-translation/test
 
-echo python -u run_translation.py  \
+python -u run_translation.py  \
   --model_name_or_path ${model} \
   --dataset_name wmt16 --dataset_config_name ro-en \
   --source_lang en --target_lang ro \
@@ -35,7 +35,7 @@ python -u run_translation.py  \
   --per_device_eval_batch_size=4 \
   --output_dir ${output} \
   --dstore_dir ${output} \
-  --do_eval --predict_with_generate \
+  --do_predict --predict_with_generate \
   --source_prefix "translate English to Romanian: " \
   --dstore_size 85108 \
-  --memtrans 
+  --memtrans --k 1
