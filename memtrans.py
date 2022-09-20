@@ -46,7 +46,7 @@ class MemTransDatastore(object):
     
     @property
     def device(self):
-        return torch.device(f'cuda:{self.cuda_idx}' if torch.cuda.is_available() else 'cpu')
+        return torch.device(f'cuda:{self.cuda_idx}' if self.use_cuda else 'cpu')
 
     def get_index_path(self, head_idx: int) -> str:
         return get_index_path(self.directory, self.model_type, self.size, self.dimension, head_idx=head_idx)
@@ -123,8 +123,9 @@ class MemTransDatastore(object):
             start = time.time()
             self.keys = torch.from_numpy(self.keys[:])
             self.values = torch.from_numpy(self.values[:])
-            self.keys = self.keys.to(self.device)
-            self.values = self.values.to(self.device)
+            # TODO: debug
+            #self.keys = self.keys.to(self.device)
+            #self.values = self.values.to(self.device)
             logger.info('Moving to memory took {} s'.format(time.time() - start))
         
         # load index
@@ -146,6 +147,7 @@ class MemTransDatastore(object):
         self, 
         queries: torch.FloatTensor,  # (n_heads, batch_size, dim)
         topk: int):
+        ori_device = queries.device
         queries = queries.to(self.device)
         ret_ks, ret_vs = [], []
         for h in range(self.n_heads):
@@ -154,8 +156,8 @@ class MemTransDatastore(object):
             indices = indices.to(self.device)
             ret_ks.append(self.keys[h][indices])  # (batch_size, topk, dim)
             ret_vs.append(self.values[h][indices])  # (batch_size, topk, dim)
-        ret_ks = torch.cat(ret_ks, dim=0)  # (n_heads, batch_size, topk, dim)
-        ret_vs = torch.cat(ret_vs, dim=0)  # (n_heads, batch_size, topk, dim)
+        ret_ks = torch.cat(ret_ks, dim=0).to(ori_device)  # (n_heads, batch_size, topk, dim)
+        ret_vs = torch.cat(ret_vs, dim=0).to(ori_device)  # (n_heads, batch_size, topk, dim)
         return ret_ks, ret_vs
 
 class MemTransAttn(object):
@@ -362,10 +364,6 @@ class MemTransAttn(object):
             # compute attn distribution
             # (batch_size, n_heads, seq_length, topk + key_length)
             attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(scores)
-
-            #print(attn_weights[0, 0, 0, :10])
-            #time.sleep(3)
-
             attn_weights = nn.functional.dropout(attn_weights, p=ori_attn.dropout, training=ori_attn.training)
             
             # compute output
@@ -446,6 +444,10 @@ def t5attetnion_forward(
 
     if self.mta.stage == 'save':
         self.mta.save(key_states, value_states)
+        attn_weights, attn_output = self.mta.original_attn(
+            self, query_states, key_states, value_states, past_key_value,
+            position_bias, mask, layer_head_mask, 
+            real_seq_length=real_seq_length, key_length=key_length)
     elif self.mta.stage == 'retrieve':
         ret_ks, ret_vs = self.mta.retrieve(query_states)
         attn_weights, attn_output = self.mta.attn(
@@ -453,7 +455,7 @@ def t5attetnion_forward(
             ret_ks, ret_vs, 
             mask, layer_head_mask, 
             real_seq_length=real_seq_length, key_length=key_length)
-    else:  # original attn
+    else:  # original code
         attn_weights, attn_output = self.mta.original_attn(
             self, query_states, key_states, value_states, past_key_value,
             position_bias, mask, layer_head_mask, 
@@ -485,7 +487,7 @@ class MemTransWrapper(object):
         self.move_dstore_to_mem = move_dstore_to_mem
         self.cuda = cuda and torch.cuda.is_available() and torch.cuda.device_count() > 0
         self.cuda_idx = 0 if self.cuda else -1
-        self.device = torch.device(f'cuda:{self.cuda_idx}' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device(f'cuda:{self.cuda_idx}' if self.cuda else 'cpu')
     
     def get_layer(self, key: str = 'memtrans'):
         return MemTransWrapper.layer_to_capture[self.model.config.model_type][key](self.model)
@@ -536,6 +538,10 @@ class MemTransWrapper(object):
     
     layer_to_capture = {
         't5': {
+            'memtrans': lambda model: model.base_model.decoder.block[-3].layer[0].SelfAttention,
+            'firstattn': lambda model: model.base_model.decoder.block[0].layer[0].SelfAttention
+        },
+        'mt5': {
             'memtrans': lambda model: model.base_model.decoder.block[-3].layer[0].SelfAttention,
             'firstattn': lambda model: model.base_model.decoder.block[0].layer[0].SelfAttention
         }

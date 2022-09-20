@@ -267,9 +267,13 @@ class KNNWrapper(object):
         't5': {
             KEY_TYPE.last_ffn_input: (lambda model: model.base_model.decoder.block[-1].layer[2].DenseReluDense, True),
             KEY_TYPE.last_ffn_output: (lambda model: model.base_model.decoder.block[-1].layer[2], False),
+        },
+        'mt5': {
+            KEY_TYPE.last_ffn_input: (lambda model: model.base_model.decoder.block[-1].layer[2].DenseReluDense, True),
+            KEY_TYPE.last_ffn_output: (lambda model: model.base_model.decoder.block[-1].layer[2], False),
         }
 }
-    
+
 
 class KNNSaver(object):
     def __init__(self, dstore_size, dstore_dir, dimension, knn_keytype=None):

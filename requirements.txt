@@ -5,3 +5,4 @@ tqdm
 scipy
 faiss-gpu==1.7.2
 sacrebleu
+evaluate==0.2.2

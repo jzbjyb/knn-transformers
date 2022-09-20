@@ -376,6 +376,7 @@ def main():
             data_args.dataset_config_name,
             cache_dir=model_args.cache_dir,
             use_auth_token=True if model_args.use_auth_token else None,
+            revision="main"  # TODO: bug for zh-en
         )
     else:
         data_files = {}
@@ -445,7 +446,7 @@ def main():
     elif training_args.do_eval:
         column_names = raw_datasets["validation"].column_names
     elif training_args.do_predict:
-        column_names = raw_datasets["test"].column_names
+        column_names = raw_datasets["validation"].column_names  # TODO: debug
     elif knn_args.build_index:
         logger.info("Building index")
     else:
@@ -551,9 +552,10 @@ def main():
 
     if training_args.do_predict:
         max_target_length = data_args.val_max_target_length
-        if "test" not in raw_datasets:
-            raise ValueError("--do_predict requires a test dataset")
-        predict_dataset = raw_datasets["test"]
+        # TODO: debug
+        #if "test" not in raw_datasets:
+        #    raise ValueError("--do_predict requires a test dataset")
+        predict_dataset = raw_datasets[data_args.eval_subset]
         if data_args.max_predict_samples is not None:
             max_predict_samples = min(len(predict_dataset), data_args.max_predict_samples)
             predict_dataset = predict_dataset.select(range(max_predict_samples))
@@ -719,10 +721,17 @@ def main():
                 predictions = tokenizer.batch_decode(
                     predict_results.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
                 )
-                predictions = [pred.strip() for pred in predictions]
+                inputs = tokenizer.batch_decode(
+                    predict_dataset['input_ids'], skip_special_tokens=True, clean_up_tokenization_spaces=True
+                )
+                labels = tokenizer.batch_decode(
+                    predict_dataset['labels'], skip_special_tokens=True, clean_up_tokenization_spaces=True
+                )
                 output_prediction_file = os.path.join(training_args.output_dir, "generated_predictions.txt")
                 with open(output_prediction_file, "w", encoding="utf-8") as writer:
-                    writer.write("\n".join(predictions))
+                    for inp, lab, pred in zip(inputs, labels, predictions):
+                        inp, lab, pred = inp.strip(), lab.strip(), pred.strip()
+                        writer.write(f'{inp}\t{lab}\t{pred}\n')
 
     kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks": "translation"}
     if data_args.dataset_name is not None:
