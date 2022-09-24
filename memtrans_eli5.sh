@@ -14,62 +14,39 @@
 # env
 source env.sh
 
-: '
-model=K024/mt5-zh-ja-en-trimmed
-output=checkpoints/translation/wmt19_enzh_val/memtrans
-dataset=wmt19
-dataset_config=zh-en
+model=allenai/tk-instruct-base-def-pos
+output=checkpoints/eli5/val_astarget_answer/memtrans
+train_file=data/eli5/val_astarget_answer_evidence.json
+validation_file=data/eli5/val_astarget_answer_qa.json
 source_lang=en
 target_lang=zh
-split=validation
+split=train
 num_samples=1000000000
-prefix="en2zh: "
-dstore_size=116168
-'
-
-: '
-model=K024/mt5-zh-ja-en-trimmed
-output=checkpoints/translation/wmt19_enzh_train200k/memtrans
-dataset=wmt19
-dataset_config=zh-en
-source_lang=en
-target_lang=zh
-split=train
-num_samples=200000
-prefix="en2zh: "
-dstore_size=5980103
-'
-
-model=K024/mt5-zh-ja-en-trimmed
-output=checkpoints/translation/wmt19_enzh_train100k/memtrans
-dataset=wmt19
-dataset_config=zh-en
-source_lang=en
-target_lang=zh
-split=train
-num_samples=100000
-prefix="en2zh: "
-dstore_size=2974871
+prefix="Definition: Given a question, generate a relevant answer to the question. Input: "
+suffix=" Output:"
+dstore_size=1328738
 
 python -u run_translation.py \
   --model_name_or_path ${model} \
-  --dataset_name ${dataset} --dataset_config_name ${dataset_config} \
+  --train_file ${train_file} --validation_file ${validation_file} \
   --source_lang ${source_lang} --target_lang ${target_lang} \
   --output_dir ${output} \
   --dstore_dir ${output} \
   --per_device_train_batch_size=4 --per_device_eval_batch_size=4 \
   --do_eval --eval_subset ${split} --max_eval_samples ${num_samples} \
   --source_prefix "${prefix}" \
+  --source_suffix "${suffix}" \
   --save_knnlm_dstore --build_index --memtrans
 
 python -u run_translation.py \
   --model_name_or_path ${model} \
-  --dataset_name ${dataset} --dataset_config_name ${dataset_config} \
+  --train_file ${train_file} --validation_file ${validation_file} \
   --source_lang ${source_lang} --target_lang ${target_lang} \
   --output_dir ${output} \
   --dstore_dir ${output} \
   --per_device_train_batch_size=4 --per_device_eval_batch_size=4 \
-  --do_predict --eval_subset validation --predict_with_generate --max_predict_samples 500 \
+  --do_predict --eval_subset validation --predict_with_generate \
   --source_prefix "${prefix}" \
+  --source_suffix "${suffix}" \
   --dstore_size ${dstore_size} \
   --memtrans --k 1

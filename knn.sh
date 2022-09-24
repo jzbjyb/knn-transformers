@@ -16,7 +16,7 @@ source env.sh
 
 : '
 model=t5-small
-output=checkpoints-translation/wmt16_enro_train_knn
+output=checkpoints/translation/wmt16_enro_train/knn
 dataset=wmt16
 dataset_config=ro-en
 source_lang=en
@@ -24,12 +24,13 @@ target_lang=ro
 split=train
 num_samples=1000000000
 prefix="translate English to Romanian: "
+use_approx_index=true
 dstore_size=26565876
 '
 
 : '
 model=K024/mt5-zh-ja-en-trimmed
-output=checkpoints-translation/wmt19_enzh_val_knn
+output=checkpoints/translation/wmt19_enzh_val/knn
 dataset=wmt19
 dataset_config=zh-en
 source_lang=en
@@ -37,12 +38,13 @@ target_lang=zh
 split=validation
 num_samples=1000000000
 prefix="en2zh: "
+use_approx_index=true
 dstore_size=116168
 '
 
 : '
 model=K024/mt5-zh-ja-en-trimmed
-output=checkpoints-translation/wmt19_enzh_train200k_knn
+output=checkpoints/translation/wmt19_enzh_train200k/knn
 dataset=wmt19
 dataset_config=zh-en
 source_lang=en
@@ -50,11 +52,13 @@ target_lang=zh
 split=train
 num_samples=200000
 prefix="en2zh: "
+use_approx_index=true
 dstore_size=5980103
 '
 
+: '
 model=K024/mt5-zh-ja-en-trimmed
-output=checkpoints-translation/wmt19_enzh_train100k_knn
+output=checkpoints/translation/wmt19_enzh_train100k/knn
 dataset=wmt19
 dataset_config=zh-en
 source_lang=en
@@ -62,9 +66,37 @@ target_lang=zh
 split=train
 num_samples=100000
 prefix="en2zh: "
+use_approx_index=true
+dstore_size=2974871
+'
+
+: '
+model=K024/mt5-zh-ja-en-trimmed
+output=checkpoints/translation/wmt19_enzh_val/knn_exact
+dataset=wmt19
+dataset_config=zh-en
+source_lang=en
+target_lang=zh
+split=validation
+num_samples=1000000000
+prefix="en2zh: "
+use_approx_index=false
+dstore_size=116168
+'
+
+model=K024/mt5-zh-ja-en-trimmed
+output=checkpoints/translation/wmt19_enzh_train100k/knn_exact
+dataset=wmt19
+dataset_config=zh-en
+source_lang=en
+target_lang=zh
+split=train
+num_samples=100000
+prefix="en2zh: "
+use_approx_index=false
 dstore_size=2974871
 
-python -u run_translation.py  \
+python -u run_translation.py \
   --model_name_or_path ${model} \
   --dataset_name ${dataset} --dataset_config_name ${dataset_config} \
   --source_lang ${source_lang} --target_lang ${target_lang} \
@@ -75,7 +107,7 @@ python -u run_translation.py  \
   --source_prefix "${prefix}" \
   --save_knnlm_dstore
 
-python -u run_translation.py  \
+python -u run_translation.py \
   --model_name_or_path ${model} \
   --dataset_name ${dataset} --dataset_config_name ${dataset_config} \
   --source_lang ${source_lang} --target_lang ${target_lang} \
@@ -83,9 +115,9 @@ python -u run_translation.py  \
   --dstore_dir ${output} \
   --per_device_train_batch_size 4 --per_device_eval_batch_size=4 \
   --dstore_size ${dstore_size} \
-  --build_index
+  --build_index --use_approx_index ${use_approx_index}
 
-python -u run_translation.py  \
+python -u run_translation.py \
   --model_name_or_path ${model} \
   --dataset_name ${dataset} --dataset_config_name ${dataset_config} \
   --source_lang ${source_lang} --target_lang ${target_lang} \
@@ -95,4 +127,4 @@ python -u run_translation.py  \
   --do_predict --eval_subset validation --predict_with_generate --max_predict_samples 500 \
   --source_prefix "${prefix}" \
   --dstore_size ${dstore_size} \
-  --knn_temp 50 --k 1 --lmbda 0.5 --retomaton
+  --knn_temp 50 --k 32 --lmbda 0.25 --retomaton

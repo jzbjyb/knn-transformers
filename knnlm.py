@@ -38,11 +38,21 @@ class KEY_TYPE(Enum):
             raise ValueError()
 
 class KNNWrapper(object):
-    def __init__(self, dstore_size, dstore_dir, dimension, 
-            knn_sim_func=None, knn_keytype=None,
-            no_load_keys=False, move_dstore_to_mem=False, knn_gpu=True,
-            recompute_dists = False,
-            k=1024, lmbda=0.25, knn_temp=1.0, probe=32):
+    def __init__(
+        self, 
+        dstore_size: int,
+        dstore_dir: str,
+        dimension: int, 
+        knn_sim_func: DIST = None,
+        knn_keytype: KEY_TYPE = None,
+        no_load_keys: bool = False,
+        move_dstore_to_mem: bool = False,
+        knn_gpu: bool = True,
+        recompute_dists: bool = False,
+        k: int = 1024,
+        lmbda: float = 0.25,
+        knn_temp: float = 1.0,
+        probe: int = 32):
         self.dstore_size = dstore_size
         self.dstore_dir = dstore_dir
         self.dimension = dimension
@@ -98,7 +108,8 @@ class KNNWrapper(object):
         # and reconstructing key vectors given their ids
         # currently, this is implemented only for CPU indexes:
         # https://github.com/facebookresearch/faiss/issues/2181
-        cpu_index.make_direct_map()
+        if hasattr(cpu_index, 'make_direct_map'):
+            cpu_index.make_direct_map()
 
         keys_vals_prefix = get_dstore_path(self.dstore_dir, self.model.config.model_type, self.dstore_size, self.dimension)
         if not self.no_load_keys:
@@ -276,11 +287,18 @@ class KNNWrapper(object):
 
 
 class KNNSaver(object):
-    def __init__(self, dstore_size, dstore_dir, dimension, knn_keytype=None):
+    def __init__(
+        self, 
+        dstore_size: int,
+        dstore_dir: str,
+        dimension: int,
+        knn_keytype: KEY_TYPE = None,
+        use_approx_index: bool = True):
         self.dstore_size = dstore_size
         self.dstore_dir = dstore_dir
         self.dimension = dimension
         self.knn_keytype = KEY_TYPE.last_ffn_input if knn_keytype is None else knn_keytype
+        self.use_approx_index = use_approx_index
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -374,8 +392,19 @@ class KNNSaver(object):
             self.model.forward = self.original_forward_func
             self.model.broken_into = None
 
-    def build_index(self, num_keys_to_add_at_a_time=1000000, 
-            ncentroids=4096, seed=1, code_size=64, probe=32):
+    def build_index(self, *args, **kwargs):
+        if self.use_approx_index:
+            self.build_index_approx(*args, **kwargs)
+        else:
+            self.build_index_exact(*args, **kwargs)
+
+    def build_index_approx(
+        self, 
+        num_keys_to_add_at_a_time: int = 1000000, 
+        ncentroids: int = 4096,
+        seed: int = 1,
+        code_size: int = 64,
+        probe: int = 32):
         logger.info('Building index')
         index_name = get_index_path(self.dstore_dir, self.model.config.model_type, self.dstore_size, self.dimension) 
         
@@ -414,7 +443,35 @@ class KNNSaver(object):
         start = time.time()
         faiss.write_index(index, f'{index_name}')
         logger.info(f'Writing index took {time.time() - start} s')
-        
+
+    def build_index_exact(
+        self, 
+        num_keys_to_add_at_a_time: int = 1000000):
+        logger.info('Building index')
+        index_name = get_index_path(self.dstore_dir, self.model.config.model_type, self.dstore_size, self.dimension)
+        index = faiss.IndexFlatL2(self.dimension)
+
+        logger.info('Adding Keys')
+        start = 0
+        start_time = time.time()
+        while start < self.dstore_size:
+            end = min(self.dstore_size, start + num_keys_to_add_at_a_time)
+            to_add = self.dstore_keys[start:end].copy()
+            index.add(torch.tensor(to_add.astype(np.float32)))
+            start += num_keys_to_add_at_a_time
+
+            if (start % 1000000) == 0:
+                logger.info(f'Added {start} tokens so far')
+                logger.info(f'Writing Index {start}')
+                faiss.write_index(index, f'{index_name}')
+
+        logger.info(f'Adding total {start} keys')
+        logger.info(f'Adding took {time.time() - start_time} s')
+        logger.info(f'Writing Index to {index_name}')
+        start = time.time()
+        faiss.write_index(index, f'{index_name}')
+        logger.info(f'Writing index took {time.time() - start} s')
+
     def get_metrics(self):
         return {}
 

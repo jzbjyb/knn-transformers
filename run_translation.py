@@ -220,6 +220,9 @@ class DataTrainingArguments:
     source_prefix: Optional[str] = field(
         default=None, metadata={"help": "A prefix to add before every source text (useful for T5 models)."}
     )
+    source_suffix: Optional[str] = field(
+        default=None, metadata={"help": "A suffix to add after every source text (useful for T5 models)."}
+    )
     forced_bos_token: Optional[str] = field(
         default=None,
         metadata={
@@ -278,6 +281,7 @@ class KNNArguments:
     no_load_keys: bool = field(default=True)
     recompute_dists: bool = field(default=False)
     knn_drop: float = field(default=0.0)
+    use_approx_index: bool = field(default=True)
 
     ## RetoMaton args:
     retomaton: bool = field(default=False)
@@ -438,6 +442,7 @@ def main():
         raise ValueError("Make sure that `config.decoder_start_token_id` is correctly defined")
 
     prefix = data_args.source_prefix if data_args.source_prefix is not None else ""
+    suffix = data_args.source_suffix if data_args.source_suffix is not None else ""
 
     # Preprocessing the datasets.
     # We need to tokenize inputs and targets.
@@ -488,7 +493,7 @@ def main():
     def preprocess_function(examples):
         inputs = [ex[source_lang] for ex in examples["translation"]]
         targets = [ex[target_lang] for ex in examples["translation"]]
-        inputs = [prefix + inp for inp in inputs]
+        inputs = [prefix + inp + suffix for inp in inputs]
         model_inputs = tokenizer(inputs, max_length=data_args.max_source_length, padding=padding, truncation=True)
 
         # Setup the tokenizer for targets
@@ -658,7 +663,7 @@ def main():
     elif knn_args.save_knnlm_dstore or knn_args.build_index:
         training_args.predict_with_generate = False
         knn_wrapper = KNNSaver(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
-            dimension=dimension, knn_keytype=knn_args.knn_keytype)
+            dimension=dimension, knn_keytype=knn_args.knn_keytype, use_approx_index=knn_args.use_approx_index)
     
     if knn_wrapper is not None:
         knn_wrapper.break_into(model)
