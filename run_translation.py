@@ -223,6 +223,9 @@ class DataTrainingArguments:
     source_suffix: Optional[str] = field(
         default=None, metadata={"help": "A suffix to add after every source text (useful for T5 models)."}
     )
+    generation_file: Optional[str] = field(
+        default="generated_predictions.txt", metadata={"help": "The file to save the generated output."}
+    )
     forced_bos_token: Optional[str] = field(
         default=None,
         metadata={
@@ -732,7 +735,7 @@ def main():
                 labels = tokenizer.batch_decode(
                     predict_dataset['labels'], skip_special_tokens=True, clean_up_tokenization_spaces=True
                 )
-                output_prediction_file = os.path.join(training_args.output_dir, "generated_predictions.txt")
+                output_prediction_file = os.path.join(training_args.output_dir, data_args.generation_file)
                 with open(output_prediction_file, "w", encoding="utf-8") as writer:
                     for inp, lab, pred in zip(inputs, labels, predictions):
                         inp, lab, pred = inp.strip(), lab.strip(), pred.strip()

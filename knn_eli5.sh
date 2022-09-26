@@ -6,13 +6,17 @@
 #SBATCH --ntasks-per-node=1
 #SBATCH --time=3:00:00
 #SBATCH --partition=learnlab
-#SBATCH --mem=256GB
+#SBATCH --mem=128GB
 #SBATCH --constraint=volta32gb
 #SBATCH -o slurm/%j.out
 #SBATCH -e slurm/%j.err
 
 # env
 source env.sh
+
+batch_size=32
+max_target_length=256
+generation_file=generated_predictions.knn_topk32.txt
 
 : '
 model=allenai/tk-instruct-base-def-pos
@@ -28,6 +32,7 @@ suffix=" Output:"
 dstore_size=241910
 '
 
+: '
 model=allenai/tk-instruct-base-def-pos
 output=checkpoints/eli5/val_astarget_answer/knn
 train_file=data/eli5/val_astarget_answer_evidence.json
@@ -39,6 +44,36 @@ num_samples=1000000000
 prefix="Definition: Given a question, generate a relevant answer to the question. Input: "
 suffix=" Output:"
 dstore_size=1328738
+'
+
+: '
+model=google/t5-xl-lm-adapt
+output=checkpoints/eli5/t53b/val_astarget_answer/knn
+train_file=data/eli5/val_astarget_answer_evidence.json
+validation_file=data/eli5/val_astarget_answer_qa.json
+source_lang=en
+target_lang=zh
+split=train
+num_samples=1000000000
+prefix="Definition: Given a question, generate a descriptive answer. Question: "
+suffix=" Evidence:"
+#suffix=" Answer:"
+dstore_size=1328738
+'
+
+model=google/t5-xl-lm-adapt
+output=checkpoints/eli5/t53b/val_astarget_prov/knn
+train_file=data/eli5/val_astarget_prov_evidence.json
+validation_file=data/eli5/val_astarget_prov_qa.json
+source_lang=en
+target_lang=zh
+split=train
+num_samples=1000000000
+prefix="Definition: Given a question, generate a descriptive answer. Question: "
+#suffix=" Evidence:"
+suffix=" Answer:"
+use_approx_index=false
+dstore_size=306645
 
 python -u run_translation.py  \
   --model_name_or_path ${model} \
@@ -46,8 +81,8 @@ python -u run_translation.py  \
   --source_lang ${source_lang} --target_lang ${target_lang} \
   --output_dir ${output} \
   --dstore_dir ${output} \
-  --per_device_train_batch_size 4 --per_device_eval_batch_size=4 \
-  --do_eval --eval_subset ${split} --max_eval_samples ${num_samples} \
+  --per_device_train_batch_size ${batch_size} --per_device_eval_batch_size ${batch_size} \
+  --do_eval --eval_subset ${split} --max_eval_samples ${num_samples} --max_target_length ${max_target_length} \
   --source_prefix "${prefix}" \
   --source_suffix "${suffix}" \
   --save_knnlm_dstore
@@ -58,9 +93,9 @@ python -u run_translation.py  \
   --source_lang ${source_lang} --target_lang ${target_lang} \
   --output_dir ${output} \
   --dstore_dir ${output} \
-  --per_device_train_batch_size 4 --per_device_eval_batch_size=4 \
+  --per_device_train_batch_size ${batch_size} --per_device_eval_batch_size ${batch_size} \
   --dstore_size ${dstore_size} \
-  --build_index
+  --build_index --use_approx_index ${use_approx_index}
 
 python -u run_translation.py  \
   --model_name_or_path ${model} \
@@ -68,9 +103,10 @@ python -u run_translation.py  \
   --source_lang ${source_lang} --target_lang ${target_lang} \
   --output_dir ${output} \
   --dstore_dir ${output} \
-  --per_device_train_batch_size 4 --per_device_eval_batch_size=4 \
-  --do_predict --eval_subset validation --predict_with_generate \
+  --generation_file ${generation_file} \
+  --per_device_train_batch_size ${batch_size} --per_device_eval_batch_size ${batch_size} \
+  --do_predict --eval_subset validation --predict_with_generate --max_target_length ${max_target_length} \
   --source_prefix "${prefix}" \
   --source_suffix "${suffix}" \
   --dstore_size ${dstore_size} \
-  --knn_temp 50 --k 1 --lmbda 0.5 --retomaton
+  --knn_temp 50 --k 32 --lmbda 0.25 --retomaton

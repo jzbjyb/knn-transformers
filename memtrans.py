@@ -123,13 +123,14 @@ class MemTransDatastore(object):
             start = time.time()
             self.keys = torch.from_numpy(self.keys[:])
             self.values = torch.from_numpy(self.values[:])
-            # TODO: debug
+            # TODO: move keys and values to gpu 
             #self.keys = self.keys.to(self.device)
             #self.values = self.values.to(self.device)
             logger.info('Moving to memory took {} s'.format(time.time() - start))
         
         # load index
         self.indices = []
+        res = faiss.StandardGpuResources()
         for h in range(self.n_heads):
             start = time.time()
             index_name = self.get_index_path(head_idx=h)
@@ -137,7 +138,7 @@ class MemTransDatastore(object):
             logger.info(f'Loading index took {time.time() - start} s')
             if self.use_cuda:  # move index to gpu
                 start = time.time()
-                gpu_index = faiss.index_cpu_to_gpu(faiss.StandardGpuResources(), self.cuda_idx, cpu_index)
+                gpu_index = faiss.index_cpu_to_gpu(res, self.cuda_idx, cpu_index)
                 logger.info(f'Moving index to GPU took {time.time() - start} s')
             else:
                 gpu_index = cpu_index
@@ -538,7 +539,7 @@ class MemTransWrapper(object):
     
     layer_to_capture = {
         't5': {
-            'memtrans': lambda model: model.base_model.decoder.block[-3].layer[0].SelfAttention,
+            'memtrans': lambda model: model.base_model.decoder.block[-6].layer[0].SelfAttention,  # TODO: debug
             'firstattn': lambda model: model.base_model.decoder.block[0].layer[0].SelfAttention
         },
         'mt5': {

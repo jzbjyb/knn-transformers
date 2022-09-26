@@ -34,8 +34,12 @@ class Wikipedia(object):
                     prov.append(page['text'][pi])
         return ' '.join(prov)
 
-def prep_eli5(args, split: str = 'validation', method: str = 'use_provenance'):
-    assert method in {'use_provenance', 'use_answer'}
+def prep_eli5(
+    args, 
+    split: str = 'validation', 
+    evidence_method: str = 'provenance', 
+    skip_answer_as_evidence: bool = True):
+    assert evidence_method in {'provenance', 'self_provenance', 'answer', 'self_answer'}
 
     qa_file = f'{args.out_file}_qa.json'
     prov_file = f'{args.out_file}_evidence.json'
@@ -52,25 +56,32 @@ def prep_eli5(args, split: str = 'validation', method: str = 'use_provenance'):
             for ans_or_provs in example['output']:
                 ans = ans_or_provs['answer'].strip()
                 provs = ans_or_provs['provenance']
+
+                this_is_ans = False
                 if ans and answer is None:  # use the first answer as the qa pair
+                    this_is_ans = True
                     answer = ans
-                else:
-                    if method == 'use_provenance' and len(provs):  # collect all provenance
+                if 'self' in evidence_method or not skip_answer_as_evidence or not this_is_ans:  # whether use the real answer
+                    if 'provenance' in evidence_method and len(provs):  # collect all provenance
                         for prov in provs:
                             wiki_id = prov['wikipedia_id']
                             ps, pe, cs, ce = prov['start_paragraph_id'], prov['end_paragraph_id'], prov['start_character'], prov['end_character']
                             #prov = prov['meta']['evidence_span'][-1].split('\r')[0]
                             prov = wikipedia.get_provenance(wiki_id, ps, pe, cs, ce, whole_paragraph=True)  # always use the whole paragraph
                             evidences.append(prov)
-                    if method == 'use_answer' and ans:
+                    if 'answer' in evidence_method and ans:
                         evidences.append(ans)
             
             # write qa pairs
             qfin.write(json.dumps({'translation': {'en': inp, 'zh': answer}}) + '\n')
 
             # write evidences
-            for evi in evidences:
-                pfin.write(json.dumps({'translation': {'en': inp, 'zh': evi}}) + '\n')
+            if 'self' in evidence_method:
+                for evi in evidences:
+                    pfin.write(json.dumps({'translation': {'en': inp, 'zh': answer, 'decoder_prefix': evi}}) + '\n')
+            else:
+                for evi in evidences:
+                    pfin.write(json.dumps({'translation': {'en': inp, 'zh': evi}}) + '\n')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -82,4 +93,4 @@ if __name__ == '__main__':
     random.seed(2022)
 
     if args.task == 'eli5':
-        prep_eli5(args, method='use_answer')
+        prep_eli5(args, evidence_method='answer', skip_answer_as_evidence=False)
