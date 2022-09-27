@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import Tuple, Union, List
 import os
 import logging
 import time
@@ -51,48 +51,75 @@ class MemTransDatastore(object):
     def get_index_path(self, head_idx: int) -> str:
         return get_index_path(self.directory, self.model_type, self.size, self.dimension, head_idx=head_idx)
     
-    def get_dstore_path(self) -> Tuple[str, str]:
+    def get_dstore_path(self) -> Tuple[str, str, str, str]:
         prefix = get_dstore_path(self.directory, self.model_type, self.size, self.dimension)
         key_file = f'{prefix}_keys.npy'
         val_file = f'{prefix}_vals.npy'
-        return key_file, val_file
+        tok_file = f'{prefix}_tokens.npy'
+        id_file = f'{prefix}_ids.npy'
+        return key_file, val_file, tok_file, id_file
     
     def load_or_init_dstore(self):
         start = time.time()
-        key_file, val_file = self.get_dstore_path()
-        if os.path.exists(key_file) and os.path.exists(val_file):
+        key_file, val_file, tok_file, id_file = self.get_dstore_path()
+        if os.path.exists(key_file):
             mode = 'r'
         else:
             mode = 'w+'
             Path(key_file).parent.mkdir(parents=True, exist_ok=True)
         self.keys = np.memmap(key_file, dtype=self.precision, mode=mode, shape=(self.n_heads, self.size, self.dimension))
         self.values = np.memmap(val_file, dtype=self.precision, mode=mode, shape=(self.n_heads, self.size, self.dimension))
+        try:  # load tokens and ids if exists
+            self.tokens = np.memmap(tok_file, dtype=np.int32, mode=mode, shape=(self.size))
+            self.ids = np.memmap(id_file, dtype=np.int32, mode=mode, shape=(self.size))
+        except:
+            self.tokens = self.ids = None
         logger.info(f'Loading dstore took {time.time() - start} s')
     
     def save_labels(
         self, 
-        labels: torch.LongTensor):  # (batch_size, seq_length)
+        labels: torch.LongTensor,  # (batch_size, seq_length)
+        decoder_input_ids: torch.LongTensor = None):  # (batch_size, seq_length)
         self._labels = labels
+        self._decoder_input_ids = decoder_input_ids
     
     def get_labels(self):
-        return self._labels
+        return self._labels, self._decoder_input_ids
+    
+    def save_decoder_input_ids(self, decoder_input_ids: torch.LongTensor):  # (batch_size, seq_length)
+        self._decoder_input_ids = decoder_input_ids  # should be consistent with save_labels
+    
+    def get_decoder_input_ids(self):
+        return self._decoder_input_ids
 
     def save_key_value(
         self,
         keys: torch.FloatTensor,  # (n_heads, n_tokens, dim_per_head)
-        values: torch.FloatTensor):  # (n_heads, n_tokens, dim_per_head)
+        values: torch.FloatTensor,  # (n_heads, n_tokens, dim_per_head)
+        tokens: torch.LongTensor = None,  # (n_tokens)
+        ids: torch.LongTensor = None,  # (n_tokens)
+        ):
+        assert keys.size(1) == values.size(1) == tokens.size(0) == ids.size(0)
         nh, nt, dim = keys.size()
         assert nh == self.n_heads and dim == self.dimension, 'keys and values are in a wrong shape'
 
+        # truncate
         assert self.cur_idx <= self.size, 'datastore overflow'
         if self.cur_idx + nt > self.size:
             nt = self.size - self.cur_idx
             keys = keys[:nt]
             values = values[:nt]
+            tokens = tokens[:nt] if tokens is not None else tokens
+            ids = ids[:nt] if ids is not None else ids
         
+        # save to memmap
         try:
             self.keys[:, self.cur_idx:(nt + self.cur_idx)] = keys.cpu().numpy().astype(self.precision)
             self.values[:, self.cur_idx:(nt + self.cur_idx)] = values.cpu().numpy().astype(self.precision)
+            if tokens is not None:
+                self.tokens[self.cur_idx:(nt + self.cur_idx)] = tokens.cpu().numpy().astype(np.int32)
+            if ids is not None:
+                self.ids[self.cur_idx:(nt + self.cur_idx)] = ids.cpu().numpy().astype(np.int32)
         except ValueError as ex:
             logger.error(f'Error saving datastore with mode {self.keys.mode}, did you try to save an already existing datastore?')
             logger.error(f'Delete the files {self.keys.filename} and {self.values.filename} and try again')
@@ -123,6 +150,10 @@ class MemTransDatastore(object):
             start = time.time()
             self.keys = torch.from_numpy(self.keys[:])
             self.values = torch.from_numpy(self.values[:])
+            if self.tokens is not None:
+                self.tokens = torch.from_numpy(self.tokens[:])
+            if self.ids is not None:
+                self.ids = torch.from_numpy(self.ids[:])
             # TODO: move keys and values to gpu 
             #self.keys = self.keys.to(self.device)
             #self.values = self.values.to(self.device)
@@ -147,44 +178,127 @@ class MemTransDatastore(object):
     def get_knns(
         self, 
         queries: torch.FloatTensor,  # (n_heads, batch_size, dim)
-        topk: int):
+        topk: int,
+        return_all: bool = False):
         ori_device = queries.device
         queries = queries.to(self.device)
-        ret_ks, ret_vs = [], []
+        ret_ks, ret_vs, ret_ts, ret_ids = [], [], [], []
         for h in range(self.n_heads):
             index = self.indices[h]
             dists, indices = index.search(queries[h].contiguous(), topk)  # (batch_size, topk)
             indices = indices.to(self.device)
             ret_ks.append(self.keys[h][indices])  # (batch_size, topk, dim)
             ret_vs.append(self.values[h][indices])  # (batch_size, topk, dim)
-        ret_ks = torch.cat(ret_ks, dim=0).to(ori_device)  # (n_heads, batch_size, topk, dim)
-        ret_vs = torch.cat(ret_vs, dim=0).to(ori_device)  # (n_heads, batch_size, topk, dim)
+            if return_all:
+                assert self.tokens is not None
+                ret_ts.append(self.tokens[indices])  # (batch_size, topk)
+                assert self.ids is not None
+                ret_ids.append(self.ids[indices])  # (batch_size, topk)
+            
+        ret_ks = torch.stack(ret_ks, dim=0).to(ori_device)  # (n_heads, batch_size, topk, dim)
+        ret_vs = torch.stack(ret_vs, dim=0).to(ori_device)  # (n_heads, batch_size, topk, dim)
+        if return_all:
+            ret_ts = torch.stack(ret_ts, dim=0).to(ori_device)  # (n_heads, batch_size, topk)
+            ret_ids = torch.stack(ret_ids, dim=0).to(ori_device)  # (n_heads, batch_size, topk)
+            return ret_ks, ret_vs, ret_ts, ret_ids
         return ret_ks, ret_vs
 
+class RetrievalTracker(object):
+    def __init__(
+        self,
+        track_file: str,
+        n_heads: int,
+        topk: int,
+        eos_token_id: int):
+        self.track_file = track_file
+        self.n_heads = n_heads
+        self.topk = topk
+        self.eos_token_id = eos_token_id
+        self.handle = open(track_file + f'_h{n_heads}_k{topk}.txt', 'w') if track_file is not None else None
+        # each item corresponds to one step
+        self.predictions: List[torch.LongTensor] = []  # (seq_len, batch_size)
+        self.retrieved_tokens: List[torch.LongTensor] = []  # (seq_len, batch_size, n_heads, topk)
+        self.retrieved_ids: List[torch.LongTensor] = []  # (seq_len, batch_size, n_heads, topk)
+
+    def add_single_step_batched(
+        self, 
+        prediction: torch.LongTensor,  # (batch_size)
+        retrieved_token: torch.LongTensor,  # (batch_size, n_heads, topk)
+        retrieved_id: torch.LongTensor):  # (batch_size, n_heads, topk)
+        assert prediction.size(0) == retrieved_token.size(0) == retrieved_id.size(0)
+        self.predictions.append(prediction)
+        self.retrieved_tokens.append(retrieved_token)
+        self.retrieved_ids.append(retrieved_id)
+    
+    def _write(self, text: str):
+        if self.handle is None:
+            print(text, end='')
+        else:
+            self.handle.write(text)
+
+    def write(self):
+        predictions = torch.stack(self.predictions, dim=1)  # (batch_size, seq_len)
+        retrieved_tokens = torch.stack(self.retrieved_tokens, dim=1)  # (batch_size, seq_len, n_heads, topk)
+        retrieved_ids = torch.stack(self.retrieved_ids, dim=1)  # (batch_size, seq_len, n_heads, topk)
+        retrieved = torch.stack([retrieved_tokens, retrieved_ids], dim=-1)  # (batch_size, seq_len, n_heads, topk, 2)
+        bs, sl, nh, topk = retrieved_tokens.size()
+        agg = torch.cat([predictions.unsqueeze(-1), retrieved.flatten(2, 4)], dim=-1)  # (batch_size, seq_len, 1 + n_heads * topk * 2)
+        for i in range(bs):
+            for j in range(sl):
+                if agg[i, j, 0].item() == self.eos_token_id:  # end of prediction
+                    break
+                s = agg[i, j].tolist()
+                self._write(' '.join(map(str, s)) + '\n')
+            self._write('\n')
+
 class MemTransAttn(object):
-    def __init__(self, dstore: MemTransDatastore, topk: int, stage: str):
+    def __init__(
+        self, 
+        dstore: MemTransDatastore, 
+        topk: int, 
+        eos_token_id: int,
+        stage: str, 
+        track: Union[bool, str] = False):  # track retrieved tokens by printing (bool) or writing to files (str)
         assert stage in {'save', 'retrieve'}
         self.dstore = dstore
         self.topk = topk
         self.stage = stage
+        self.track = track
+        if self.is_track:
+            track_file = self.track if type(self.track) is str else None
+            self.tracker = RetrievalTracker(track_file=track_file, n_heads=dstore.n_heads, topk=topk, eos_token_id=eos_token_id)
+        self.id_offset = 0  # example idx
+
+    @property
+    def is_track(self):
+        return bool(self.track)
 
     def save(
         self,
         key_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
         value_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
     ):
+        bs, _, sl, _ = key_states.size()
+
         # get mask
-        labels = self.dstore.get_labels().flatten(0, 1)  # (batch * seq_length)
+        labels, decoder_input_ids = self.dstore.get_labels()  # (batch, seq_length)
+        labels, decoder_input_ids = labels.flatten(0, 1), decoder_input_ids.flatten(0, 1)  # (batch * seq_length)
         mask = labels != -100
+
+        # get idx
+        ids = self.id_offset + torch.arange(bs).unsqueeze(-1).repeat(1, sl).flatten(0, 1)  # (batch * seq_length)
+        self.id_offset += bs
         
         # remove padding tokens
         key_states = key_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
         value_states = value_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
         key_states = key_states[:, mask, :]  # (n_heads, n_tokens, dim_per_head)
         value_states = value_states[:, mask, :]  # (n_heads, n_tokens, dim_per_head)
+        tokens = decoder_input_ids[mask]  # (n_tokens)
+        ids = ids[mask]  # (n_tokens)
 
         # save
-        self.dstore.save_key_value(key_states, value_states)
+        self.dstore.save_key_value(key_states, value_states, tokens=tokens, ids=ids)
 
     def retrieve(
         self,
@@ -192,7 +306,22 @@ class MemTransAttn(object):
     ):
         bs, nh, sl, d = query_states.size()
         query_states = query_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
-        ret_ks, ret_vs = self.dstore.get_knns(query_states, topk=self.topk)  # (n_heads, batch_size * seq_length, topk, dim_per_head)
+        
+        if self.is_track:
+            # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
+            ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns(query_states, topk=self.topk, return_all=self.is_track)
+            input_ids = self.dstore.get_decoder_input_ids()  # (batch_size, seq_length)
+            if sl == 1:  # only track the generation process (not for the evaluation process)
+                self.tracker.add_single_step_batched(
+                    prediction=input_ids.squeeze(-1), 
+                    retrieved_token=ret_ts.permute(1, 0, 2), 
+                    retrieved_id=ret_ids.permute(1, 0, 2))
+            else:  # write in evaluation process
+                self.tracker.write()
+        else:
+            # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2
+            ret_ks, ret_vs = self.dstore.get_knns(query_states, topk=self.topk, return_all=self.is_track)
+        
         ret_ks = ret_ks.view(nh, bs, sl, self.topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
         ret_vs = ret_vs.view(nh, bs, sl, self.topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
         ret_ks = ret_ks.permute(1, 0, 2, 3, 4)  # (batch_size, n_heads, seq_length, topk, dim_per_head)
@@ -501,6 +630,10 @@ class MemTransWrapper(object):
         # save labels for masking
         self.original_forward_func = model.forward
         model.forward = self.pre_forward_hook
+
+        # save decoder input for debugging
+        self.original_decoder_forward_func = model.decoder.forward
+        model.decoder.forward = self.pre_decoder_forward_hook
         
         # replace the attention layer with retrieval-augmented attention layer
         attn_layer = self.get_layer()
@@ -520,13 +653,19 @@ class MemTransWrapper(object):
             self.dstore.load_index()
         
         # inject MemTransAttn
-        self.mta = MemTransAttn(dstore=self.dstore, topk=self.k, stage=self.stage)
+        eos_token_id = self.model.config.eos_token_id
+        self.mta = MemTransAttn(dstore=self.dstore, topk=self.k, eos_token_id=eos_token_id, stage=self.stage)
         attn_layer.relative_attention_bias = self.get_layer(key='firstattn').relative_attention_bias
         attn_layer.mta = self.mta
     
     def pre_forward_hook(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
-        self.dstore.save_labels(labels)
+        decoder_input_ids = self.model.prepare_decoder_input_ids_from_labels(labels) if labels is not None else None
+        self.dstore.save_labels(labels, decoder_input_ids)
         return self.original_forward_func(input_ids=input_ids, labels=labels, attention_mask=attention_mask, **kwargs)
+    
+    def pre_decoder_forward_hook(self, input_ids=None, **kwargs):
+        self.dstore.save_decoder_input_ids(input_ids)
+        return self.original_decoder_forward_func(input_ids=input_ids, **kwargs)
 
     def break_out(self):
         if self.model is not None and self.model.broken_into is not None:

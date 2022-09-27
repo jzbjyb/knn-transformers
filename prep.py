@@ -1,8 +1,10 @@
-from typing import List, Tuple
+from typing import List, Tuple, Any
 import argparse
 import random
 import json
 from collections import defaultdict
+import csv
+from transformers import AutoTokenizer
 from datasets import load_dataset
 from kilt.knowledge_source import KnowledgeSource
 
@@ -83,9 +85,47 @@ def prep_eli5(
                 for evi in evidences:
                     pfin.write(json.dumps({'translation': {'en': inp, 'zh': evi}}) + '\n')
 
+def retrieval_track_parse_line(
+    text: str, 
+    n_heads: int, 
+    topk: int, 
+    tokenizer: AutoTokenizer, 
+    hide_id: bool = False,
+    separate_heads: bool = False) -> List[Any]:
+    seq = text.strip().split(' ')
+    new_seq = [tokenizer.convert_ids_to_tokens([seq[0]])[0]]  # prediction token
+    for i in range(1, len(seq)):
+        t = seq[i]
+        i -= 1
+        # convert token id to token
+        if i % 2 == 0:  # token
+            t = tokenizer.convert_ids_to_tokens([t])[0]
+            new_seq.append(t)
+        else:  # id
+            if not hide_id:
+                new_seq.append(t)
+        if separate_heads:  # add separator between heads
+            if (i + 1) % (topk * 2) == 0:
+                new_seq.append('|')
+    return new_seq
+
+def retrieval_track(args):
+    n_heads = 32
+    topk = 4
+    tokenizer = AutoTokenizer.from_pretrained('google/t5-xl-lm-adapt')
+    with open(args.inp_file, 'r') as fin, open(args.inp_file.replace('.txt', '.tsv'), 'w') as fout:
+        tsv_writer = csv.writer(fout, delimiter='\t')
+        for l in fin:
+            if l.strip() == '':
+                tsv_writer.writerow([])
+            else:
+                l = retrieval_track_parse_line(l, n_heads=n_heads, topk=topk, tokenizer=tokenizer, hide_id=True)
+                tsv_writer.writerow(l)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=['eli5'])
+    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=['eli5', 'retrieval_track'])
+    parser.add_argument('--inp_file', type=str, default=None, help='input file')
     parser.add_argument('--out_file', type=str, default=None, help='output file')
     args = parser.parse_args()
 
@@ -94,3 +134,6 @@ if __name__ == '__main__':
 
     if args.task == 'eli5':
         prep_eli5(args, evidence_method='answer', skip_answer_as_evidence=False)
+    
+    elif args.task == 'retrieval_track':
+        retrieval_track(args)
