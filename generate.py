@@ -20,6 +20,7 @@ class GenerationWrapper(object):
         tokenizer: AutoTokenizer,
         args):
         self.model = model
+        self.model.eval()
         self.tokenizer = tokenizer
         self._all_tokens = list(self.tokenizer.get_vocab().values())
 
@@ -63,7 +64,7 @@ class GenerationWrapper(object):
                 example = json.loads(l)['translation']
                 source = example['en'].strip()
                 # skip duplicate source if use_evidence is None
-                if self.use_evidence is None and source == prev_source:
+                if self.use_evidence == 'no' and source == prev_source:
                     continue
                 prev_source = source
                 if self.add_question_mark and re.search('[?!.]$', source) is None:
@@ -71,7 +72,7 @@ class GenerationWrapper(object):
                 source = self.source_prefix + source + self.source_suffix
                 target = example['zh']
                 
-                if self.use_evidence:
+                if self.use_evidence != 'no':
                     evi = example['decoder_prefix'].strip()
                     if self.max_evidence_len:
                         evi = self.clean_by_tokenizer(evi, max_lengh=self.max_evidence_len)
@@ -172,7 +173,7 @@ if __name__ == '__main__':
     parser.add_argument('--source_suffix', type=str, default='', help='source suffix')
     parser.add_argument('--evidence_prefix', type=str, default='', help='decoder prefix prefix')
     parser.add_argument('--evidence_suffix', type=str, default='', help='decoder prefix suffix')
-    parser.add_argument('--use_evidence', type=str, default=None, choices=[None, 'encoder_suffix', 'encoder_prefix', 'decoder_prefix'], help='use evidence in which position')
+    parser.add_argument('--use_evidence', type=str, default='no', choices=['no', 'encoder_suffix', 'encoder_prefix', 'decoder_prefix'], help='use evidence in which position')
     parser.add_argument('--max_gen_len', type=int, default=256, help='max generation length')
     parser.add_argument('--max_evidence_len', type=int, default=128, help='max evidence length')
     # model args

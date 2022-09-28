@@ -14,16 +14,16 @@
 # env
 source env.sh
 
-task=prefix
+task=normal
 
 model=google/t5-xl-lm-adapt
 data_file=data/eli5/val_astarget_selfanswer_evidence.json
 out_file=test.tsv
 
 if [[ ${task} == "normal" ]]; then
-    sp="Definition: Given a question, generate a relevant answer to the question. Input: "
-    ss=" Output:"
-    e=""
+    sp="Definition: Given a question, generate a descriptive answer. Question: "
+    ss=" Answer:"
+    e=no
     ep=""
     es=""
 
@@ -37,11 +37,11 @@ else
     exit
 fi
 
-srun python generate.py \
+python generate.py \
     --model ${model} \
     --data_file ${data_file} \
     --out_file ${out_file} \
-    --batch_size 32 \
+    --batch_size 4 \
     --source_prefix "${sp}" \
     --source_suffix "${ss}" \
     --use_evidence ${e} \

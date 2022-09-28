@@ -18,6 +18,7 @@ Fine-tuning the library models for sequence to sequence.
 """
 # You can also adapt this script on your own sequence to sequence task. Pointers for this are left as comments.
 
+from typing import List
 import logging
 import os
 import sys
@@ -26,6 +27,7 @@ from typing import Optional
 
 import datasets
 import numpy as np
+import torch
 from datasets import load_dataset, load_metric
 
 import transformers
@@ -222,6 +224,9 @@ class DataTrainingArguments:
     )
     source_suffix: Optional[str] = field(
         default=None, metadata={"help": "A suffix to add after every source text (useful for T5 models)."}
+    )
+    target_prefix: Optional[str] = field(
+        default=None, metadata={"help": "A prefix to add before decoding."}
     )
     generation_file: Optional[str] = field(
         default="generated_predictions.txt", metadata={"help": "The file to save the generated output."}
@@ -712,8 +717,18 @@ def main():
     if training_args.do_predict:
         logger.info("*** Predict ***")
 
+        # prepare prefix_allowed_tokens_fn
+        prefix_allowed_tokens_fn = None
+        if data_args.target_prefix:
+            _all_tokens = list(tokenizer.get_vocab().values())
+            target_prefix = tokenizer([data_args.target_prefix], add_special_tokens=False)['input_ids'][0]
+            def prefix_allowed_tokens_fn(batch_id: int, input_ids: torch.Tensor) -> List[int]:
+                if input_ids.shape[-1] > len(target_prefix):
+                    return _all_tokens
+                return target_prefix[input_ids.shape[-1] - 1]
+
         predict_results = trainer.predict(
-            predict_dataset, metric_key_prefix="predict", max_length=max_length, num_beams=num_beams
+            predict_dataset, metric_key_prefix="predict", max_length=max_length, num_beams=num_beams, prefix_allowed_tokens_fn=prefix_allowed_tokens_fn
         )
         metrics = predict_results.metrics
         max_predict_samples = (

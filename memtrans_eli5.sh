@@ -34,7 +34,7 @@ dstore_size=1328738
 
 : '
 model=google/t5-xl-lm-adapt
-output=checkpoints/eli5/t53b/val_astarget_prov/memtrans_withid
+output=checkpoints/eli5/t53b/val_astarget_prov/memtrans
 train_file=data/eli5/val_astarget_prov_evidence.json
 validation_file=data/eli5/val_astarget_prov_qa.json
 source_lang=en
@@ -86,4 +86,5 @@ python -u run_translation.py \
   --source_prefix "${prefix}" \
   --source_suffix "${suffix}" \
   --dstore_size ${dstore_size} \
-  --memtrans --k 1 --max_predict_samples 500
+  --target_prefix "Answer: "
+  #--memtrans --k 1 --max_predict_samples 500

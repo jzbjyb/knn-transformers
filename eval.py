@@ -65,6 +65,7 @@ if __name__ == '__main__':
     parser.add_argument('--tokenizer', type=str, default=None, choices=[None, 'zh'], help='tokenizer used in metrics')
     parser.add_argument('--metrics', type=str, default=['rouge', 'sacrebleu'], choices=['rouge', 'sacrebleu'], nargs='+', help='metrics to report')
     parser.add_argument('--aggregate', type=str, default=None, choices=[None, 'mean', 'max'], help='how to aggregate mutiple examples of the same source')
+    parser.add_argument('--compare', action='store_true', help='compare the predictions from pred_file and pred_file2')
     args = parser.parse_args()
 
     # set random seed to make sure the same examples are sampled across multiple runs
@@ -103,3 +104,12 @@ if __name__ == '__main__':
         metric_vals.extend(perf.values())
     print('\t'.join(metric_keys))
     print('\t'.join(map(str, metric_vals)))
+
+    if args.compare:
+        for (s1, t1, p1), (s2, t2, p2) in zip(examples, examples2):
+            assert t1 == t2
+            print('Q:', s1)
+            print('A:', t1)
+            print('->', p1)
+            print('->', p2)
+            input()

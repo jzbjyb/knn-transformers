@@ -112,7 +112,7 @@ def retrieval_track_parse_line(
 
 def retrieval_track(args):
     n_heads = 32
-    topk = 128
+    topk = 64
     tokenizer = AutoTokenizer.from_pretrained('google/t5-xl-lm-adapt')
     with open(args.inp_file, 'r') as fin, open(args.inp_file.replace('.txt', '.tsv'), 'w') as fout:
         tsv_writer = csv.writer(fout, delimiter='\t')
