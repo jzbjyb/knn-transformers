@@ -14,9 +14,9 @@
 # env
 source env.sh
 
-batch_size=4
+batch_size=32
 max_target_length=256
-generation_file=generated_predictions.txt
+generation_file=generated_predictions.memtrans_topk64_byids-6.txt
 
 : '
 model=allenai/tk-instruct-base-def-pos
@@ -48,6 +48,7 @@ use_approx_index=false
 dstore_size=306645
 '
 
+: '
 model=google/t5-xl-lm-adapt
 output=checkpoints/eli5/t53b/val_astarget_answer/memtrans
 train_file=data/eli5/val_astarget_answer_qa.json
@@ -61,6 +62,23 @@ prefix="Definition: Given a question, generate a descriptive answer. Question: "
 suffix=" Answer:"
 use_approx_index=false
 dstore_size=204498
+'
+
+model=google/t5-xl-lm-adapt
+output=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix
+train_file=data/eli5/val_astarget_answer_qa.json
+validation_file=data/eli5/val_astarget_answer_qa.json
+source_lang=en
+target_lang=zh
+split=train
+num_samples=1000000000
+prefix="Definition: Given a question, generate a descriptive answer. Question: "
+suffix=""
+#target_prefix="Evidence: "
+target_prefix="Answer: "
+target_suffix=""
+use_approx_index=false
+dstore_size=206896
 
 python -u run_translation.py \
   --model_name_or_path ${model} \
@@ -72,6 +90,8 @@ python -u run_translation.py \
   --do_eval --eval_subset ${split} --max_eval_samples ${num_samples} --max_target_length ${max_target_length} \
   --source_prefix "${prefix}" \
   --source_suffix "${suffix}" \
+  --target_prefix "${target_prefix}" \
+  --target_suffix "${target_suffix}" \
   --save_knnlm_dstore --build_index --memtrans
 
 python -u run_translation.py \
@@ -86,5 +106,6 @@ python -u run_translation.py \
   --source_prefix "${prefix}" \
   --source_suffix "${suffix}" \
   --dstore_size ${dstore_size} \
-  --target_prefix "Answer: "
-  #--memtrans --k 1 --max_predict_samples 500
+  --target_prefix "${target_prefix}" \
+  --target_suffix "${target_suffix}" \
+  --memtrans --k 64 --retrieve_by_ids true

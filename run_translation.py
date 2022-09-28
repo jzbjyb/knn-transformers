@@ -18,7 +18,7 @@ Fine-tuning the library models for sequence to sequence.
 """
 # You can also adapt this script on your own sequence to sequence task. Pointers for this are left as comments.
 
-from typing import List
+from typing import List, Union
 import logging
 import os
 import sys
@@ -226,7 +226,10 @@ class DataTrainingArguments:
         default=None, metadata={"help": "A suffix to add after every source text (useful for T5 models)."}
     )
     target_prefix: Optional[str] = field(
-        default=None, metadata={"help": "A prefix to add before decoding."}
+        default="", metadata={"help": "A prefix to add before target."}
+    )
+    target_suffix: Optional[str] = field(
+        default="", metadata={"help": "A suffix to add after target."}
     )
     generation_file: Optional[str] = field(
         default="generated_predictions.txt", metadata={"help": "The file to save the generated output."}
@@ -303,6 +306,8 @@ class KNNArguments:
 
     ## MemTrans args:
     memtrans: bool = field(default=False)
+    retrieve_by_ids: bool = field(default=False)
+    retrieval_track: str = field(default=False)
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -502,6 +507,7 @@ def main():
         inputs = [ex[source_lang] for ex in examples["translation"]]
         targets = [ex[target_lang] for ex in examples["translation"]]
         inputs = [prefix + inp + suffix for inp in inputs]
+        targets = [data_args.target_prefix + tgt + data_args.target_suffix for tgt in targets]
         model_inputs = tokenizer(inputs, max_length=data_args.max_source_length, padding=padding, truncation=True)
 
         # Setup the tokenizer for targets
@@ -651,7 +657,7 @@ def main():
             dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir,
             move_dstore_to_mem=knn_args.move_dstore_to_mem, cuda=knn_args.knn_gpu,
             recompute_dists=knn_args.recompute_dists,
-            k=knn_args.k, stage=stage)
+            k=knn_args.k, stage=stage, track=knn_args.retrieval_track, by_ids=knn_args.retrieve_by_ids)
     elif knn_args.retomaton or knn_args.cluster_dstore:
         knn_wrapper = RetomatonWrapper(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
             dimension=dimension, 

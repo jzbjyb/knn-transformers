@@ -315,12 +315,15 @@ class MemTransAttn(object):
         topk: int, 
         eos_token_id: int,
         stage: str, 
-        track: Union[bool, str] = False):  # track retrieved tokens by printing (bool) or writing to files (str)
+        track: Union[bool, str] = False,  # track retrieved tokens by printing (bool) or writing to files (str)
+        by_ids: bool = False):  # whether to retrieve documents by ids
         assert stage in {'save', 'retrieve'}
         self.dstore = dstore
         self.topk = topk
         self.stage = stage
         self.track = track
+        self.by_ids = by_ids
+        self.by_ids_cache = None  # cache the retrieved results so following decoding steps do not need to retrieve
         if self.is_track:
             track_file = self.track if type(self.track) is str else None
             self.tracker = RetrievalTracker(track_file=track_file, n_heads=dstore.n_heads, topk=topk, eos_token_id=eos_token_id)
@@ -361,20 +364,27 @@ class MemTransAttn(object):
         self,
         query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
         ids: torch.LongTensor = None,  # (batch_size)
-        by_ids: bool = False,
     ):
         bs, nh, sl, d = query_states.size()
         query_states = query_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
+
+        topk = self.topk
+        if sl > 1:  # TODO: eval mode is memory-intensive so we limite topk
+            topk = min(self.topk, 1)
 
         if ids is None:
             ids = torch.arange(bs).to(query_states.device) + self.id_offset
         
         if self.is_track:
             # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
-            if by_ids and sl == 1:  # TODO: support by_ids for evaluation mode
-                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_ids(ids, max_length=self.topk)
+            if self.by_ids and sl == 1:  # TODO: support by_ids for evaluation mode
+                if self.by_ids_cache:
+                    ret_ks, ret_vs, ret_ts, ret_ids = self.by_ids_cache
+                else:
+                    ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_ids(ids, max_length=topk)
+                    self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids)
             else:
-                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns(query_states, topk=self.topk, return_all=self.is_track)
+                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns(query_states, topk=topk, return_all=self.is_track)
             input_ids = self.dstore.get_decoder_input_ids()  # (batch_size, seq_length)
             if sl == 1:  # only track the generation process (not for the evaluation process)
                 self.tracker.add_single_step_batched(
@@ -385,13 +395,14 @@ class MemTransAttn(object):
                 self.tracker.write()
         else:
             # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2
-            if by_ids and sl == 1:
-                ret_ks, ret_vs = self.dstore.get_knns_by_ids(ids, max_length=self.topk)[:2]
+            if self.by_ids and sl == 1:
+                ret_ks, ret_vs = self.dstore.get_knns_by_ids(ids, max_length=topk)[:2]
             else:
-                ret_ks, ret_vs = self.dstore.get_knns(query_states, topk=self.topk, return_all=self.is_track)
+                ret_ks, ret_vs = self.dstore.get_knns(query_states, topk=topk, return_all=self.is_track)
 
         if sl != 1:  # change offset in evaluation process
             self.id_offset += bs
+            self.by_ids_cache = None
         
         actual_topk = ret_ks.size(2)
         ret_ks = ret_ks.view(nh, bs, sl, actual_topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
@@ -511,7 +522,7 @@ class MemTransAttn(object):
         multi_token_eval = sl > 1  # multiple tokens per example in the query_states
 
         if multi_token_eval:
-            assert sl == kl, 'should be in eval mode'
+            assert sl == kl == real_seq_length == key_length, 'should be in eval mode'
 
             # compute the original scores over local context
             # (batch_size, n_heads, seq_length, key_length)
@@ -536,12 +547,9 @@ class MemTransAttn(object):
             attn_weights = nn.functional.dropout(attn_weights, p=ori_attn.dropout, training=ori_attn.training)
 
             # compute output
-            # (batch_size, n_heads, seq_length, key_length, dim_per_head)
-            value_states = value_states.unsqueeze(2).repeat(1, 1, sl, 1, 1)  
-            # (batch_size, n_heads, seq_length, topk + key_length, dim_per_head)
-            value_states = torch.cat([ret_vs, value_states], dim=3)
             # (batch_size, n_heads, seq_length, dim_per_head)
-            attn_output = torch.einsum("bnqk,bnqkd->bnqd", attn_weights, value_states)  
+            attn_output = torch.matmul(attn_weights[:, :, :, -kl:], value_states)
+            attn_output += torch.einsum("bnqk,bnqkd->bnqd", attn_weights[:, :, :, :topk], ret_vs)  
             attn_output = self.unshape(attn_output)  # (batch_size, seq_length, dim)
             attn_output = ori_attn.o(attn_output)
         
@@ -680,6 +688,8 @@ class MemTransWrapper(object):
         recompute_dists: bool = False,
         k: int = 1024, 
         stage: str = 'save',
+        track: Union[bool, str] = False,
+        by_ids: bool = False,
         move_dstore_to_mem: bool = False, 
         cuda: bool = False):
         self.dstore_size = dstore_size
@@ -687,6 +697,8 @@ class MemTransWrapper(object):
         self.recompute_dists = recompute_dists
         self.k = k
         self.stage = stage
+        self.track = track
+        self.by_ids = by_ids
         self.move_dstore_to_mem = move_dstore_to_mem
         self.cuda = cuda and torch.cuda.is_available() and torch.cuda.device_count() > 0
         self.cuda_idx = 0 if self.cuda else -1
@@ -727,7 +739,7 @@ class MemTransWrapper(object):
         
         # inject MemTransAttn
         eos_token_id = self.model.config.eos_token_id
-        self.mta = MemTransAttn(dstore=self.dstore, topk=self.k, eos_token_id=eos_token_id, stage=self.stage)
+        self.mta = MemTransAttn(dstore=self.dstore, topk=self.k, eos_token_id=eos_token_id, stage=self.stage, track=self.track, by_ids=self.by_ids)
         attn_layer.relative_attention_bias = self.get_layer(key='firstattn').relative_attention_bias
         attn_layer.mta = self.mta
     

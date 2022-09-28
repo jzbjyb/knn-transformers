@@ -41,7 +41,7 @@ python generate.py \
     --model ${model} \
     --data_file ${data_file} \
     --out_file ${out_file} \
-    --batch_size 4 \
+    --batch_size 32 \
     --source_prefix "${sp}" \
     --source_suffix "${ss}" \
     --use_evidence ${e} \

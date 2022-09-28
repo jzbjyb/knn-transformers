@@ -82,7 +82,9 @@ class StridedTensor(StridedTensorCore):
         return pids, lengths, offsets
 
     def lookup(self, pids, output='packed'):
-        assert pids.device == self.device
+        ori_device = pids.device
+        pids = pids.to(self.device)
+
         pids, lengths, offsets = self._prepare_lookup(pids)
 
         stride = lengths.max().item()
@@ -92,8 +94,8 @@ class StridedTensor(StridedTensorCore):
         mask = _create_mask(lengths, stride)
 
         if output == 'padded':
-            return tensor, mask
+            return tensor.to(ori_device), mask.to(ori_device)
 
         assert output == 'packed'
         tensor = tensor[mask]
-        return tensor, lengths
+        return tensor.to(ori_device), lengths.to(ori_device)
