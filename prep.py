@@ -4,6 +4,7 @@ import random
 import json
 from collections import defaultdict
 import csv
+from tqdm import tqdm
 from transformers import AutoTokenizer
 from datasets import load_dataset
 from kilt.knowledge_source import KnowledgeSource
@@ -111,11 +112,11 @@ def retrieval_track_parse_line(
 
 def retrieval_track(args):
     n_heads = 32
-    topk = 4
+    topk = 128
     tokenizer = AutoTokenizer.from_pretrained('google/t5-xl-lm-adapt')
     with open(args.inp_file, 'r') as fin, open(args.inp_file.replace('.txt', '.tsv'), 'w') as fout:
         tsv_writer = csv.writer(fout, delimiter='\t')
-        for l in fin:
+        for l in tqdm(fin):
             if l.strip() == '':
                 tsv_writer.writerow([])
             else:

@@ -16,7 +16,7 @@ source env.sh
 
 batch_size=4
 max_target_length=256
-generation_file=generated_predictions.memtrans_topk4.txt
+generation_file=generated_predictions.txt
 
 : '
 model=allenai/tk-instruct-base-def-pos
@@ -32,8 +32,9 @@ suffix=" Output:"
 dstore_size=1328738
 '
 
+: '
 model=google/t5-xl-lm-adapt
-output=checkpoints/eli5/t53b/val_astarget_prov/memtrans
+output=checkpoints/eli5/t53b/val_astarget_prov/memtrans_withid
 train_file=data/eli5/val_astarget_prov_evidence.json
 validation_file=data/eli5/val_astarget_prov_qa.json
 source_lang=en
@@ -45,6 +46,21 @@ prefix="Definition: Given a question, generate a descriptive answer. Question: "
 suffix=" Answer:"
 use_approx_index=false
 dstore_size=306645
+'
+
+model=google/t5-xl-lm-adapt
+output=checkpoints/eli5/t53b/val_astarget_answer/memtrans
+train_file=data/eli5/val_astarget_answer_qa.json
+validation_file=data/eli5/val_astarget_answer_qa.json
+source_lang=en
+target_lang=zh
+split=train
+num_samples=1000000000
+prefix="Definition: Given a question, generate a descriptive answer. Question: "
+#suffix=" Evidence:"
+suffix=" Answer:"
+use_approx_index=false
+dstore_size=204498
 
 python -u run_translation.py \
   --model_name_or_path ${model} \
@@ -70,4 +86,4 @@ python -u run_translation.py \
   --source_prefix "${prefix}" \
   --source_suffix "${suffix}" \
   --dstore_size ${dstore_size} \
-  --memtrans --k 4 --max_predict_samples 500
+  --memtrans --k 1 --max_predict_samples 500

@@ -13,6 +13,7 @@ import faiss.contrib.torch_utils
 from transformers.models.t5.modeling_t5 import T5Attention
 
 from knnlm import get_dstore_path
+from utils import StridedTensor
 
 logger = logging.getLogger(__name__)
 logger.setLevel(20)
@@ -144,7 +145,7 @@ class MemTransDatastore(object):
             
             faiss.write_index(index, f'{index_name}')
     
-    def load_index(self):
+    def load_index(self, build_offset: bool = False):
         # move dstore
         if self.move_dstore_to_mem:
             start = time.time()
@@ -159,6 +160,33 @@ class MemTransDatastore(object):
             #self.values = self.values.to(self.device)
             logger.info('Moving to memory took {} s'.format(time.time() - start))
         
+        # build start/end offsets of each id (assuming ids are consecutive and start with 0)
+        if build_offset:
+            self.start_offsets = []  # inclusive
+            self.end_offsets = []  # exclusive
+            prev_id = -1
+            for i, _id in enumerate(self.ids):
+                if _id == prev_id + 1:  # new id
+                    if len(self.start_offsets):  # not the first
+                        self.end_offsets.append(i)
+                    self.start_offsets.append(i)
+                    prev_id = _id
+                elif _id == prev_id:
+                    pass
+                else:
+                    raise ValueError('ids are not consecutive')
+            self.end_offsets.append(len(self.ids))
+            assert len(self.start_offsets) == len(self.end_offsets)
+            self.start_offsets = torch.tensor(self.start_offsets).to(self.device)
+            self.end_offsets = torch.tensor(self.end_offsets).to(self.device)
+            self.lengths = self.end_offsets - self.start_offsets
+
+            # build strided tensor
+            self.keys_strided = StridedTensor(self.keys.permute(1, 0, 2), self.lengths)
+            self.values_strided = StridedTensor(self.values.permute(1, 0, 2), self.lengths)
+            self.tokens_strided = StridedTensor(self.tokens, self.lengths)
+            self.ids_strided = StridedTensor(self.ids, self.lengths)
+
         # load index
         self.indices = []
         res = faiss.StandardGpuResources()
@@ -202,6 +230,30 @@ class MemTransDatastore(object):
             ret_ids = torch.stack(ret_ids, dim=0).to(ori_device)  # (n_heads, batch_size, topk)
             return ret_ks, ret_vs, ret_ts, ret_ids
         return ret_ks, ret_vs
+    
+    def get_knns_by_ids(
+        self, 
+        ids: torch.LongTensor,  # (batch_size)
+        max_length: int):
+        device = ids.device
+        ret_ks = self.keys_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len, n_heads, dim)
+        ret_vs = self.values_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len, n_heads, dim)
+        ret_ts = self.tokens_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len)
+        ret_ids = self.ids_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len)
+        seq_len = ret_ks.size(1) 
+        assert ret_ks.size(1) == ret_vs.size(1) == ret_ts.size(1) == ret_ids.size(1)
+
+        if seq_len >= max_length:  # truncate
+            ret_ks = ret_ks[:, :max_length]  # (batch_size, max_length, n_heads, dim)
+            ret_vs = ret_vs[:, :max_length]  # (batch_size, max_length, n_heads, dim)
+            ret_ts = ret_ts[:, :max_length]  # (batch_size, max_length)
+            ret_ids = ret_ids[:, :max_length]  # (batch_size, max_length)
+
+        ret_ks = ret_ks.permute(2, 0, 1, 3)  # (n_heads, batch_size, max_length, dim)
+        ret_vs = ret_vs.permute(2, 0, 1, 3)  # (n_heads, batch_size, max_length, dim)
+        ret_ts = ret_ts.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, max_length)
+        ret_ids = ret_ids.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, max_length)
+        return ret_ks, ret_vs, ret_ts, ret_ids
 
 class RetrievalTracker(object):
     def __init__(
@@ -250,6 +302,11 @@ class RetrievalTracker(object):
                 s = agg[i, j].tolist()
                 self._write(' '.join(map(str, s)) + '\n')
             self._write('\n')
+        
+        # clear cache
+        self.predictions = []
+        self.retrieved_tokens = []
+        self.retrieved_ids = []
 
 class MemTransAttn(object):
     def __init__(
@@ -303,13 +360,21 @@ class MemTransAttn(object):
     def retrieve(
         self,
         query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
+        ids: torch.LongTensor = None,  # (batch_size)
+        by_ids: bool = False,
     ):
         bs, nh, sl, d = query_states.size()
         query_states = query_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
+
+        if ids is None:
+            ids = torch.arange(bs).to(query_states.device) + self.id_offset
         
         if self.is_track:
             # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
-            ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns(query_states, topk=self.topk, return_all=self.is_track)
+            if by_ids and sl == 1:  # TODO: support by_ids for evaluation mode
+                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_ids(ids, max_length=self.topk)
+            else:
+                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns(query_states, topk=self.topk, return_all=self.is_track)
             input_ids = self.dstore.get_decoder_input_ids()  # (batch_size, seq_length)
             if sl == 1:  # only track the generation process (not for the evaluation process)
                 self.tracker.add_single_step_batched(
@@ -320,10 +385,17 @@ class MemTransAttn(object):
                 self.tracker.write()
         else:
             # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2
-            ret_ks, ret_vs = self.dstore.get_knns(query_states, topk=self.topk, return_all=self.is_track)
+            if by_ids and sl == 1:
+                ret_ks, ret_vs = self.dstore.get_knns_by_ids(ids, max_length=self.topk)[:2]
+            else:
+                ret_ks, ret_vs = self.dstore.get_knns(query_states, topk=self.topk, return_all=self.is_track)
+
+        if sl != 1:  # change offset in evaluation process
+            self.id_offset += bs
         
-        ret_ks = ret_ks.view(nh, bs, sl, self.topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
-        ret_vs = ret_vs.view(nh, bs, sl, self.topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
+        actual_topk = ret_ks.size(2)
+        ret_ks = ret_ks.view(nh, bs, sl, actual_topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
+        ret_vs = ret_vs.view(nh, bs, sl, actual_topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
         ret_ks = ret_ks.permute(1, 0, 2, 3, 4)  # (batch_size, n_heads, seq_length, topk, dim_per_head)
         ret_vs = ret_vs.permute(1, 0, 2, 3, 4)  # (batch_size, n_heads, seq_length, topk, dim_per_head)
         return ret_ks, ret_vs
@@ -335,16 +407,16 @@ class MemTransAttn(object):
         seq_length: int,
         real_seq_length: int,
         key_length: int,
+        topk: int,
     ):
         # extend the mask
         if mask is not None:
-            ext_size = mask.size()[:3] + (self.topk,)
+            ext_size = mask.size()[:3] + (topk,)
             # (batch_size, n_heads, seq_length, topk + key_length)
             mask = torch.cat([torch.zeros(*ext_size).to(mask), mask], dim=3)
         
         # update relative positions
-        position_bias = ori_attn.compute_bias(
-            self.topk + real_seq_length, self.topk + key_length)
+        position_bias = ori_attn.compute_bias(topk + real_seq_length, topk + key_length)
         # need to truncate because ret_topk > 0
         # (batch_size, n_heads, seq_length, topk + key_length)
         position_bias = position_bias[:, :, -seq_length:, :]
@@ -429,12 +501,13 @@ class MemTransAttn(object):
         layer_head_mask,
         real_seq_length: int,
         key_length: int
-    ):
+    ): 
         if layer_head_mask is not None:
             raise NotImplementedError()
         
         bs, nh, sl, d = query_states.size()
         kl = key_states.size(2)
+        topk = ret_ks.size(-2)
         multi_token_eval = sl > 1  # multiple tokens per example in the query_states
 
         if multi_token_eval:
@@ -454,7 +527,7 @@ class MemTransAttn(object):
 
             # apply bias
             position_bias = self.update_mask_and_position_bias(
-                ori_attn, mask, seq_length=sl, real_seq_length=real_seq_length, key_length=key_length)
+                ori_attn, mask, seq_length=sl, real_seq_length=real_seq_length, key_length=key_length, topk=topk)
             scores += position_bias
 
             # compute attn distribution
@@ -488,7 +561,7 @@ class MemTransAttn(object):
 
             # apply bias
             position_bias = self.update_mask_and_position_bias(
-                ori_attn, mask, seq_length=sl, real_seq_length=real_seq_length, key_length=key_length)
+                ori_attn, mask, seq_length=sl, real_seq_length=real_seq_length, key_length=key_length, topk=topk)
             scores += position_bias
 
             # compute attn distribution
@@ -650,7 +723,7 @@ class MemTransWrapper(object):
             move_dstore_to_mem=self.move_dstore_to_mem,
             cuda_idx=self.cuda_idx)
         if self.stage == 'retrieve':
-            self.dstore.load_index()
+            self.dstore.load_index(build_offset=True)
         
         # inject MemTransAttn
         eos_token_id = self.model.config.eos_token_id
