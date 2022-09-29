@@ -229,31 +229,49 @@ class MemTransDatastore(object):
             ret_ts = torch.stack(ret_ts, dim=0).to(ori_device)  # (n_heads, batch_size, topk)
             ret_ids = torch.stack(ret_ids, dim=0).to(ori_device)  # (n_heads, batch_size, topk)
             return ret_ks, ret_vs, ret_ts, ret_ids
-        return ret_ks, ret_vs
+        return ret_ks, ret_vs, None, None
     
     def get_knns_by_ids(
         self, 
         ids: torch.LongTensor,  # (batch_size)
-        max_length: int):
+        max_length: int,
+        skip_first_token: bool = False,
+        return_all: bool = False):
         device = ids.device
         ret_ks = self.keys_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len, n_heads, dim)
         ret_vs = self.values_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len, n_heads, dim)
-        ret_ts = self.tokens_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len)
-        ret_ids = self.ids_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len)
-        seq_len = ret_ks.size(1) 
-        assert ret_ks.size(1) == ret_vs.size(1) == ret_ts.size(1) == ret_ids.size(1)
+        if return_all:
+            ret_ts = self.tokens_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len)
+            ret_ids = self.ids_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len)
+        
+        if return_all:
+            assert ret_ks.size(1) == ret_vs.size(1) == ret_ts.size(1) == ret_ids.size(1)
+        else:
+            assert ret_ks.size(1) == ret_vs.size(1)
 
+        if skip_first_token:  # skip the first token which is usually the bos token (e.g., the pad token for T5)
+            ret_ks = ret_ks[:, 1:]  # (batch_size, seq_len - 1, n_heads, dim)
+            ret_vs = ret_vs[:, 1:]  # (batch_size, seq_len - 1, n_heads, dim)
+            if return_all:
+                ret_ts = ret_ts[:, 1:]  # (batch_size, seq_len - 1)
+                ret_ids = ret_ids[:, 1:]  # (batch_size, seq_len - 1)
+
+        seq_len = ret_ks.size(1)
         if seq_len >= max_length:  # truncate
             ret_ks = ret_ks[:, :max_length]  # (batch_size, max_length, n_heads, dim)
             ret_vs = ret_vs[:, :max_length]  # (batch_size, max_length, n_heads, dim)
-            ret_ts = ret_ts[:, :max_length]  # (batch_size, max_length)
-            ret_ids = ret_ids[:, :max_length]  # (batch_size, max_length)
+            if return_all:
+                ret_ts = ret_ts[:, :max_length]  # (batch_size, max_length)
+                ret_ids = ret_ids[:, :max_length]  # (batch_size, max_length)
 
         ret_ks = ret_ks.permute(2, 0, 1, 3)  # (n_heads, batch_size, max_length, dim)
         ret_vs = ret_vs.permute(2, 0, 1, 3)  # (n_heads, batch_size, max_length, dim)
-        ret_ts = ret_ts.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, max_length)
-        ret_ids = ret_ids.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, max_length)
-        return ret_ks, ret_vs, ret_ts, ret_ids
+        if return_all:
+            ret_ts = ret_ts.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, max_length)
+            ret_ids = ret_ids.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, max_length)
+            return ret_ks, ret_vs, ret_ts, ret_ids
+        else:
+            return ret_ks, ret_vs, None, None
 
 class RetrievalTracker(object):
     def __init__(
@@ -290,6 +308,14 @@ class RetrievalTracker(object):
 
     def write(self):
         predictions = torch.stack(self.predictions, dim=1)  # (batch_size, seq_len)
+    
+        # pad with 0
+        max_topk_idx = np.argmax([rt.size(-1) for rt in self.retrieved_tokens])
+        max_topk = self.retrieved_tokens[max_topk_idx].size(-1)
+        self.retrieved_tokens = [torch.zeros_like(self.retrieved_tokens[max_topk_idx]) if rt.size(-1) != max_topk else rt for rt in self.retrieved_tokens]
+        self.retrieved_ids = [torch.zeros_like(self.retrieved_ids[max_topk_idx]) if ri.size(-1) != max_topk else ri for ri in self.retrieved_ids]
+
+        # pack
         retrieved_tokens = torch.stack(self.retrieved_tokens, dim=1)  # (batch_size, seq_len, n_heads, topk)
         retrieved_ids = torch.stack(self.retrieved_ids, dim=1)  # (batch_size, seq_len, n_heads, topk)
         retrieved = torch.stack([retrieved_tokens, retrieved_ids], dim=-1)  # (batch_size, seq_len, n_heads, topk, 2)
@@ -316,18 +342,24 @@ class MemTransAttn(object):
         eos_token_id: int,
         stage: str, 
         track: Union[bool, str] = False,  # track retrieved tokens by printing (bool) or writing to files (str)
-        by_ids: bool = False):  # whether to retrieve documents by ids
+        by_ids: bool = False,  # whether to retrieve documents by ids
+        skip_retrieval_steps: int = 0,  # number of decoding steps where retrieval is skipped
+        ):
         assert stage in {'save', 'retrieve'}
         self.dstore = dstore
         self.topk = topk
         self.stage = stage
+        
         self.track = track
-        self.by_ids = by_ids
-        self.by_ids_cache = None  # cache the retrieved results so following decoding steps do not need to retrieve
         if self.is_track:
             track_file = self.track if type(self.track) is str else None
             self.tracker = RetrievalTracker(track_file=track_file, n_heads=dstore.n_heads, topk=topk, eos_token_id=eos_token_id)
+        
+        self.by_ids = by_ids
+        self.by_ids_cache = None  # cache the retrieved results so following decoding steps do not need to retrieve
         self.id_offset = 0  # example idx
+        
+        self.skip_retrieval_steps = skip_retrieval_steps
 
     @property
     def is_track(self):
@@ -363,6 +395,7 @@ class MemTransAttn(object):
     def retrieve(
         self,
         query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
+        key_length: int,
         ids: torch.LongTensor = None,  # (batch_size)
     ):
         bs, nh, sl, d = query_states.size()
@@ -372,19 +405,25 @@ class MemTransAttn(object):
         if sl > 1:  # TODO: eval mode is memory-intensive so we limite topk
             topk = min(self.topk, 1)
 
+        skip_for_retrieval = self.skip_retrieval_steps and key_length <= self.skip_retrieval_steps
+        if skip_for_retrieval:  # deactivate retrieval for first seval steps
+            topk = 0
+
         if ids is None:
             ids = torch.arange(bs).to(query_states.device) + self.id_offset
-        
-        if self.is_track:
-            # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
-            if self.by_ids and sl == 1:  # TODO: support by_ids for evaluation mode
-                if self.by_ids_cache:
-                    ret_ks, ret_vs, ret_ts, ret_ids = self.by_ids_cache
-                else:
-                    ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_ids(ids, max_length=topk)
-                    self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids)
+
+        # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
+        if self.by_ids and sl == 1:  # TODO: support by_ids for evaluation mode
+            if not skip_for_retrieval and self.by_ids_cache:
+                ret_ks, ret_vs, ret_ts, ret_ids = self.by_ids_cache
             else:
-                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns(query_states, topk=topk, return_all=self.is_track)
+                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_ids(ids, max_length=topk, return_all=self.is_track)
+                self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids) if not skip_for_retrieval else None
+        else:
+            ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns(query_states, topk=topk, return_all=self.is_track)
+
+        # track retrieval
+        if self.is_track:
             input_ids = self.dstore.get_decoder_input_ids()  # (batch_size, seq_length)
             if sl == 1:  # only track the generation process (not for the evaluation process)
                 self.tracker.add_single_step_batched(
@@ -393,14 +432,8 @@ class MemTransAttn(object):
                     retrieved_id=ret_ids.permute(1, 0, 2))
             else:  # write in evaluation process
                 self.tracker.write()
-        else:
-            # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2
-            if self.by_ids and sl == 1:
-                ret_ks, ret_vs = self.dstore.get_knns_by_ids(ids, max_length=topk)[:2]
-            else:
-                ret_ks, ret_vs = self.dstore.get_knns(query_states, topk=topk, return_all=self.is_track)
-
-        if sl != 1:  # change offset in evaluation process
+    
+        if sl > 1:  # change offset in evaluation process
             self.id_offset += bs
             self.by_ids_cache = None
         
@@ -441,6 +474,35 @@ class MemTransAttn(object):
     def unshape(states):
         bs, nh, sl, d = states.size()
         return states.transpose(1, 2).contiguous().view(bs, sl, -1)
+    
+    def init_position_bias(
+        self, 
+        ori_attn: T5Attention, 
+        past_key_value: torch.FloatTensor,
+        mask: torch.FloatTensor,  # (batch_size, n_heads, seq_length, key_length)
+        real_seq_length: int,
+        key_length: int,
+        seq_length: int,
+        device: torch.device):
+        self = ori_attn
+        if not self.has_relative_attention_bias:
+            position_bias = torch.zeros(
+                (1, self.n_heads, real_seq_length, key_length), device=device, dtype=ori_attn.dtype
+            )
+            if self.gradient_checkpointing and self.training:
+                position_bias.requires_grad = True
+        else:
+            position_bias = self.compute_bias(real_seq_length, key_length, device=device)
+
+        # if key and values are already calculated
+        # we want only the last query position bias
+        if past_key_value is not None:
+            position_bias = position_bias[:, :, -seq_length :, :]
+
+        if mask is not None:
+            position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
+        
+        return position_bias
 
     def original_attn(
         self,
@@ -465,22 +527,9 @@ class MemTransAttn(object):
         )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
         
         if position_bias is None:
-            if not self.has_relative_attention_bias:
-                position_bias = torch.zeros(
-                    (1, self.n_heads, real_seq_length, key_length), device=scores.device, dtype=scores.dtype
-                )
-                if self.gradient_checkpointing and self.training:
-                    position_bias.requires_grad = True
-            else:
-                position_bias = self.compute_bias(real_seq_length, key_length, device=scores.device)
-
-            # if key and values are already calculated
-            # we want only the last query position bias
-            if past_key_value is not None:
-                position_bias = position_bias[:, :, -query_states.size(2) :, :]
-
-            if mask is not None:
-                position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
+            position_bias = new_self.init_position_bias(
+                ori_attn, past_key_value, mask, 
+                real_seq_length=real_seq_length, key_length=key_length, seq_length=query_states.size(2), device=scores.device)
 
         scores += position_bias
         attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
@@ -498,7 +547,7 @@ class MemTransAttn(object):
         attn_output = self.o(attn_output)
         # === original attn code (end) ===
 
-        return attn_weights, attn_output
+        return attn_weights, attn_output, position_bias
 
     def attn(
         self,
@@ -655,19 +704,22 @@ def t5attetnion_forward(
 
     if self.mta.stage == 'save':
         self.mta.save(key_states, value_states)
-        attn_weights, attn_output = self.mta.original_attn(
+        attn_weights, attn_output, position_bias = self.mta.original_attn(
             self, query_states, key_states, value_states, past_key_value,
             position_bias, mask, layer_head_mask, 
             real_seq_length=real_seq_length, key_length=key_length)
     elif self.mta.stage == 'retrieve':
-        ret_ks, ret_vs = self.mta.retrieve(query_states)
+        ret_ks, ret_vs = self.mta.retrieve(query_states, key_length=key_length)
+        if position_bias is None:  # init position_bias in the first layer which is reused in following layers
+            position_bias = position_bias = self.mta.init_position_bias(
+                self, past_key_value, mask, 
+                real_seq_length=real_seq_length, key_length=key_length, seq_length=seq_length, device=query_states.device)
         attn_weights, attn_output = self.mta.attn(
-            self, query_states, key_states, value_states, 
-            ret_ks, ret_vs, 
+            self, query_states, key_states, value_states, ret_ks, ret_vs, 
             mask, layer_head_mask, 
             real_seq_length=real_seq_length, key_length=key_length)
     else:  # original code
-        attn_weights, attn_output = self.mta.original_attn(
+        attn_weights, attn_output, position_bias = self.mta.original_attn(
             self, query_states, key_states, value_states, past_key_value,
             position_bias, mask, layer_head_mask, 
             real_seq_length=real_seq_length, key_length=key_length)
@@ -690,6 +742,7 @@ class MemTransWrapper(object):
         stage: str = 'save',
         track: Union[bool, str] = False,
         by_ids: bool = False,
+        skip_retrieval_steps: int = 0,
         move_dstore_to_mem: bool = False, 
         cuda: bool = False):
         self.dstore_size = dstore_size
@@ -699,6 +752,7 @@ class MemTransWrapper(object):
         self.stage = stage
         self.track = track
         self.by_ids = by_ids
+        self.skip_retrieval_steps = skip_retrieval_steps
         self.move_dstore_to_mem = move_dstore_to_mem
         self.cuda = cuda and torch.cuda.is_available() and torch.cuda.device_count() > 0
         self.cuda_idx = 0 if self.cuda else -1
@@ -739,7 +793,14 @@ class MemTransWrapper(object):
         
         # inject MemTransAttn
         eos_token_id = self.model.config.eos_token_id
-        self.mta = MemTransAttn(dstore=self.dstore, topk=self.k, eos_token_id=eos_token_id, stage=self.stage, track=self.track, by_ids=self.by_ids)
+        self.mta = MemTransAttn(
+            dstore=self.dstore, 
+            topk=self.k, 
+            eos_token_id=eos_token_id, 
+            stage=self.stage, 
+            track=self.track, 
+            by_ids=self.by_ids, 
+            skip_retrieval_steps=self.skip_retrieval_steps)
         attn_layer.relative_attention_bias = self.get_layer(key='firstattn').relative_attention_bias
         attn_layer.mta = self.mta
     
@@ -763,7 +824,7 @@ class MemTransWrapper(object):
     
     layer_to_capture = {
         't5': {
-            'memtrans': lambda model: model.base_model.decoder.block[-6].layer[0].SelfAttention,  # TODO: debug
+            'memtrans': lambda model: model.base_model.decoder.block[0].layer[0].SelfAttention,  # TODO: debug
             'firstattn': lambda model: model.base_model.decoder.block[0].layer[0].SelfAttention
         },
         'mt5': {

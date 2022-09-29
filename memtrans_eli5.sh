@@ -16,7 +16,8 @@ source env.sh
 
 batch_size=32
 max_target_length=256
-generation_file=generated_predictions.memtrans_topk64_byids-6.txt
+generation_file=generated_predictions.memtrans_topk64_byids+0.txt
+#generation_file=generated_predictions.txt
 
 : '
 model=allenai/tk-instruct-base-def-pos
@@ -64,8 +65,26 @@ use_approx_index=false
 dstore_size=204498
 '
 
+: '
 model=google/t5-xl-lm-adapt
-output=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix
+output=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix-6
+train_file=data/eli5/val_astarget_answer_qa.json
+validation_file=data/eli5/val_astarget_answer_qa.json
+source_lang=en
+target_lang=zh
+split=train
+num_samples=1000000000
+prefix="Definition: Given a question, generate a descriptive answer. Question: "
+suffix=""
+#target_prefix="Evidence: "
+target_prefix="Answer: "
+target_suffix=""
+use_approx_index=false
+dstore_size=206896
+'
+
+model=google/t5-xl-lm-adapt
+output=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix+0
 train_file=data/eli5/val_astarget_answer_qa.json
 validation_file=data/eli5/val_astarget_answer_qa.json
 source_lang=en
@@ -108,4 +127,4 @@ python -u run_translation.py \
   --dstore_size ${dstore_size} \
   --target_prefix "${target_prefix}" \
   --target_suffix "${target_suffix}" \
-  --memtrans --k 64 --retrieve_by_ids true
+  --memtrans --k 64 --retrieve_by_ids true --max_predict_samples 500 --retrieval_track track/reproduce+0nobug

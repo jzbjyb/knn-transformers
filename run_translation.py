@@ -657,7 +657,7 @@ def main():
             dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir,
             move_dstore_to_mem=knn_args.move_dstore_to_mem, cuda=knn_args.knn_gpu,
             recompute_dists=knn_args.recompute_dists,
-            k=knn_args.k, stage=stage, track=knn_args.retrieval_track, by_ids=knn_args.retrieve_by_ids)
+            k=knn_args.k, stage=stage, track=knn_args.retrieval_track, by_ids=knn_args.retrieve_by_ids, skip_retrieval_steps=0)  # TODO: debug
     elif knn_args.retomaton or knn_args.cluster_dstore:
         knn_wrapper = RetomatonWrapper(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
             dimension=dimension, 
