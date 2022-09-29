@@ -238,11 +238,11 @@ class MemTransDatastore(object):
         skip_first_token: bool = False,
         return_all: bool = False):
         device = ids.device
-        ret_ks = self.keys_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len, n_heads, dim)
-        ret_vs = self.values_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len, n_heads, dim)
+        ret_ks = self.keys_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len, n_heads, dim)
+        ret_vs = self.values_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len, n_heads, dim)
         if return_all:
-            ret_ts = self.tokens_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len)
-            ret_ids = self.ids_strided.lookup(ids, output='padded')[0].to(device)  # (batch_size, seq_len)
+            ret_ts = self.tokens_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len)
+            ret_ids = self.ids_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len)
         
         if return_all:
             assert ret_ks.size(1) == ret_vs.size(1) == ret_ts.size(1) == ret_ids.size(1)
@@ -344,6 +344,8 @@ class MemTransAttn(object):
         track: Union[bool, str] = False,  # track retrieved tokens by printing (bool) or writing to files (str)
         by_ids: bool = False,  # whether to retrieve documents by ids
         skip_retrieval_steps: int = 0,  # number of decoding steps where retrieval is skipped
+        skip_first_token: bool = False,  # skip the first token retrieved which is usually bos
+        add_after_first: bool = False,  # add the retrieved tokens after the first token which is usually bos
         ):
         assert stage in {'save', 'retrieve'}
         self.dstore = dstore
@@ -360,6 +362,8 @@ class MemTransAttn(object):
         self.id_offset = 0  # example idx
         
         self.skip_retrieval_steps = skip_retrieval_steps
+        self.skip_first_token = skip_first_token
+        self.add_after_first = add_after_first
 
     @property
     def is_track(self):
@@ -417,7 +421,8 @@ class MemTransAttn(object):
             if not skip_for_retrieval and self.by_ids_cache:
                 ret_ks, ret_vs, ret_ts, ret_ids = self.by_ids_cache
             else:
-                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_ids(ids, max_length=topk, return_all=self.is_track)
+                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_ids(
+                    ids, max_length=topk, skip_first_token=self.skip_first_token, return_all=self.is_track)
                 self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids) if not skip_for_retrieval else None
         else:
             ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns(query_states, topk=topk, return_all=self.is_track)
@@ -571,6 +576,10 @@ class MemTransAttn(object):
         multi_token_eval = sl > 1  # multiple tokens per example in the query_states
 
         if multi_token_eval:
+            # TODO: implement this
+            #if self.add_after_first:
+            #    raise NotImplementedError()
+
             assert sl == kl == real_seq_length == key_length, 'should be in eval mode'
 
             # compute the original scores over local context
@@ -609,8 +618,14 @@ class MemTransAttn(object):
 
             # prepend retrieved keys and values
             # (batch_size, n_heads, topk + key_length, dim_per_head)
-            key_states = torch.cat([ret_ks.squeeze(2), key_states], dim=2)
-            value_states = torch.cat([ret_vs.squeeze(2), value_states], dim=2)
+            if self.add_after_first and key_length > 1:  # always need to prepend for the first position
+                print('after', ret_ks.size(3))
+                key_states = torch.cat([key_states[:, :, :1], ret_ks.squeeze(2), key_states[:, :, 1:]], dim=2)
+                value_states = torch.cat([key_states[:, :, :1], ret_vs.squeeze(2), value_states[:, :, 1:]], dim=2)
+            else:
+                print('before', ret_ks.size(3))
+                key_states = torch.cat([ret_ks.squeeze(2), key_states], dim=2)
+                value_states = torch.cat([ret_vs.squeeze(2), value_states], dim=2)
 
             # compute attn scores
             # (batch_size, n_heads, seq_length, topk + key_length)
@@ -743,6 +758,8 @@ class MemTransWrapper(object):
         track: Union[bool, str] = False,
         by_ids: bool = False,
         skip_retrieval_steps: int = 0,
+        skip_first_token: bool = False,
+        add_after_first: bool = False,
         move_dstore_to_mem: bool = False, 
         cuda: bool = False):
         self.dstore_size = dstore_size
@@ -753,6 +770,8 @@ class MemTransWrapper(object):
         self.track = track
         self.by_ids = by_ids
         self.skip_retrieval_steps = skip_retrieval_steps
+        self.skip_first_token = skip_first_token
+        self.add_after_first = add_after_first
         self.move_dstore_to_mem = move_dstore_to_mem
         self.cuda = cuda and torch.cuda.is_available() and torch.cuda.device_count() > 0
         self.cuda_idx = 0 if self.cuda else -1
@@ -800,7 +819,9 @@ class MemTransWrapper(object):
             stage=self.stage, 
             track=self.track, 
             by_ids=self.by_ids, 
-            skip_retrieval_steps=self.skip_retrieval_steps)
+            skip_retrieval_steps=self.skip_retrieval_steps,
+            skip_first_token=self.skip_first_token,
+            add_after_first=self.add_after_first)
         attn_layer.relative_attention_bias = self.get_layer(key='firstattn').relative_attention_bias
         attn_layer.mta = self.mta
     

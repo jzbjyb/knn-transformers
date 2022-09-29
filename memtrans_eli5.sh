@@ -16,7 +16,7 @@ source env.sh
 
 batch_size=32
 max_target_length=256
-generation_file=generated_predictions.memtrans_topk64_byids+0.txt
+generation_file=generated_predictions.memtrans_topk64_byids+0_skip1_nopad_afterfirst.txt
 #generation_file=generated_predictions.txt
 
 : '
@@ -127,4 +127,4 @@ python -u run_translation.py \
   --dstore_size ${dstore_size} \
   --target_prefix "${target_prefix}" \
   --target_suffix "${target_suffix}" \
-  --memtrans --k 64 --retrieve_by_ids true --max_predict_samples 500 --retrieval_track track/reproduce+0nobug
+  --memtrans --k 64 --retrieve_by_ids true --max_predict_samples 500 --retrieval_track track/reproduce+0nobug_skip1_nopad_afterfirst
