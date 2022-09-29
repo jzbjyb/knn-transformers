@@ -16,7 +16,7 @@ source env.sh
 
 batch_size=32
 max_target_length=256
-generation_file=generated_predictions.memtrans_topk64_byids+0_skip1_nopad_afterfirst.txt
+generation_file=generated_predictions.memtrans_topk64_byids_skip1_nopad_afterfirst.txt
 #generation_file=generated_predictions.txt
 
 : '
@@ -83,6 +83,7 @@ use_approx_index=false
 dstore_size=206896
 '
 
+: '
 model=google/t5-xl-lm-adapt
 output=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix+0
 train_file=data/eli5/val_astarget_answer_qa.json
@@ -98,8 +99,25 @@ target_prefix="Answer: "
 target_suffix=""
 use_approx_index=false
 dstore_size=206896
+'
 
-python -u run_translation.py \
+model=google/t5-xl-lm-adapt
+output=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layer0_12
+train_file=data/eli5/val_astarget_answer_qa.json
+validation_file=data/eli5/val_astarget_answer_qa.json
+source_lang=en
+target_lang=zh
+split=train
+num_samples=1000000000
+prefix="Definition: Given a question, generate a descriptive answer. Question: "
+suffix=""
+#target_prefix="Evidence: "
+target_prefix="Answer: "
+target_suffix=""
+use_approx_index=false
+dstore_size=206896
+
+echo python -u run_translation.py \
   --model_name_or_path ${model} \
   --train_file ${train_file} --validation_file ${validation_file} \
   --source_lang ${source_lang} --target_lang ${target_lang} \
@@ -127,4 +145,4 @@ python -u run_translation.py \
   --dstore_size ${dstore_size} \
   --target_prefix "${target_prefix}" \
   --target_suffix "${target_suffix}" \
-  --memtrans --k 64 --retrieve_by_ids true --max_predict_samples 500 --retrieval_track track/reproduce+0nobug_skip1_nopad_afterfirst
+  --memtrans --k 64 --retrieve_by_ids true --max_predict_samples 500 --retrieval_track ${output}/track_skip1_nopad_afterfirst

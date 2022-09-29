@@ -619,11 +619,9 @@ class MemTransAttn(object):
             # prepend retrieved keys and values
             # (batch_size, n_heads, topk + key_length, dim_per_head)
             if self.add_after_first and key_length > 1:  # always need to prepend for the first position
-                print('after', ret_ks.size(3))
                 key_states = torch.cat([key_states[:, :, :1], ret_ks.squeeze(2), key_states[:, :, 1:]], dim=2)
                 value_states = torch.cat([key_states[:, :, :1], ret_vs.squeeze(2), value_states[:, :, 1:]], dim=2)
             else:
-                print('before', ret_ks.size(3))
                 key_states = torch.cat([ret_ks.squeeze(2), key_states], dim=2)
                 value_states = torch.cat([ret_vs.squeeze(2), value_states], dim=2)
 
@@ -753,6 +751,7 @@ class MemTransWrapper(object):
         dstore_size: int, 
         dstore_dir: str, 
         recompute_dists: bool = False,
+        retrieval_layers: List[int] = [-6],
         k: int = 1024, 
         stage: str = 'save',
         track: Union[bool, str] = False,
@@ -765,6 +764,7 @@ class MemTransWrapper(object):
         self.dstore_size = dstore_size
         self.dstore_dir = dstore_dir
         self.recompute_dists = recompute_dists
+        self.retrieval_layers = retrieval_layers
         self.k = k
         self.stage = stage
         self.track = track
@@ -778,12 +778,17 @@ class MemTransWrapper(object):
         self.device = torch.device(f'cuda:{self.cuda_idx}' if self.cuda else 'cpu')
     
     def get_layer(self, key: str = 'memtrans'):
-        return MemTransWrapper.layer_to_capture[self.model.config.model_type][key](self.model)
+        mt = self.model.config.model_type
+        if key != 'memtrans':
+            return self.CONFIG[mt][key](self.model)
+        return [(layer_idx, self.CONFIG[mt][key](self.model, layer_idx)) for layer_idx in self.retrieval_layers]
 
     def break_into(self, model):
         self.model = model
         model.broken_into = True
         self.is_encoder_decoder = model.config.is_encoder_decoder
+        eos_token_id = self.model.config.eos_token_id
+        relative_attention_bias = self.get_layer(key='firstattn').relative_attention_bias
 
         # save labels for masking
         self.original_forward_func = model.forward
@@ -793,66 +798,73 @@ class MemTransWrapper(object):
         self.original_decoder_forward_func = model.decoder.forward
         model.decoder.forward = self.pre_decoder_forward_hook
         
-        # replace the attention layer with retrieval-augmented attention layer
-        attn_layer = self.get_layer()
-        self.ori_t5attetnion_forward = attn_layer.forward
-        attn_layer.forward = types.MethodType(t5attetnion_forward, attn_layer)
+        attn_layers = self.get_layer()
+        self.ori_t5attetnion_forwards = []
+        self.dstores = []
+        for layer_idx, attn_layer in attn_layers:
+            # replace the attention layer with retrieval-augmented attention layer
+            self.ori_t5attetnion_forwards.append(attn_layer.forward)
+            attn_layer.forward = types.MethodType(t5attetnion_forward, attn_layer)
 
-        # load dstore (and index if in retrieval stage)
-        self.dstore = MemTransDatastore(
-            directory=self.dstore_dir, 
-            model_type=self.model.config.model_type, 
-            size=self.dstore_size,
-            dimension=self.model.config.d_kv,
-            n_heads=self.model.config.num_heads,
-            move_dstore_to_mem=self.move_dstore_to_mem,
-            cuda_idx=self.cuda_idx)
-        if self.stage == 'retrieve':
-            self.dstore.load_index(build_offset=True)
-        
-        # inject MemTransAttn
-        eos_token_id = self.model.config.eos_token_id
-        self.mta = MemTransAttn(
-            dstore=self.dstore, 
-            topk=self.k, 
-            eos_token_id=eos_token_id, 
-            stage=self.stage, 
-            track=self.track, 
-            by_ids=self.by_ids, 
-            skip_retrieval_steps=self.skip_retrieval_steps,
-            skip_first_token=self.skip_first_token,
-            add_after_first=self.add_after_first)
-        attn_layer.relative_attention_bias = self.get_layer(key='firstattn').relative_attention_bias
-        attn_layer.mta = self.mta
-    
+            # load dstore (and index if in retrieval stage)
+            dstore = MemTransDatastore(
+                directory=os.path.join(self.dstore_dir, f'layer{layer_idx}'), 
+                model_type=self.model.config.model_type, 
+                size=self.dstore_size,
+                dimension=self.model.config.d_kv,
+                n_heads=self.model.config.num_heads,
+                move_dstore_to_mem=self.move_dstore_to_mem,
+                cuda_idx=self.cuda_idx)
+            if self.stage == 'retrieve':
+                dstore.load_index(build_offset=True)
+            self.dstores.append(dstore)
+            
+            # inject MemTransAttn
+            mta = MemTransAttn(
+                dstore=dstore, 
+                topk=self.k, 
+                eos_token_id=eos_token_id, 
+                stage=self.stage, 
+                track=self.track, 
+                by_ids=self.by_ids, 
+                skip_retrieval_steps=self.skip_retrieval_steps,
+                skip_first_token=self.skip_first_token,
+                add_after_first=self.add_after_first)
+            attn_layer.mta = mta
+            attn_layer.relative_attention_bias = relative_attention_bias
+
     def pre_forward_hook(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
         decoder_input_ids = self.model.prepare_decoder_input_ids_from_labels(labels) if labels is not None else None
-        self.dstore.save_labels(labels, decoder_input_ids)
+        for dstore in self.dstores:
+            dstore.save_labels(labels, decoder_input_ids)
         return self.original_forward_func(input_ids=input_ids, labels=labels, attention_mask=attention_mask, **kwargs)
     
     def pre_decoder_forward_hook(self, input_ids=None, **kwargs):
-        self.dstore.save_decoder_input_ids(input_ids)
+        for dstore in self.dstores:
+            dstore.save_decoder_input_ids(input_ids)
         return self.original_decoder_forward_func(input_ids=input_ids, **kwargs)
 
     def break_out(self):
         if self.model is not None and self.model.broken_into is not None:
             self.model.forward = self.original_forward_func
-            attn_layer = self.get_layer()
-            attn_layer.forward = self.ori_t5attetnion_forward
-            del attn_layer.relative_attention_bias
-            del attn_layer.mta
+            attn_layers = self.get_layer()
+            for (layer_idx, attn_layer), ori_fwd in zip(attn_layers, self.ori_t5attetnion_forwards):
+                attn_layer.forward = ori_fwd
+                del attn_layer.mta
+                #del attn_layer.relative_attention_bias  # TODO: avoid deleting this for the first layer
             self.model.broken_into = None
-    
-    layer_to_capture = {
+
+    CONFIG = {
         't5': {
-            'memtrans': lambda model: model.base_model.decoder.block[0].layer[0].SelfAttention,  # TODO: debug
+            'memtrans': lambda model, layer_idx: model.base_model.decoder.block[layer_idx].layer[0].SelfAttention,
             'firstattn': lambda model: model.base_model.decoder.block[0].layer[0].SelfAttention
         },
         'mt5': {
-            'memtrans': lambda model: model.base_model.decoder.block[-3].layer[0].SelfAttention,
+            'memtrans': lambda model, layer: model.base_model.decoder.block[layer].layer[0].SelfAttention,
             'firstattn': lambda model: model.base_model.decoder.block[0].layer[0].SelfAttention
         }
     }
 
     def build_index(self):
-        self.dstore.build_index(batch_size=1000000)
+        for dstore in self.dstores:
+            dstore.build_index(batch_size=1000000)

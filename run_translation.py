@@ -656,7 +656,7 @@ def main():
         knn_wrapper = MemTransWrapper(
             dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir,
             move_dstore_to_mem=knn_args.move_dstore_to_mem, cuda=knn_args.knn_gpu,
-            recompute_dists=knn_args.recompute_dists,
+            recompute_dists=knn_args.recompute_dists, retrieval_layers=[0, 12],
             k=knn_args.k, stage=stage, track=knn_args.retrieval_track, by_ids=knn_args.retrieve_by_ids, 
             skip_retrieval_steps=1, skip_first_token=True, add_after_first=True)  # TODO: debug
     elif knn_args.retomaton or knn_args.cluster_dstore:
