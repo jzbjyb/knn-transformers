@@ -102,7 +102,7 @@ dstore_size=206896
 '
 
 model=google/t5-xl-lm-adapt
-output=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layer0_12
+output=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall
 train_file=data/eli5/val_astarget_answer_qa.json
 validation_file=data/eli5/val_astarget_answer_qa.json
 source_lang=en
@@ -111,13 +111,13 @@ split=train
 num_samples=1000000000
 prefix="Definition: Given a question, generate a descriptive answer. Question: "
 suffix=""
-#target_prefix="Evidence: "
-target_prefix="Answer: "
+evi_target_prefix="Evidence: "
+ans_target_prefix="Answer: "
 target_suffix=""
 use_approx_index=false
 dstore_size=206896
 
-echo python -u run_translation.py \
+python -u run_translation.py \
   --model_name_or_path ${model} \
   --train_file ${train_file} --validation_file ${validation_file} \
   --source_lang ${source_lang} --target_lang ${target_lang} \
@@ -127,7 +127,7 @@ echo python -u run_translation.py \
   --do_eval --eval_subset ${split} --max_eval_samples ${num_samples} --max_target_length ${max_target_length} \
   --source_prefix "${prefix}" \
   --source_suffix "${suffix}" \
-  --target_prefix "${target_prefix}" \
+  --target_prefix "${evi_target_prefix}" \
   --target_suffix "${target_suffix}" \
   --save_knnlm_dstore --build_index --memtrans
 
@@ -143,6 +143,6 @@ python -u run_translation.py \
   --source_prefix "${prefix}" \
   --source_suffix "${suffix}" \
   --dstore_size ${dstore_size} \
-  --target_prefix "${target_prefix}" \
+  --target_prefix "${ans_target_prefix}" \
   --target_suffix "${target_suffix}" \
   --memtrans --k 64 --retrieve_by_ids true --max_predict_samples 500 --retrieval_track ${output}/track_skip1_nopad_afterfirst

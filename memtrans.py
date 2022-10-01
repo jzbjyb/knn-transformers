@@ -108,8 +108,8 @@ class MemTransDatastore(object):
         assert self.cur_idx <= self.size, 'datastore overflow'
         if self.cur_idx + nt > self.size:
             nt = self.size - self.cur_idx
-            keys = keys[:nt]
-            values = values[:nt]
+            keys = keys[:, :nt]
+            values = values[:, :nt]
             tokens = tokens[:nt] if tokens is not None else tokens
             ids = ids[:nt] if ids is not None else ids
         
@@ -182,33 +182,46 @@ class MemTransDatastore(object):
             self.lengths = self.end_offsets - self.start_offsets
 
             # build strided tensor
-            self.keys_strided = StridedTensor(self.keys.permute(1, 0, 2), self.lengths)
-            self.values_strided = StridedTensor(self.values.permute(1, 0, 2), self.lengths)
-            self.tokens_strided = StridedTensor(self.tokens, self.lengths)
-            self.ids_strided = StridedTensor(self.ids, self.lengths)
+            # (n_tokens, n_heads, dim_per_head)
+            self.keys_strided = StridedTensor(self.keys.permute(1, 0, 2).contiguous(), self.lengths)
+            # (n_tokens, n_heads, dim_per_head)
+            self.values_strided = StridedTensor(self.values.permute(1, 0, 2).contiguous(), self.lengths)
+            if self.tokens is not None and self.ids is not None:
+                self.tokens_strided = StridedTensor(self.tokens, self.lengths)
+                self.ids_strided = StridedTensor(self.ids, self.lengths)
 
         # load index
         self.indices = []
         res = faiss.StandardGpuResources()
+        start = time.time()
         for h in range(self.n_heads):
-            start = time.time()
             index_name = self.get_index_path(head_idx=h)
             cpu_index = faiss.read_index(index_name, faiss.IO_FLAG_ONDISK_SAME_DIR)
-            logger.info(f'Loading index took {time.time() - start} s')
             if self.use_cuda:  # move index to gpu
                 start = time.time()
                 gpu_index = faiss.index_cpu_to_gpu(res, self.cuda_idx, cpu_index)
-                logger.info(f'Moving index to GPU took {time.time() - start} s')
             else:
                 gpu_index = cpu_index
             self.indices.append(gpu_index)
+        logger.info(f'Loading index took {time.time() - start} s')
     
     def get_knns(
         self, 
         queries: torch.FloatTensor,  # (n_heads, batch_size, dim)
         topk: int,
         return_all: bool = False):
+
         ori_device = queries.device
+        nh, bs, dim = queries.size()
+        if topk <= 0:  # return "empty" tensors
+            ret_ks = torch.zeros(nh, bs, 0, dim).to(queries)  # (n_heads, batch_size, topk, dim)
+            ret_vs = torch.zeros(nh, bs, 0, dim).to(queries)  # (n_heads, batch_size, topk, dim)
+            if return_all:
+                ret_ts = torch.zeros(nh, bs, 0).int().to(ori_device)  # (n_heads, batch_size, topk)
+                ret_ids = torch.zeros(nh, bs, 0).int().to(ori_device)  # (n_heads, batch_size, topk)
+                return ret_ks, ret_vs, ret_ts, ret_ids
+            return ret_ks, ret_vs, None, None
+
         queries = queries.to(self.device)
         ret_ks, ret_vs, ret_ts, ret_ids = [], [], [], []
         for h in range(self.n_heads):
@@ -257,7 +270,7 @@ class MemTransDatastore(object):
                 ret_ids = ret_ids[:, 1:]  # (batch_size, seq_len - 1)
 
         seq_len = ret_ks.size(1)
-        if seq_len >= max_length:  # truncate
+        if seq_len > max_length:  # truncate
             ret_ks = ret_ks[:, :max_length]  # (batch_size, max_length, n_heads, dim)
             ret_vs = ret_vs[:, :max_length]  # (batch_size, max_length, n_heads, dim)
             if return_all:
@@ -407,7 +420,7 @@ class MemTransAttn(object):
 
         topk = self.topk
         if sl > 1:  # TODO: eval mode is memory-intensive so we limite topk
-            topk = min(self.topk, 1)
+            topk = min(self.topk, 0)
 
         skip_for_retrieval = self.skip_retrieval_steps and key_length <= self.skip_retrieval_steps
         if skip_for_retrieval:  # deactivate retrieval for first seval steps
@@ -416,8 +429,8 @@ class MemTransAttn(object):
         if ids is None:
             ids = torch.arange(bs).to(query_states.device) + self.id_offset
 
-        # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
         if self.by_ids and sl == 1:  # TODO: support by_ids for evaluation mode
+            # (n_heads, batch_size, topk, dim_per_head) * 2, (n_heads, batch_size, topk) * 2
             if not skip_for_retrieval and self.by_ids_cache:
                 ret_ks, ret_vs, ret_ts, ret_ids = self.by_ids_cache
             else:
@@ -425,6 +438,7 @@ class MemTransAttn(object):
                     ids, max_length=topk, skip_first_token=self.skip_first_token, return_all=self.is_track)
                 self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids) if not skip_for_retrieval else None
         else:
+            # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
             ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns(query_states, topk=topk, return_all=self.is_track)
 
         # track retrieval
@@ -620,7 +634,7 @@ class MemTransAttn(object):
             # (batch_size, n_heads, topk + key_length, dim_per_head)
             if self.add_after_first and key_length > 1:  # always need to prepend for the first position
                 key_states = torch.cat([key_states[:, :, :1], ret_ks.squeeze(2), key_states[:, :, 1:]], dim=2)
-                value_states = torch.cat([key_states[:, :, :1], ret_vs.squeeze(2), value_states[:, :, 1:]], dim=2)
+                value_states = torch.cat([value_states[:, :, :1], ret_vs.squeeze(2), value_states[:, :, 1:]], dim=2)
             else:
                 key_states = torch.cat([ret_ks.squeeze(2), key_states], dim=2)
                 value_states = torch.cat([ret_vs.squeeze(2), value_states], dim=2)
@@ -724,7 +738,7 @@ def t5attetnion_forward(
     elif self.mta.stage == 'retrieve':
         ret_ks, ret_vs = self.mta.retrieve(query_states, key_length=key_length)
         if position_bias is None:  # init position_bias in the first layer which is reused in following layers
-            position_bias = position_bias = self.mta.init_position_bias(
+            position_bias = self.mta.init_position_bias(
                 self, past_key_value, mask, 
                 real_seq_length=real_seq_length, key_length=key_length, seq_length=seq_length, device=query_states.device)
         attn_weights, attn_output = self.mta.attn(

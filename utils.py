@@ -56,7 +56,11 @@ def _create_view(tensor, stride, inner_dims):
     size = (outdim, stride, *inner_dims)
 
     inner_dim_prod = int(np.prod(inner_dims))
-    multidim_stride = [inner_dim_prod, inner_dim_prod] + [1] * len(inner_dims)
+
+    # inner_dims [2, 3, 4] -> inner_stride [1, 4, 12]
+    inner_stride = ([1] + np.cumprod(inner_dims[::-1]).tolist()[:-1])[::-1] if len(inner_dims) else []
+
+    multidim_stride = [inner_dim_prod, inner_dim_prod] + inner_stride
 
     return torch.as_strided(tensor, size=size, stride=multidim_stride)
 
