@@ -356,6 +356,7 @@ class MemTransAttn(object):
         stage: str, 
         track: Union[bool, str] = False,  # track retrieved tokens by printing (bool) or writing to files (str)
         by_ids: bool = False,  # whether to retrieve documents by ids
+        shard_start: int = 0,  # which id to start retrieving from
         skip_retrieval_steps: int = 0,  # number of decoding steps where retrieval is skipped
         skip_first_token: bool = False,  # skip the first token retrieved which is usually bos
         add_after_first: bool = False,  # add the retrieved tokens after the first token which is usually bos
@@ -372,7 +373,7 @@ class MemTransAttn(object):
         
         self.by_ids = by_ids
         self.by_ids_cache = None  # cache the retrieved results so following decoding steps do not need to retrieve
-        self.id_offset = 0  # example idx
+        self.id_offset = shard_start  # example idx
         
         self.skip_retrieval_steps = skip_retrieval_steps
         self.skip_first_token = skip_first_token
@@ -770,6 +771,7 @@ class MemTransWrapper(object):
         stage: str = 'save',
         track: Union[bool, str] = False,
         by_ids: bool = False,
+        shard_start: int = 0,  # used for sharded generated with by_ids = True
         skip_retrieval_steps: int = 0,
         skip_first_token: bool = False,
         add_after_first: bool = False,
@@ -783,6 +785,7 @@ class MemTransWrapper(object):
         self.stage = stage
         self.track = track
         self.by_ids = by_ids
+        self.shard_start = shard_start
         self.skip_retrieval_steps = skip_retrieval_steps
         self.skip_first_token = skip_first_token
         self.add_after_first = add_after_first
@@ -841,6 +844,7 @@ class MemTransWrapper(object):
                 stage=self.stage, 
                 track=self.track, 
                 by_ids=self.by_ids, 
+                shard_start=self.shard_start,
                 skip_retrieval_steps=self.skip_retrieval_steps,
                 skip_first_token=self.skip_first_token,
                 add_after_first=self.add_after_first)

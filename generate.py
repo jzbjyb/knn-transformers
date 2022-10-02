@@ -60,7 +60,8 @@ class GenerationWrapper(object):
         # TODO: for simplicity we reuse the en-zh translation dataset
         sources: List[str] = []
         targets: List[str] = []
-        decoder_prefixes: List[str] = [] if self.use_evidence == 'decoder_prefix' else None
+        has_decoder_prefix = self.use_evidence in {'decoder_prefix', 'fixed'}
+        decoder_prefixes: List[str] = [] if has_decoder_prefix else None
         
         with open(data_file, 'r') as fin:
             prev_source = None
@@ -77,18 +78,21 @@ class GenerationWrapper(object):
                 target = example['zh']
                 
                 if self.use_evidence != 'no':
-                    evi = example['decoder_prefix'].strip()
-                    if self.max_evidence_len:
-                        evi = self.clean_by_tokenizer(evi, max_lengh=self.max_evidence_len)
-                    if self.add_period and re.search('[?!.]$', evi) is None:
-                        evi += '.'
-                    evi = self.evidence_prefix + evi + self.evidence_suffix
-                    if self.use_evidence == 'decoder_prefix':
-                        decoder_prefixes.append(evi)
-                    elif self.use_evidence == 'encoder_suffix':
-                        source = source + ' ' + evi
-                    elif self.use_evidence == 'encoder_prefix':
-                        source = evi + ' ' + source
+                    if self.use_evidence == 'fixed':
+                        decoder_prefixes.append(self.evidence_prefix)  # TODO: use another argumenet?
+                    else:
+                        evi = example['decoder_prefix'].strip()
+                        if self.max_evidence_len:
+                            evi = self.clean_by_tokenizer(evi, max_lengh=self.max_evidence_len)
+                        if self.add_period and re.search('[?!.]$', evi) is None:
+                            evi += '.'
+                        evi = self.evidence_prefix + evi + self.evidence_suffix
+                        if self.use_evidence == 'decoder_prefix':
+                            decoder_prefixes.append(evi)
+                        elif self.use_evidence == 'encoder_suffix':
+                            source = source + ' ' + evi
+                        elif self.use_evidence == 'encoder_prefix':
+                            source = evi + ' ' + source
 
                 sources.append(source)
                 targets.append(target)
@@ -98,7 +102,7 @@ class GenerationWrapper(object):
         
         total_count = len(sources)
         assert len(sources) == len(targets)
-        if self.use_evidence == 'decoder_prefix':
+        if has_decoder_prefix:
             assert len(sources) == len(decoder_prefixes)
 
         # shard
@@ -107,37 +111,44 @@ class GenerationWrapper(object):
         shard_end = min(shard_start + shard_size, total_count)
         sources = sources[shard_start:shard_end]
         targets = targets[shard_start:shard_end]
-        if self.use_evidence == 'decoder_prefix':
+        if has_decoder_prefix:
             decoder_prefixes = decoder_prefixes[shard_start:shard_end]
 
         logger.info(f'loaded data "{data_file}" from {shard_start} to {shard_end}')
 
-        return sources, targets, decoder_prefixes
+        return sources, targets, decoder_prefixes, (shard_start, shard_end)
 
     def generate_batch(
         self,
         sources: List[str],
-        targets: List[str] = None,
+        targets: List[str],
         decoder_prefixes: List[str] = None) -> List[str]:
 
         # decoder prefix function
         if decoder_prefixes:
-            assert len(sources) == len(decoder_prefixes)
+            assert len(sources) == len(decoder_prefixes) == len(targets)
             prefix_tokens_ids = [self.tokenizer(prefix, add_special_tokens=False)['input_ids'] for prefix in decoder_prefixes]
             def prefix_allowed_tokens_fn(batch_id: int, input_ids: torch.Tensor) -> List[int]:
                 if input_ids.shape[-1] > len(prefix_tokens_ids[batch_id]):
                     return self._all_tokens
                 return prefix_tokens_ids[batch_id][input_ids.shape[-1] - 1]
+            targets = [f'{dp} {t}' for t, dp in zip(targets, decoder_prefixes)]  # prepend the prefix to targets
         else:
             prefix_allowed_tokens_fn = None
 
         # tokenize
-        sources = self.tokenizer.batch_encode_plus(sources, return_tensors='pt', padding=True, truncation=True)
+        sources = self.tokenizer.batch_encode_plus(
+            sources, return_tensors='pt', padding=True, truncation=True)
         sources = {k: v.to(self.device) for k, v in sources.items()}
+        targets = self.tokenizer.batch_encode_plus(
+            targets, return_tensors='pt', padding=True, truncation=True, max_length=self.gen_args['max_length'])
+        labels = targets['input_ids'].to(self.device)
+        labels[labels == self.tokenizer.pad_token_id] = -100
 
         # generate
         with torch.no_grad():
             output = self.model.generate(**sources, prefix_allowed_tokens_fn=prefix_allowed_tokens_fn, **self.gen_args)
+            _ = self.model(**sources, labels=labels)
 
         # detokenize
         output = self.tokenizer.batch_decode(output, skip_special_tokens=True)
@@ -180,15 +191,16 @@ if __name__ == '__main__':
     parser.add_argument('--source_suffix', type=str, default='', help='source suffix')
     parser.add_argument('--evidence_prefix', type=str, default='', help='decoder prefix prefix')
     parser.add_argument('--evidence_suffix', type=str, default='', help='decoder prefix suffix')
-    parser.add_argument('--use_evidence', type=str, default='no', choices=['no', 'encoder_suffix', 'encoder_prefix', 'decoder_prefix'], help='use evidence in which position')
+    parser.add_argument('--use_evidence', type=str, default='no', 
+        choices=['no', 'encoder_suffix', 'encoder_prefix', 'decoder_prefix', 'fixed'], help='use evidence in which position')
     parser.add_argument('--max_gen_len', type=int, default=256, help='max generation length')
     parser.add_argument('--max_evidence_len', type=int, default=128, help='max evidence length')
     # model args
     parser.add_argument('--model', type=str, required=True, help='model')
     parser.add_argument('--batch_size', type=int, default=4, help='batch size')
+    parser.add_argument('--retrieval_topk', type=int, default=0, help='topk tokens retrieved in decoder. 0 deactivates retreival')
     args = parser.parse_args()
-
-    use_retrieval = False
+    args.use_retrieval = args.retrieval_topk > 0
 
     # logging config
     logging.basicConfig(
@@ -206,19 +218,18 @@ if __name__ == '__main__':
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     wrapper = GenerationWrapper(model, tokenizer, args)
 
-    if use_retrieval:
-        # add retrieval
+    # load data
+    sources, targets, decoder_prefixes, (shard_start, shard_end) = wrapper.load_data(
+        args.data_file, shard_id=args.global_rank, num_shards=args.world_size)
+
+    if args.use_retrieval:  # add retrieval
         ret_wrapper = MemTransWrapper(
             dstore_size=206896, dstore_dir='checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall',
             move_dstore_to_mem=True, cuda=True,
             recompute_dists=True, retrieval_layers=list(range(24)),
-            k=64, stage='retrieve', track=False, by_ids=True, 
-            skip_retrieval_steps=1, skip_first_token=True, add_after_first=True)  # TODO: debug
+            k=args.retrieval_topk, stage='retrieve', track=False, by_ids=True, 
+            skip_retrieval_steps=1, skip_first_token=True, add_after_first=True, shard_start=shard_start)  # TODO: debug
         ret_wrapper.break_into(model)
-
-    # load data
-    sources, targets, decoder_prefixes = wrapper.load_data(
-        args.data_file, shard_id=args.global_rank, num_shards=args.world_size)
 
     # generate
     wrapper.generate(
