@@ -19,6 +19,7 @@ metric_key_map: Dict[str, Dict[str, str]] = {
 def load_pred_file(
     pred_file: str, 
     dedup: bool = False,  # keep the first instance among those with the same source
+    remove_prediction_prefix: str = 'Answer:'
     ) -> List[Tuple[str, str, str]]:  # source, target, pred
     examples: List[Tuple[str, str, str]] = []
     with open(pred_file, 'r') as fin:
@@ -29,9 +30,11 @@ def load_pred_file(
             if dedup and prev_source == source:  # TODO: use target if evidence is included in source
                 continue
             prev_source = source
-            prefix = items[3] if len(items) >= 4 else ''
-            assert pred.startswith(prefix)
+            prefix = (items[3] if len(items) >= 4 else '').strip()
+            assert pred.startswith(prefix), f'prediction "{pred}" should start with the prefix "{prefix}"'
             pred = pred[len(prefix):].strip()
+            if remove_prediction_prefix and pred.startswith(remove_prediction_prefix):
+                pred = pred[len(remove_prediction_prefix):].strip()
             examples.append((source, target, pred))
     return examples
 
@@ -77,7 +80,7 @@ if __name__ == '__main__':
     sources, targets, predictions = list(zip(*examples))
     targets = [e[1] for e in examples2][:len(sources)]
 
-    print(f'#total examples {len(examples)}')
+    print(f'#total examples {len(predictions)}')
     '''
     ew = EvalWrapper(args.metrics)
     metric2score = ew.evaluate(sources, targets, predictions)
@@ -89,7 +92,7 @@ if __name__ == '__main__':
     for metric in args.metrics:
         metric_func = evaluate.load(metric)
         if args.aggregate is None:
-            print(f'#real examples {len(examples)}')
+            print(f'#real examples {len(predictions)}')
             perf = metric_func.compute(predictions=predictions, references=targets)
         else:  # use custom aggregation function
             perf = metric_func.compute(predictions=predictions, references=targets, use_aggregator=False)

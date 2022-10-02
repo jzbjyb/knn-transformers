@@ -5,13 +5,16 @@ import json
 import re
 import math
 import logging
+import sys
 from tqdm import tqdm
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 from utils import setup_multi_gpu_slurm
+from memtrans import MemTransWrapper
 
 logger = logging.getLogger(__name__)
+logger.setLevel(20)
 
 class GenerationWrapper(object):
     def __init__(
@@ -52,7 +55,8 @@ class GenerationWrapper(object):
         self, 
         data_file: str, 
         shard_id: int = 0, 
-        num_shards: int = 1) -> Tuple[List, List, List]:
+        num_shards: int = 1,
+        max_num_examples: int = None) -> Tuple[List, List, List]:
         # TODO: for simplicity we reuse the en-zh translation dataset
         sources: List[str] = []
         targets: List[str] = []
@@ -88,6 +92,9 @@ class GenerationWrapper(object):
 
                 sources.append(source)
                 targets.append(target)
+
+                if max_num_examples and len(sources) >= max_num_examples:
+                    break
         
         total_count = len(sources)
         assert len(sources) == len(targets)
@@ -180,6 +187,16 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, required=True, help='model')
     parser.add_argument('--batch_size', type=int, default=4, help='batch size')
     args = parser.parse_args()
+
+    use_retrieval = False
+
+    # logging config
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
     # setup slurm
     setup_multi_gpu_slurm(args)
     logger.info(args)
@@ -188,6 +205,16 @@ if __name__ == '__main__':
     model = AutoModelForSeq2SeqLM.from_pretrained(args.model).to(args.device)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     wrapper = GenerationWrapper(model, tokenizer, args)
+
+    if use_retrieval:
+        # add retrieval
+        ret_wrapper = MemTransWrapper(
+            dstore_size=206896, dstore_dir='checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall',
+            move_dstore_to_mem=True, cuda=True,
+            recompute_dists=True, retrieval_layers=list(range(24)),
+            k=64, stage='retrieve', track=False, by_ids=True, 
+            skip_retrieval_steps=1, skip_first_token=True, add_after_first=True)  # TODO: debug
+        ret_wrapper.break_into(model)
 
     # load data
     sources, targets, decoder_prefixes = wrapper.load_data(

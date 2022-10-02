@@ -16,7 +16,7 @@ source env.sh
 
 batch_size=32
 max_target_length=256
-generation_file=generated_predictions.memtrans_topk64_byids_skip1_nopad_afterfirst.txt
+generation_file=generated_predictions.memtrans_topk64_byids_skip1_nopad_afterfirst_nospace.txt
 #generation_file=generated_predictions.txt
 
 : '
@@ -112,7 +112,7 @@ num_samples=1000000000
 prefix="Definition: Given a question, generate a descriptive answer. Question: "
 suffix=""
 evi_target_prefix="Evidence: "
-ans_target_prefix="Answer: "
+ans_target_prefix="Answer:"
 target_suffix=""
 use_approx_index=false
 dstore_size=206896
@@ -145,4 +145,4 @@ python -u run_translation.py \
   --dstore_size ${dstore_size} \
   --target_prefix "${ans_target_prefix}" \
   --target_suffix "${target_suffix}" \
-  --memtrans --k 64 --retrieve_by_ids true --max_predict_samples 500 --retrieval_track ${output}/track_skip1_nopad_afterfirst
+  --memtrans --k 64 --retrieve_by_ids true --max_predict_samples 500 --retrieval_track ${output}/track_skip1_nopad_afterfirst_nospace

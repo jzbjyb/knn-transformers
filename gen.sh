@@ -19,6 +19,7 @@ task=prefix
 model=google/t5-xl-lm-adapt
 data_file=data/eli5/val_astarget_selfanswer_evidence.json
 out_file=checkpoints/eli5/t53b/val_astarget_selfanswer/prompt1/t53b_evidence_evidencelen64.tsv
+#data_file=data/eli5/val_astarget_selfanswer_qa.json
 evi_len=64
 gen_len=$( expr ${evi_len} + 256 )
 
@@ -33,6 +34,7 @@ elif [[ ${task} == "prefix" ]]; then
     sp="Definition: Given a question, generate a descriptive answer. Question: "
     ss=""
     e=decoder_prefix
+    #e=no
     ep="Evidence: "
     es=" Answer:"
 else

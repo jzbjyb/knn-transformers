@@ -1,7 +1,11 @@
 import os
 from argparse import Namespace
+import logging
 import torch
 import numpy as np
+
+logger = logging.getLogger(__name__)
+logger.setLevel(20)
 
 def setup_multi_gpu_slurm(args: Namespace):
     is_slurm = os.getenv('SLURM_JOB_ID') is not None
@@ -10,13 +14,13 @@ def setup_multi_gpu_slurm(args: Namespace):
         args.local_rank = int(os.getenv('SLURM_LOCALID'))
         args.global_rank = int(os.getenv('SLURM_PROCID'))
         args.device = f'cuda:{args.local_rank}'
-        print(f'SLURM job: global rank {args.global_rank}, GPU device {args.device}')
+        logger.info(f'SLURM job: global rank {args.global_rank}, GPU device {args.device}')
     else:
         args.world_size = 1
         args.local_rank = args.global_rank = 0
         if not hasattr(args, 'device') or not args.device:  # set device if not specified
             args.device = f'cuda:{args.local_rank}'
-        print(f"Local job: global rank {args.global_rank}, GPU device {args.device}")
+        logger.info(f"Local job: global rank {args.global_rank}, GPU device {args.device}")
     args.is_multi = args.world_size > 1
 
 class StridedTensorCore:
@@ -57,7 +61,7 @@ def _create_view(tensor, stride, inner_dims):
 
     inner_dim_prod = int(np.prod(inner_dims))
 
-    # inner_dims [2, 3, 4] -> inner_stride [1, 4, 12]
+    # e.g., inner_dims [2, 3, 4] -> inner_stride [12, 4, 1]
     inner_stride = ([1] + np.cumprod(inner_dims[::-1]).tolist()[:-1])[::-1] if len(inner_dims) else []
 
     multidim_stride = [inner_dim_prod, inner_dim_prod] + inner_stride
