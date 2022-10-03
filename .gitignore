@@ -178,3 +178,4 @@ checkpoints
 data
 models
 slurm
+.vscode

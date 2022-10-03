@@ -29,25 +29,21 @@ class MemTransDatastore(object):
         dimension: int, 
         n_heads: int, 
         move_dstore_to_mem: bool = False, 
-        cuda_idx: int = -1):
+        device: torch.device = None):
         self.directory = directory
         self.model_type = model_type
         self.size = size
         self.dimension = dimension
         self.n_heads = n_heads
         self.move_dstore_to_mem = move_dstore_to_mem
-        self.cuda_idx = cuda_idx
+        self.device = torch.device('cpu') if device is None else device
         self.cur_idx = 0
         self.precision = np.float32
         self.load_or_init_dstore()
     
     @property
     def use_cuda(self):
-        return self.cuda_idx != -1
-    
-    @property
-    def device(self):
-        return torch.device(f'cuda:{self.cuda_idx}' if self.use_cuda else 'cpu')
+        return self.device.type == 'cuda'
 
     def get_index_path(self, head_idx: int) -> str:
         return get_index_path(self.directory, self.model_type, self.size, self.dimension, head_idx=head_idx)
@@ -199,7 +195,7 @@ class MemTransDatastore(object):
             cpu_index = faiss.read_index(index_name, faiss.IO_FLAG_ONDISK_SAME_DIR)
             if self.use_cuda:  # move index to gpu
                 start = time.time()
-                gpu_index = faiss.index_cpu_to_gpu(res, self.cuda_idx, cpu_index)
+                gpu_index = faiss.index_cpu_to_gpu(res, self.device.index, cpu_index)
             else:
                 gpu_index = cpu_index
             self.indices.append(gpu_index)
@@ -222,12 +218,12 @@ class MemTransDatastore(object):
                 return ret_ks, ret_vs, ret_ts, ret_ids
             return ret_ks, ret_vs, None, None
 
-        queries = queries.to(self.device)
+        queries = queries.cpu().numpy()  # TODO: add torch tensor (GPU) support
         ret_ks, ret_vs, ret_ts, ret_ids = [], [], [], []
         for h in range(self.n_heads):
             index = self.indices[h]
-            dists, indices = index.search(queries[h].contiguous(), topk)  # (batch_size, topk)
-            indices = indices.to(self.device)
+            indices = index.search(np.ascontiguousarray(queries[h]), topk)[1]  # (batch_size, topk)
+            indices = torch.from_numpy(indices).to(self.keys.device)
             ret_ks.append(self.keys[h][indices])  # (batch_size, topk, dim)
             ret_vs.append(self.values[h][indices])  # (batch_size, topk, dim)
             if return_all:
@@ -823,7 +819,7 @@ class MemTransWrapper(object):
         filter_topk: int = 0,
         filter_order: str = 'original',
         move_dstore_to_mem: bool = False, 
-        cuda: bool = False):
+        device: torch.device = None):
         self.dstore_size = dstore_size
         self.dstore_dir = dstore_dir
         self.recompute_dists = recompute_dists
@@ -839,9 +835,7 @@ class MemTransWrapper(object):
         self.filter_topk = filter_topk
         self.filter_order = filter_order
         self.move_dstore_to_mem = move_dstore_to_mem
-        self.cuda = cuda and torch.cuda.is_available() and torch.cuda.device_count() > 0
-        self.cuda_idx = 0 if self.cuda else -1
-        self.device = torch.device(f'cuda:{self.cuda_idx}' if self.cuda else 'cpu')
+        self.device = torch.device('cpu') if device is None else device
     
     def get_layer(self, key: str = 'memtrans'):
         mt = self.model.config.model_type
@@ -880,7 +874,7 @@ class MemTransWrapper(object):
                 dimension=self.model.config.d_kv,
                 n_heads=self.model.config.num_heads,
                 move_dstore_to_mem=self.move_dstore_to_mem,
-                cuda_idx=self.cuda_idx)
+                device=self.device)
             if self.stage == 'retrieve':
                 dstore.load_index(build_offset=True)
             self.dstores.append(dstore)

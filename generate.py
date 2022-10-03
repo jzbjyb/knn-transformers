@@ -227,10 +227,10 @@ if __name__ == '__main__':
     if args.use_retrieval:  # add retrieval
         ret_wrapper = MemTransWrapper(
             dstore_size=206896, dstore_dir='checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall',
-            move_dstore_to_mem=True, cuda=False,
-            recompute_dists=True, retrieval_layers=list(range(24)),
-            k=args.retrieval_topk, stage='retrieve', track=False, by_ids=True, 
-            skip_retrieval_steps=1, skip_first_token=True, add_after_first=True, 
+            move_dstore_to_mem=True, device=args.device,
+            recompute_dists=True, retrieval_layers=[18],
+            k=args.retrieval_topk, stage='retrieve', track=False, by_ids=False, 
+            skip_retrieval_steps=0, skip_first_token=False, add_after_first=False, 
             filter_topk=args.filter_topk, filter_order=args.filter_order,
             shard_start=shard_start)  # TODO: debug
         ret_wrapper.break_into(model)

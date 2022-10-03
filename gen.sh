@@ -2,8 +2,8 @@
 #SBATCH --job-name=gen
 #SBATCH --cpus-per-task=10
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=2
-#SBATCH --ntasks-per-node=2
+#SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=4
 #SBATCH --time=3:00:00
 #SBATCH --partition=learnlab
 #SBATCH --mem=256GB
@@ -20,8 +20,10 @@ model=google/t5-xl-lm-adapt
 #data_file=data/eli5/val_astarget_selfanswer_evidence.json
 #out_file=checkpoints/eli5/t53b/val_astarget_selfanswer/prompt1/t53b_evidence_evidencelen64.tsv
 data_file=data/eli5/val_astarget_selfanswer_qa.json
-out_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/gen_topk64_byids_skip1_nopad_afterfirst_nospace.filter100_asc.tsv
+#out_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/gen_topk64_byids_skip1_nopad_afterfirst_nospace.filter100_asc.tsv
+out_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/gen_topk64.l18.tsv
 
+batch_size=32
 evi_len=0
 gen_len=256
 retrieval_topk=0
@@ -42,8 +44,8 @@ elif [[ ${task} == "prefix" ]]; then
     es=" Answer:"
 elif [[ ${task} == "retrieve" ]]; then
     retrieval_topk=64
-    filter_topk=100
-    filter_order=ascending
+    filter_topk=0
+    filter_order=original
     sp="Definition: Given a question, generate a descriptive answer. Question: "
     ss=""
     e=fixed
@@ -57,7 +59,7 @@ srun python generate.py \
     --model ${model} \
     --data_file ${data_file} \
     --out_file ${out_file} \
-    --batch_size 32 \
+    --batch_size ${batch_size} \
     --source_prefix "${sp}" \
     --source_suffix "${ss}" \
     --use_evidence ${e} \

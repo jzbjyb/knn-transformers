@@ -80,6 +80,15 @@ if __name__ == '__main__':
     sources, targets, predictions = list(zip(*examples))
     targets = [e[1] for e in examples2][:len(sources)]
 
+    '''
+    from transformers import AutoTokenizer
+    tokenizer = AutoTokenizer.from_pretrained('google/t5-xl-lm-adapt')
+    inds = [i for i, t in enumerate(targets) if len(tokenizer.tokenize(t)) >= 70]
+    sources = [sources[i] for i in inds]
+    targets = [targets[i] for i in inds]
+    predictions = [predictions[i] for i in inds]
+    '''
+    
     print(f'#total examples {len(predictions)}')
     '''
     ew = EvalWrapper(args.metrics)
