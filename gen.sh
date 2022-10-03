@@ -20,7 +20,7 @@ model=google/t5-xl-lm-adapt
 #data_file=data/eli5/val_astarget_selfanswer_evidence.json
 #out_file=checkpoints/eli5/t53b/val_astarget_selfanswer/prompt1/t53b_evidence_evidencelen64.tsv
 data_file=data/eli5/val_astarget_selfanswer_qa.json
-out_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/gen_topk64_byids_skip1_nopad_afterfirst_nospace.tsv
+out_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/gen_topk64_byids_skip1_nopad_afterfirst_nospace.filter100_asc.tsv
 
 evi_len=0
 gen_len=256
@@ -42,6 +42,8 @@ elif [[ ${task} == "prefix" ]]; then
     es=" Answer:"
 elif [[ ${task} == "retrieve" ]]; then
     retrieval_topk=64
+    filter_topk=100
+    filter_order=ascending
     sp="Definition: Given a question, generate a descriptive answer. Question: "
     ss=""
     e=fixed
@@ -63,4 +65,6 @@ srun python generate.py \
     --evidence_suffix "${es}" \
     --max_evidence_len ${evi_len} \
     --max_gen_len ${gen_len} \
-    --retrieval_topk ${retrieval_topk}
+    --retrieval_topk ${retrieval_topk} \
+    --filter_topk ${filter_topk} \
+    --filter_order ${filter_order}

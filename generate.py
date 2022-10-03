@@ -199,6 +199,8 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, required=True, help='model')
     parser.add_argument('--batch_size', type=int, default=4, help='batch size')
     parser.add_argument('--retrieval_topk', type=int, default=0, help='topk tokens retrieved in decoder. 0 deactivates retreival')
+    parser.add_argument('--filter_topk', type=int, default=0, help='filter_topk')
+    parser.add_argument('--filter_order', type=str, default='original', help='filter_order')
     args = parser.parse_args()
     args.use_retrieval = args.retrieval_topk > 0
 
@@ -225,10 +227,12 @@ if __name__ == '__main__':
     if args.use_retrieval:  # add retrieval
         ret_wrapper = MemTransWrapper(
             dstore_size=206896, dstore_dir='checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall',
-            move_dstore_to_mem=True, cuda=True,
+            move_dstore_to_mem=True, cuda=False,
             recompute_dists=True, retrieval_layers=list(range(24)),
             k=args.retrieval_topk, stage='retrieve', track=False, by_ids=True, 
-            skip_retrieval_steps=1, skip_first_token=True, add_after_first=True, shard_start=shard_start)  # TODO: debug
+            skip_retrieval_steps=1, skip_first_token=True, add_after_first=True, 
+            filter_topk=args.filter_topk, filter_order=args.filter_order,
+            shard_start=shard_start)  # TODO: debug
         ret_wrapper.break_into(model)
 
     # generate

@@ -244,6 +244,41 @@ class MemTransDatastore(object):
             return ret_ks, ret_vs, ret_ts, ret_ids
         return ret_ks, ret_vs, None, None
     
+    def filter_by_similarity(
+        self,
+        queries: torch.FloatTensor,  # (n_heads, batch_size, dim)
+        ret_ks: torch.FloatTensor,  # (n_heads, batch_size, seq_len, dim)
+        ret_vs: torch.FloatTensor,  # (n_heads, batch_size, seq_len, dim)
+        ret_ts: torch.LongTensor = None,  # (n_heads, batch_size, seq_len)
+        ret_ids: torch.LongTensor = None,  # (n_heads, batch_size, seq_len)
+        topk: int = 1,
+        order: str = 'original'):
+
+        seq_len, dim = ret_ks.size()[2:]
+        topk = min(topk, seq_len)
+        assert order in {'original', 'descending', 'ascending'}
+
+        # compute similarity and choose topk
+        scores = torch.einsum("nbd,nbsd->nbs", queries, ret_ks)  # (n_heads, batch_size, seq_len)
+        
+        # topk
+        topk_inds = torch.topk(scores, topk, dim=-1, sorted=True)[1]  # (n_heads, batch_size, topk)
+        if order == 'ascending':  # flip indices
+            topk_inds = torch.flip(topk_inds, dims=[-1])
+        elif order == 'original':  # follow the order of original appearance
+            topk_inds = torch.sort(topk_inds, dim=-1)[0]
+
+        # select
+        if ret_ts is not None:
+            ret_ts = torch.gather(ret_ts, 2, topk_inds)  # (n_heads, batch_size, topk)
+        if ret_ids is not None:
+            ret_ids = torch.gather(ret_ids, 2, topk_inds)  # (n_heads, batch_size, topk)
+        topk_inds = topk_inds.unsqueeze(-1).repeat(1, 1, 1, dim)  # (n_heads, batch_size, topk, dim)
+        ret_ks = torch.gather(ret_ks, 2, topk_inds)  # (n_heads, batch_size, topk, dim)
+        ret_vs = torch.gather(ret_vs, 2, topk_inds)  # (n_heads, batch_size, topk, dim)
+
+        return ret_ks, ret_vs, ret_ts, ret_ids
+
     def get_knns_by_ids(
         self, 
         ids: torch.LongTensor,  # (batch_size)
@@ -282,6 +317,8 @@ class MemTransDatastore(object):
         if return_all:
             ret_ts = ret_ts.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, max_length)
             ret_ids = ret_ids.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, max_length)
+
+        if return_all:
             return ret_ks, ret_vs, ret_ts, ret_ids
         else:
             return ret_ks, ret_vs, None, None
@@ -360,7 +397,8 @@ class MemTransAttn(object):
         skip_retrieval_steps: int = 0,  # number of decoding steps where retrieval is skipped
         skip_first_token: bool = False,  # skip the first token retrieved which is usually bos
         add_after_first: bool = False,  # add the retrieved tokens after the first token which is usually bos
-        ):
+        filter_topk: int = 0,
+        filter_order: str = 'original'):
         assert stage in {'save', 'retrieve'}
         self.dstore = dstore
         self.topk = topk
@@ -378,6 +416,8 @@ class MemTransAttn(object):
         self.skip_retrieval_steps = skip_retrieval_steps
         self.skip_first_token = skip_first_token
         self.add_after_first = add_after_first
+        self.filter_topk = filter_topk
+        self.filter_order = filter_order
 
     @property
     def is_track(self):
@@ -438,6 +478,11 @@ class MemTransAttn(object):
                 ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_ids(
                     ids, max_length=topk, skip_first_token=self.skip_first_token, return_all=self.is_track)
                 self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids) if not skip_for_retrieval else None
+            
+            if self.filter_topk:  # filter
+                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.filter_by_similarity(
+                    query_states, ret_ks, ret_vs, ret_ts, ret_ids, topk=self.filter_topk, order=self.filter_order)
+
         else:
             # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
             ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns(query_states, topk=topk, return_all=self.is_track)
@@ -622,7 +667,7 @@ class MemTransAttn(object):
             # compute output
             # (batch_size, n_heads, seq_length, dim_per_head)
             attn_output = torch.matmul(attn_weights[:, :, :, -kl:], value_states)
-            attn_output += torch.einsum("bnqk,bnqkd->bnqd", attn_weights[:, :, :, :topk], ret_vs)  
+            attn_output += torch.einsum("bnqk,bnqkd->bnqd", attn_weights[:, :, :, :topk], ret_vs)
             attn_output = self.unshape(attn_output)  # (batch_size, seq_length, dim)
             attn_output = ori_attn.o(attn_output)
         
@@ -775,6 +820,8 @@ class MemTransWrapper(object):
         skip_retrieval_steps: int = 0,
         skip_first_token: bool = False,
         add_after_first: bool = False,
+        filter_topk: int = 0,
+        filter_order: str = 'original',
         move_dstore_to_mem: bool = False, 
         cuda: bool = False):
         self.dstore_size = dstore_size
@@ -789,6 +836,8 @@ class MemTransWrapper(object):
         self.skip_retrieval_steps = skip_retrieval_steps
         self.skip_first_token = skip_first_token
         self.add_after_first = add_after_first
+        self.filter_topk = filter_topk
+        self.filter_order = filter_order
         self.move_dstore_to_mem = move_dstore_to_mem
         self.cuda = cuda and torch.cuda.is_available() and torch.cuda.device_count() > 0
         self.cuda_idx = 0 if self.cuda else -1
@@ -847,7 +896,9 @@ class MemTransWrapper(object):
                 shard_start=self.shard_start,
                 skip_retrieval_steps=self.skip_retrieval_steps,
                 skip_first_token=self.skip_first_token,
-                add_after_first=self.add_after_first)
+                add_after_first=self.add_after_first,
+                filter_topk=self.filter_topk,
+                filter_order=self.filter_order)
             attn_layer.mta = mta
             attn_layer.relative_attention_bias = relative_attention_bias
 
