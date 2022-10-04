@@ -200,11 +200,39 @@ class MemTransDatastore(object):
                 gpu_index = cpu_index
             self.indices.append(gpu_index)
         logger.info(f'Loading index took {time.time() - start} s')
+
+    def _get_knns_single_head(
+        self,
+        ret_head_idx: int = None,  # head on which to perform knn retrieval
+        select_head_idx: int = None,  # head from which to select keys and values
+        queries: torch.FloatTensor = None,  # (n_heads, batch_size, dim)
+        indices: torch.LongTensor = None,  # (batch_size, topk)  used to avoid retrieval again
+        topk: int = 0,
+        return_all: bool = False,
+        return_indices: bool = False):
+
+        if indices is None:  # retreival
+            index = self.indices[ret_head_idx]
+            # TODO: add torch tensor (GPU) support
+            indices = index.search(np.ascontiguousarray(queries[ret_head_idx].cpu().numpy()), topk)[1]  # (batch_size, topk)
+            indices = torch.from_numpy(indices).to(self.keys.device)
+        if return_indices:
+            return indices
+
+        # select
+        ret_k = self.keys[select_head_idx][indices]  # (batch_size, topk, dim)
+        ret_v = self.values[select_head_idx][indices]  # (batch_size, topk, dim)
+        ret_t = ret_id = None
+        if return_all:
+            ret_t = self.tokens[indices]  # (batch_size, topk)
+            ret_id = self.ids[indices]  # (batch_size, topk)
+        return ret_k, ret_v, ret_t, ret_id, indices
     
     def get_knns(
         self, 
         queries: torch.FloatTensor,  # (n_heads, batch_size, dim)
         topk: int,
+        only_use_head_idx: int = None,  # TODO: debug
         return_all: bool = False):
 
         ori_device = queries.device
@@ -218,20 +246,27 @@ class MemTransDatastore(object):
                 return ret_ks, ret_vs, ret_ts, ret_ids
             return ret_ks, ret_vs, None, None
 
-        queries = queries.cpu().numpy()  # TODO: add torch tensor (GPU) support
         ret_ks, ret_vs, ret_ts, ret_ids = [], [], [], []
-        for h in range(self.n_heads):
-            index = self.indices[h]
-            indices = index.search(np.ascontiguousarray(queries[h]), topk)[1]  # (batch_size, topk)
-            indices = torch.from_numpy(indices).to(self.keys.device)
-            ret_ks.append(self.keys[h][indices])  # (batch_size, topk, dim)
-            ret_vs.append(self.values[h][indices])  # (batch_size, topk, dim)
-            if return_all:
-                assert self.tokens is not None
-                ret_ts.append(self.tokens[indices])  # (batch_size, topk)
-                assert self.ids is not None
-                ret_ids.append(self.ids[indices])  # (batch_size, topk)
-            
+
+        if only_use_head_idx is None:  # different heads retrieve separately
+            for h in range(self.n_heads):
+                ret_k, ret_v, ret_t, ret_id, _ = self._get_knns_single_head(
+                    ret_head_idx=h, select_head_idx=h, queries=queries, topk=topk, return_all=return_all)
+                ret_ks.append(ret_k)
+                ret_vs.append(ret_v)
+                ret_ts.append(ret_t)
+                ret_ids.append(ret_id)
+        else:
+            indices = self._get_knns_single_head(
+                ret_head_idx=only_use_head_idx, queries=queries, topk=topk, return_indices=True)
+            for h in range(self.n_heads):
+                ret_k, ret_v, ret_t, ret_id, _ = self._get_knns_single_head(
+                    select_head_idx=h, indices=indices, return_all=return_all)
+                ret_ks.append(ret_k)
+                ret_vs.append(ret_v)
+                ret_ts.append(ret_t)
+                ret_ids.append(ret_id)
+
         ret_ks = torch.stack(ret_ks, dim=0).to(ori_device)  # (n_heads, batch_size, topk, dim)
         ret_vs = torch.stack(ret_vs, dim=0).to(ori_device)  # (n_heads, batch_size, topk, dim)
         if return_all:

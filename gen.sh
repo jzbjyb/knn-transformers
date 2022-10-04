@@ -20,9 +20,13 @@ model=google/t5-xl-lm-adapt
 #data_file=data/eli5/val_astarget_selfanswer_evidence.json
 #out_file=checkpoints/eli5/t53b/val_astarget_selfanswer/prompt1/t53b_evidence_evidencelen64.tsv
 data_file=data/eli5/val_astarget_selfanswer_qa.json
-#out_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/gen_topk64_byids_skip1_nopad_afterfirst_nospace.filter100_asc.tsv
-out_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/gen_topk4.l23.tsv
-track_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/track_topk4.l23.txt
+
+out_root=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall
+#out_file=${out_root}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.filter100_asc.tsv
+#out_file=${out_root}/gen_topk4.l23.tsv
+#track_file=${out_root}/track_topk4.l23.txt
+out_file=${out_root}/gen_topk4.l23_h4.tsv
+track_file=${out_root}/track_topk4.l23_h4.txt
 
 batch_size=32
 evi_len=0
