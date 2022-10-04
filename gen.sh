@@ -21,12 +21,16 @@ model=google/t5-xl-lm-adapt
 #out_file=checkpoints/eli5/t53b/val_astarget_selfanswer/prompt1/t53b_evidence_evidencelen64.tsv
 data_file=data/eli5/val_astarget_selfanswer_qa.json
 #out_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/gen_topk64_byids_skip1_nopad_afterfirst_nospace.filter100_asc.tsv
-out_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/gen_topk64.l18.tsv
+out_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/gen_topk4.l23.tsv
+track_file=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall/track_topk4.l23.txt
 
 batch_size=32
 evi_len=0
 gen_len=256
 retrieval_topk=0
+retrieval_layers="[0]"
+filter_topk=0
+filter_order=original
 
 if [[ ${task} == "normal" ]]; then
     sp="Definition: Given a question, generate a descriptive answer. Question: "
@@ -43,7 +47,8 @@ elif [[ ${task} == "prefix" ]]; then
     ep="Evidence: "
     es=" Answer:"
 elif [[ ${task} == "retrieve" ]]; then
-    retrieval_topk=64
+    retrieval_topk=4
+    retrieval_layers="[23]"
     filter_topk=0
     filter_order=original
     sp="Definition: Given a question, generate a descriptive answer. Question: "
@@ -68,5 +73,7 @@ srun python generate.py \
     --max_evidence_len ${evi_len} \
     --max_gen_len ${gen_len} \
     --retrieval_topk ${retrieval_topk} \
+    --retrieval_layers ${retrieval_layers} \
+    --retrieval_track ${track_file} \
     --filter_topk ${filter_topk} \
     --filter_order ${filter_order}

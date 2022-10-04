@@ -1,4 +1,4 @@
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Any, Union
 import contextlib
 import argparse
 import json
@@ -199,6 +199,8 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, required=True, help='model')
     parser.add_argument('--batch_size', type=int, default=4, help='batch size')
     parser.add_argument('--retrieval_topk', type=int, default=0, help='topk tokens retrieved in decoder. 0 deactivates retreival')
+    parser.add_argument('--retrieval_layers', type=str, default='[0]', help='python code of layers, e.g., list(range(24)) for all layers')
+    parser.add_argument('--retrieval_track', type=str, default=False, help='file to track retrieval')
     parser.add_argument('--filter_topk', type=int, default=0, help='filter_topk')
     parser.add_argument('--filter_order', type=str, default='original', help='filter_order')
     args = parser.parse_args()
@@ -215,6 +217,10 @@ if __name__ == '__main__':
     setup_multi_gpu_slurm(args)
     logger.info(args)
 
+    # modify output path
+    args.out_file = (args.out_file + f'.{args.global_rank}') if type(args.out_file) is str else args.out_file
+    args.retrieval_track = (args.retrieval_track + f'.{args.global_rank}') if type(args.retrieval_track) is str else args.retrieval_track
+
     # load model
     model = AutoModelForSeq2SeqLM.from_pretrained(args.model).to(args.device)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
@@ -228,8 +234,8 @@ if __name__ == '__main__':
         ret_wrapper = MemTransWrapper(
             dstore_size=206896, dstore_dir='checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall',
             move_dstore_to_mem=True, device=args.device,
-            recompute_dists=True, retrieval_layers=[18],
-            k=args.retrieval_topk, stage='retrieve', track=False, by_ids=False, 
+            recompute_dists=True, retrieval_layers=eval(args.retrieval_layers),
+            k=args.retrieval_topk, stage='retrieve', track=args.retrieval_track, by_ids=False, 
             skip_retrieval_steps=0, skip_first_token=False, add_after_first=False, 
             filter_topk=args.filter_topk, filter_order=args.filter_order,
             shard_start=shard_start)  # TODO: debug
@@ -240,4 +246,4 @@ if __name__ == '__main__':
         sources, 
         targets=targets, 
         decoder_prefixes=decoder_prefixes, 
-        output_file=args.out_file + f'.{args.global_rank}')
+        output_file=args.out_file)

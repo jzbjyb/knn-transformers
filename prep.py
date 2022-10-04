@@ -1,10 +1,11 @@
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, Union
 import argparse
 import random
 import json
 from collections import defaultdict
 import csv
 from tqdm import tqdm
+import numpy as np
 from transformers import AutoTokenizer
 from datasets import load_dataset
 from kilt.knowledge_source import KnowledgeSource
@@ -86,42 +87,59 @@ def prep_eli5(
                 for evi in evidences:
                     pfin.write(json.dumps({'translation': {'en': inp, 'zh': evi}}) + '\n')
 
-def retrieval_track_parse_line(
-    text: str, 
-    n_heads: int, 
-    topk: int, 
-    tokenizer: AutoTokenizer, 
-    hide_id: bool = False,
-    separate_heads: bool = False) -> List[Any]:
-    seq = text.strip().split(' ')
-    new_seq = [tokenizer.convert_ids_to_tokens([seq[0]])[0]]  # prediction token
-    for i in range(1, len(seq)):
-        t = seq[i]
-        i -= 1
-        # convert token id to token
-        if i % 2 == 0:  # token
-            t = tokenizer.convert_ids_to_tokens([t])[0]
-            new_seq.append(t)
-        else:  # id
-            if not hide_id:
-                new_seq.append(t)
-        if separate_heads:  # add separator between heads
-            if (i + 1) % (topk * 2) == 0:
-                new_seq.append('|')
-    return new_seq
+class PredictionWithRetrieval(object):
+    def __init__(self, n_heads: int, topk: int, tokenizer: AutoTokenizer, use_tokenizer: bool = False):
+        self.n_heads = n_heads
+        self.topk = topk
+        self.tokenizer = tokenizer
+        self.use_tokenizer = use_tokenizer
+        self.tokens: List[List] = []
 
-def retrieval_track(args):
-    n_heads = 32
-    topk = 64
+    def convert_token_id(self, token_id: int) -> Union[str, int]:
+        if self.use_tokenizer:
+            return self.tokenizer.convert_ids_to_tokens([token_id])[0]
+        else:
+            return token_id
+    
+    def add_one_word(self, line: str):
+        seq = line.strip().split(' ')
+        token: List = []  # [pred_token, head1, head2, ..., headn]
+        self.tokens.append(token)
+        token.append(self.convert_token_id(int(seq[0])))
+        for i in range(1, len(seq)):
+            t = int(seq[i])
+            i -= 1
+            if i % (self.topk * 2) == 0:  # a new head
+                token.append([])
+            # convert token id to token
+            if i % 2 == 0:  # token
+                token[-1].append(self.convert_token_id(t))
+            else:  # id
+                token[-1][-1] = (token[-1][-1], t)
+        assert len(token) == 1 + self.n_heads
+    
+    def get_ids(self, head_idx: int):
+        return np.array([[ret_id for (_, ret_id) in tok[head_idx + 1]] for tok in self.tokens])
+    
+    def get_ids_portion(self, id: int, head_idx: int):
+        ids = self.get_ids(head_idx=head_idx)  # (n_tokens, topk)
+        return (ids == id).any(axis=1).sum() / ids.shape[0]  # percentage of tokens with retrieval from id
+
+def retrieval_track(args, n_heads: int = 32, topk: int = 4) -> List[PredictionWithRetrieval]:
     tokenizer = AutoTokenizer.from_pretrained('google/t5-xl-lm-adapt')
+    pwrs: List[PredictionWithRetrieval] = []
+    pwr = PredictionWithRetrieval(n_heads=n_heads, topk=topk, tokenizer=tokenizer, use_tokenizer=False)
     with open(args.inp_file, 'r') as fin, open(args.inp_file.replace('.txt', '.tsv'), 'w') as fout:
         tsv_writer = csv.writer(fout, delimiter='\t')
         for l in tqdm(fin):
             if l.strip() == '':
-                tsv_writer.writerow([])
+                pwrs.append(pwr)
+                pwr = PredictionWithRetrieval(n_heads=n_heads, topk=topk, tokenizer=tokenizer, use_tokenizer=False)
+                #tsv_writer.writerow([])
             else:
-                l = retrieval_track_parse_line(l, n_heads=n_heads, topk=topk, tokenizer=tokenizer, hide_id=True)
-                tsv_writer.writerow(l)
+                pwr.add_one_word(l)
+                #tsv_writer.writerow(l)
+    return pwrs
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -137,4 +155,9 @@ if __name__ == '__main__':
         prep_eli5(args, evidence_method='answer', skip_answer_as_evidence=False)
     
     elif args.task == 'retrieval_track':
-        retrieval_track(args)
+        n_heads = 32
+        topk = 4
+        pwrs = retrieval_track(args, n_heads=n_heads, topk=topk)
+        print(f'total number of examples {len(pwrs)}')
+        for head_idx in range(n_heads):
+            print(head_idx, np.mean([pwr.get_ids_portion(i, head_idx) for i, pwr in enumerate(pwrs)]))
