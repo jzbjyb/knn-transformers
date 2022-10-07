@@ -2,11 +2,11 @@
 #SBATCH --job-name=gen
 #SBATCH --cpus-per-task=10
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=2
-#SBATCH --ntasks-per-node=2
+#SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=4
 #SBATCH --time=3:00:00
 #SBATCH --partition=learnlab
-#SBATCH --mem=256GB
+#SBATCH --mem=512GB
 #SBATCH --constraint=volta32gb
 #SBATCH -o slurm/%j.out
 #SBATCH -e slurm/%j.err
@@ -25,8 +25,9 @@ out_root=checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_lay
 #out_file=${out_root}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.filter100_asc.tsv
 #out_file=${out_root}/gen_topk4.l23.tsv
 #track_file=${out_root}/track_topk4.l23.txt
-out_file=${out_root}/gen_topk4.lall_h9.tsv
+#out_file=${out_root}/gen_topk4.lall_h9.tsv
 #track_file=${out_root}/track_topk4.lall_h9.txt
+out_file=${out_root}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.cache.tsv
 
 batch_size=32
 evi_len=0
@@ -51,7 +52,7 @@ elif [[ ${task} == "prefix" ]]; then
     ep="Evidence: "
     es=" Answer:"
 elif [[ ${task} == "retrieve" ]]; then
-    retrieval_topk=4
+    retrieval_topk=64
     retrieval_layers="list(range(24))"
     filter_topk=0
     filter_order=original

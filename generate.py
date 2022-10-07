@@ -235,10 +235,10 @@ if __name__ == '__main__':
             dstore_size=206896, dstore_dir='checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall',
             move_dstore_to_mem=True, device=args.device,
             recompute_dists=True, retrieval_layers=eval(args.retrieval_layers),
-            k=args.retrieval_topk, stage='retrieve', track=args.retrieval_track, by_ids=False, 
-            skip_retrieval_steps=0, skip_first_token=False, add_after_first=False, 
+            k=args.retrieval_topk, stage='retrieve', track=args.retrieval_track, by_ids=True, 
+            skip_retrieval_steps=1, skip_first_token=True, add_after_first=True, 
             filter_topk=args.filter_topk, filter_order=args.filter_order, 
-            only_use_head_idx=9, cache_indices=True, 
+            only_use_head_idx=None, cache_indices=True, 
             shard_start=shard_start)  # TODO: debug
         ret_wrapper.break_into(model)
 

@@ -91,8 +91,9 @@ class MemTransDatastore(object):
         try:  # load tokens and ids if exists
             self.tokens = np.memmap(tok_file, dtype=np.int32, mode=mode, shape=(self.size))
             self.ids = np.memmap(id_file, dtype=np.int32, mode=mode, shape=(self.size))
+            self.positions = np.arange(self.size, dtype=np.int32)  # TODO: make it a memmap?
         except:
-            self.tokens = self.ids = None
+            self.tokens = self.ids = self.positions = None
         logger.info(f'Loading dstore took {time.time() - start} s')
     
     def save_labels(
@@ -137,7 +138,6 @@ class MemTransDatastore(object):
             self.values[:, self.cur_idx:(nt + self.cur_idx)] = values.cpu().numpy().astype(self.precision)
             if tokens is not None:
                 self.tokens[self.cur_idx:(nt + self.cur_idx)] = tokens.cpu().numpy().astype(np.int32)
-            if ids is not None:
                 self.ids[self.cur_idx:(nt + self.cur_idx)] = ids.cpu().numpy().astype(np.int32)
         except ValueError as ex:
             logger.error(f'Error saving datastore with mode {self.keys.mode}, did you try to save an already existing datastore?')
@@ -171,9 +171,9 @@ class MemTransDatastore(object):
             self.values = torch.from_numpy(self.values[:])
             if self.tokens is not None:
                 self.tokens = torch.from_numpy(self.tokens[:])
-            if self.ids is not None:
                 self.ids = torch.from_numpy(self.ids[:])
-            # TODO: move keys and values to gpu 
+                self.positions = torch.from_numpy(self.positions[:]).long()
+            # TODO: move to gpu
             #self.keys = self.keys.to(self.device)
             #self.values = self.values.to(self.device)
             logger.info('Moving to memory took {} s'.format(time.time() - start))
@@ -207,6 +207,7 @@ class MemTransDatastore(object):
             if self.tokens is not None and self.ids is not None:
                 self.tokens_strided = StridedTensor(self.tokens, self.lengths)
                 self.ids_strided = StridedTensor(self.ids, self.lengths)
+                self.positions_strided = StridedTensor(self.positions, self.lengths)
 
         # load index
         self.indices = []
@@ -232,7 +233,7 @@ class MemTransDatastore(object):
         topk: int = 0,
         return_all: bool = False,
         return_indices: bool = False):
-
+        
         if indices is None:  # retreival
             index = self.indices[ret_head_idx]
             # TODO: add torch tensor (GPU) support
@@ -250,12 +251,34 @@ class MemTransDatastore(object):
             ret_id = self.ids[indices]  # (batch_size, topk)
         return ret_k, ret_v, ret_t, ret_id, indices
     
+    def get_knns_by_indices(
+        self,
+        indices: torch.LongTensor,  # (batch_size, topk) indices from previous layers
+        device: torch.device,
+        return_all: bool = False,
+    ):
+        ret_ks, ret_vs, ret_ts, ret_ids = [], [], [], []
+        for h in range(self.n_heads):
+            ret_k, ret_v, ret_t, ret_id, _ = self._get_knns_single_head(
+                select_head_idx=h, indices=indices, return_all=return_all)
+            ret_ks.append(ret_k)
+            ret_vs.append(ret_v)
+            ret_ts.append(ret_t)
+            ret_ids.append(ret_id)
+
+        ret_ks = torch.stack(ret_ks, dim=0).to(device)  # (n_heads, batch_size, topk, dim)
+        ret_vs = torch.stack(ret_vs, dim=0).to(device)  # (n_heads, batch_size, topk, dim)
+        if return_all:
+            ret_ts = torch.stack(ret_ts, dim=0).to(device)  # (n_heads, batch_size, topk)
+            ret_ids = torch.stack(ret_ids, dim=0).to(device)  # (n_heads, batch_size, topk)
+            return ret_ks, ret_vs, ret_ts, ret_ids
+        return ret_ks, ret_vs, None, None
+
     def get_knns(
         self, 
         queries: torch.FloatTensor,  # (n_heads, batch_size, dim)
         topk: int,
         only_use_head_idx: int = None,  # only use a single head to retrieve
-        indices: torch.LongTensor = None,  # indices from previous layers if not None
         return_all: bool = False):
 
         ori_device = queries.device
@@ -263,11 +286,12 @@ class MemTransDatastore(object):
         if topk <= 0:  # return "empty" tensors
             ret_ks = torch.zeros(nh, bs, 0, dim).to(queries)  # (n_heads, batch_size, topk, dim)
             ret_vs = torch.zeros(nh, bs, 0, dim).to(queries)  # (n_heads, batch_size, topk, dim)
+            indices = torch.zeros(bs, 0).long().to(ori_device)  # (batch_size, topk)
             if return_all:
-                ret_ts = torch.zeros(nh, bs, 0).int().to(ori_device)  # (n_heads, batch_size, topk)
-                ret_ids = torch.zeros(nh, bs, 0).int().to(ori_device)  # (n_heads, batch_size, topk)
-                return ret_ks, ret_vs, ret_ts, ret_ids, None
-            return ret_ks, ret_vs, None, None, None
+                ret_ts = torch.zeros(nh, bs, 0).long().to(ori_device)  # (n_heads, batch_size, topk)
+                ret_ids = torch.zeros(nh, bs, 0).long().to(ori_device)  # (n_heads, batch_size, topk)
+                return ret_ks, ret_vs, ret_ts, ret_ids, indices
+            return ret_ks, ret_vs, None, None, indices
 
         ret_ks, ret_vs, ret_ts, ret_ids = [], [], [], []
 
@@ -280,9 +304,8 @@ class MemTransDatastore(object):
                 ret_ts.append(ret_t)
                 ret_ids.append(ret_id)
         else:
-            if indices is None:  # use indices from previous layers
-                indices = self._get_knns_single_head(
-                    ret_head_idx=only_use_head_idx, queries=queries, topk=topk, return_indices=True)
+            indices = self._get_knns_single_head(
+                ret_head_idx=only_use_head_idx, queries=queries, topk=topk, return_indices=True)
             for h in range(self.n_heads):
                 ret_k, ret_v, ret_t, ret_id, _ = self._get_knns_single_head(
                     select_head_idx=h, indices=indices, return_all=return_all)
@@ -306,6 +329,7 @@ class MemTransDatastore(object):
         ret_vs: torch.FloatTensor,  # (n_heads, batch_size, seq_len, dim)
         ret_ts: torch.LongTensor = None,  # (n_heads, batch_size, seq_len)
         ret_ids: torch.LongTensor = None,  # (n_heads, batch_size, seq_len)
+        indices: torch.LongTensor = None,  # (batch_size, seq_len)
         topk: int = 1,
         order: str = 'original'):
 
@@ -328,55 +352,60 @@ class MemTransDatastore(object):
             ret_ts = torch.gather(ret_ts, 2, topk_inds)  # (n_heads, batch_size, topk)
         if ret_ids is not None:
             ret_ids = torch.gather(ret_ids, 2, topk_inds)  # (n_heads, batch_size, topk)
+        if indices is not None:
+            indices = torch.gather(indices, 1, topk_inds[0])  # (batch_size, topk)  TODO: support multi-head
         topk_inds = topk_inds.unsqueeze(-1).repeat(1, 1, 1, dim)  # (n_heads, batch_size, topk, dim)
         ret_ks = torch.gather(ret_ks, 2, topk_inds)  # (n_heads, batch_size, topk, dim)
         ret_vs = torch.gather(ret_vs, 2, topk_inds)  # (n_heads, batch_size, topk, dim)
 
-        return ret_ks, ret_vs, ret_ts, ret_ids
+        return ret_ks, ret_vs, ret_ts, ret_ids, indices
 
     def get_knns_by_ids(
         self, 
         ids: torch.LongTensor,  # (batch_size)
-        max_length: int,
+        topk: int,
         skip_first_token: bool = False,
         return_all: bool = False):
-        device = ids.device
+
         ret_ks = self.keys_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len, n_heads, dim)
         ret_vs = self.values_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len, n_heads, dim)
+        indices = self.positions_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len)
         if return_all:
             ret_ts = self.tokens_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len)
             ret_ids = self.ids_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len)
-        
+
         if return_all:
-            assert ret_ks.size(1) == ret_vs.size(1) == ret_ts.size(1) == ret_ids.size(1)
+            assert ret_ks.size(1) == ret_vs.size(1) == indices.size(1) == ret_ts.size(1) == ret_ids.size(1)
         else:
-            assert ret_ks.size(1) == ret_vs.size(1)
+            assert ret_ks.size(1) == ret_vs.size(1) == indices.size(1)
 
         if skip_first_token:  # skip the first token which is usually the bos token (e.g., the pad token for T5)
             ret_ks = ret_ks[:, 1:]  # (batch_size, seq_len - 1, n_heads, dim)
             ret_vs = ret_vs[:, 1:]  # (batch_size, seq_len - 1, n_heads, dim)
+            indices = indices[:, 1:]  # (batch_size, seq_len - 1)
             if return_all:
                 ret_ts = ret_ts[:, 1:]  # (batch_size, seq_len - 1)
                 ret_ids = ret_ids[:, 1:]  # (batch_size, seq_len - 1)
 
         seq_len = ret_ks.size(1)
-        if seq_len > max_length:  # truncate
-            ret_ks = ret_ks[:, :max_length]  # (batch_size, max_length, n_heads, dim)
-            ret_vs = ret_vs[:, :max_length]  # (batch_size, max_length, n_heads, dim)
+        if seq_len > topk:  # truncate
+            ret_ks = ret_ks[:, :topk]  # (batch_size, topk, n_heads, dim)
+            ret_vs = ret_vs[:, :topk]  # (batch_size, topk, n_heads, dim)
+            indices = indices[:, :topk]  # (batch_size, topk)
             if return_all:
-                ret_ts = ret_ts[:, :max_length]  # (batch_size, max_length)
-                ret_ids = ret_ids[:, :max_length]  # (batch_size, max_length)
+                ret_ts = ret_ts[:, :topk]  # (batch_size, topk)
+                ret_ids = ret_ids[:, :topk]  # (batch_size, topk)
 
-        ret_ks = ret_ks.permute(2, 0, 1, 3)  # (n_heads, batch_size, max_length, dim)
-        ret_vs = ret_vs.permute(2, 0, 1, 3)  # (n_heads, batch_size, max_length, dim)
+        ret_ks = ret_ks.permute(2, 0, 1, 3)  # (n_heads, batch_size, topk, dim)
+        ret_vs = ret_vs.permute(2, 0, 1, 3)  # (n_heads, batch_size, topk, dim)
         if return_all:
-            ret_ts = ret_ts.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, max_length)
-            ret_ids = ret_ids.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, max_length)
+            ret_ts = ret_ts.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, topk)
+            ret_ids = ret_ids.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, topk)
 
         if return_all:
-            return ret_ks, ret_vs, ret_ts, ret_ids
+            return ret_ks, ret_vs, ret_ts, ret_ids, indices
         else:
-            return ret_ks, ret_vs, None, None
+            return ret_ks, ret_vs, None, None, indices
 
 class RetrievalTracker(object):
     def __init__(
@@ -532,26 +561,32 @@ class MemTransAttn(object):
         if ids is None:
             ids = torch.arange(bs).to(query_states.device) + self.id_offset
 
-        if self.by_ids and sl == 1:  # TODO: support by_ids for evaluation mode
-            # (n_heads, batch_size, topk, dim_per_head) * 2, (n_heads, batch_size, topk) * 2
-            if not skip_for_retrieval and self.by_ids_cache:
-                ret_ks, ret_vs, ret_ts, ret_ids = self.by_ids_cache
-            else:
-                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_ids(
-                    ids, max_length=topk, skip_first_token=self.skip_first_token, return_all=self.is_track)
-                self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids) if not skip_for_retrieval else None
-            
-            if self.filter_topk:  # filter
-                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.filter_by_similarity(
-                    query_states, ret_ks, ret_vs, ret_ts, ret_ids, topk=self.filter_topk, order=self.filter_order)
+        indices = None
+        if self.cache_indices:  # use cached indices
+            indices = self.mtac.get_or_save_indices(key_length=key_length)
+            if indices is not None:
+                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_indices(indices=indices, device=query_states.device, return_all=self.is_track)
 
-        else:
-            if self.cache_indices:  # get indices
-                indices = self.mtac.get_or_save_indices(key_length=key_length)
-            # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
-            ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns(query_states, topk=topk, only_use_head_idx=self.only_use_head_idx, indices=indices, return_all=self.is_track)
-            if self.cache_indices:  # save indices
-                self.mtac.get_or_save_indices(key_length=key_length, indices=indices)
+        if not self.cache_indices or indices is None:  # perform retrieval
+            if self.by_ids and sl == 1:  # TODO: support by_ids for evaluation mode
+                # (n_heads, batch_size, topk, dim_per_head) * 2, (n_heads, batch_size, topk) * 2
+                if not skip_for_retrieval and self.by_ids_cache:
+                    ret_ks, ret_vs, ret_ts, ret_ids, indices = self.by_ids_cache
+                else:
+                    ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns_by_ids(
+                        ids, topk=topk, skip_first_token=self.skip_first_token, return_all=self.is_track)
+                    self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids, indices) if not skip_for_retrieval else None
+                
+                if self.filter_topk:  # filter
+                    ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.filter_by_similarity(
+                        query_states, ret_ks, ret_vs, ret_ts, ret_ids, indices, topk=self.filter_topk, order=self.filter_order)
+
+            else:
+                # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
+                ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns(query_states, topk=topk, only_use_head_idx=self.only_use_head_idx, return_all=self.is_track)
+        
+        if self.cache_indices:  # cache indices
+            self.mtac.get_or_save_indices(key_length=key_length, indices=indices)
 
         # track retrieval
         if self.is_track:
