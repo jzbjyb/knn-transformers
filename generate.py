@@ -237,7 +237,8 @@ if __name__ == '__main__':
             recompute_dists=True, retrieval_layers=eval(args.retrieval_layers),
             k=args.retrieval_topk, stage='retrieve', track=args.retrieval_track, by_ids=False, 
             skip_retrieval_steps=0, skip_first_token=False, add_after_first=False, 
-            filter_topk=args.filter_topk, filter_order=args.filter_order,
+            filter_topk=args.filter_topk, filter_order=args.filter_order, 
+            only_use_head_idx=9, cache_indices=True, 
             shard_start=shard_start)  # TODO: debug
         ret_wrapper.break_into(model)
 

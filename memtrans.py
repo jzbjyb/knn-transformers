@@ -21,6 +21,28 @@ logger.setLevel(20)
 def get_index_path(dstore_dir, model_type, dstore_size, dimension, head_idx):
     return f'{dstore_dir}/index_{model_type}_{dstore_size}_{dimension}_{head_idx}.indexed'
 
+class MemTransAttnCoordinator(object):
+    def __init__(self):
+        self._key_length: int = None  # track the decoding step
+        self._indices: torch.LongTensor = None  # (batch_size, topk) track the retrieved indices
+    
+    def get_or_save_indices(
+        self, 
+        key_length: int,
+        indices: torch.LongTensor = None):  # (batch_size, topk)
+        # get
+        if self._key_length == key_length:  # hit
+            return self._indices
+        else:  # not hit
+            if indices is None:
+                return None
+            else:  # save
+                self._key_length = key_length
+                self._indices = indices
+    
+    def clear(self):
+        self._key_length = self._indices = None
+
 class MemTransDatastore(object):
     def __init__(
         self, directory: str, 
@@ -232,7 +254,8 @@ class MemTransDatastore(object):
         self, 
         queries: torch.FloatTensor,  # (n_heads, batch_size, dim)
         topk: int,
-        only_use_head_idx: int = None,  # TODO: debug
+        only_use_head_idx: int = None,  # only use a single head to retrieve
+        indices: torch.LongTensor = None,  # indices from previous layers if not None
         return_all: bool = False):
 
         ori_device = queries.device
@@ -243,22 +266,23 @@ class MemTransDatastore(object):
             if return_all:
                 ret_ts = torch.zeros(nh, bs, 0).int().to(ori_device)  # (n_heads, batch_size, topk)
                 ret_ids = torch.zeros(nh, bs, 0).int().to(ori_device)  # (n_heads, batch_size, topk)
-                return ret_ks, ret_vs, ret_ts, ret_ids
-            return ret_ks, ret_vs, None, None
+                return ret_ks, ret_vs, ret_ts, ret_ids, None
+            return ret_ks, ret_vs, None, None, None
 
         ret_ks, ret_vs, ret_ts, ret_ids = [], [], [], []
 
         if only_use_head_idx is None:  # different heads retrieve separately
             for h in range(self.n_heads):
-                ret_k, ret_v, ret_t, ret_id, _ = self._get_knns_single_head(
+                ret_k, ret_v, ret_t, ret_id, indices = self._get_knns_single_head(
                     ret_head_idx=h, select_head_idx=h, queries=queries, topk=topk, return_all=return_all)
                 ret_ks.append(ret_k)
                 ret_vs.append(ret_v)
                 ret_ts.append(ret_t)
                 ret_ids.append(ret_id)
         else:
-            indices = self._get_knns_single_head(
-                ret_head_idx=only_use_head_idx, queries=queries, topk=topk, return_indices=True)
+            if indices is None:  # use indices from previous layers
+                indices = self._get_knns_single_head(
+                    ret_head_idx=only_use_head_idx, queries=queries, topk=topk, return_indices=True)
             for h in range(self.n_heads):
                 ret_k, ret_v, ret_t, ret_id, _ = self._get_knns_single_head(
                     select_head_idx=h, indices=indices, return_all=return_all)
@@ -272,8 +296,8 @@ class MemTransDatastore(object):
         if return_all:
             ret_ts = torch.stack(ret_ts, dim=0).to(ori_device)  # (n_heads, batch_size, topk)
             ret_ids = torch.stack(ret_ids, dim=0).to(ori_device)  # (n_heads, batch_size, topk)
-            return ret_ks, ret_vs, ret_ts, ret_ids
-        return ret_ks, ret_vs, None, None
+            return ret_ks, ret_vs, ret_ts, ret_ids, indices
+        return ret_ks, ret_vs, None, None, indices
     
     def filter_by_similarity(
         self,
@@ -429,7 +453,10 @@ class MemTransAttn(object):
         skip_first_token: bool = False,  # skip the first token retrieved which is usually bos
         add_after_first: bool = False,  # add the retrieved tokens after the first token which is usually bos
         filter_topk: int = 0,
-        filter_order: str = 'original'):
+        filter_order: str = 'original',
+        only_use_head_idx: int = None,
+        cache_indices: bool = False,
+        mtac: MemTransAttnCoordinator = None):
         assert stage in {'save', 'retrieve'}
         self.dstore = dstore
         self.topk = topk
@@ -449,6 +476,10 @@ class MemTransAttn(object):
         self.add_after_first = add_after_first
         self.filter_topk = filter_topk
         self.filter_order = filter_order
+
+        self.only_use_head_idx = only_use_head_idx
+        self.cache_indices = cache_indices
+        self.mtac = mtac
 
     @property
     def is_track(self):
@@ -515,8 +546,12 @@ class MemTransAttn(object):
                     query_states, ret_ks, ret_vs, ret_ts, ret_ids, topk=self.filter_topk, order=self.filter_order)
 
         else:
+            if self.cache_indices:  # get indices
+                indices = self.mtac.get_or_save_indices(key_length=key_length)
             # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
-            ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns(query_states, topk=topk, return_all=self.is_track)
+            ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns(query_states, topk=topk, only_use_head_idx=self.only_use_head_idx, indices=indices, return_all=self.is_track)
+            if self.cache_indices:  # save indices
+                self.mtac.get_or_save_indices(key_length=key_length, indices=indices)
 
         # track retrieval
         if self.is_track:
@@ -532,6 +567,8 @@ class MemTransAttn(object):
         if sl > 1:  # change offset in evaluation process
             self.id_offset += bs
             self.by_ids_cache = None
+            if self.mtac is not None:
+                self.mtac.clear()
         
         actual_topk = ret_ks.size(2)
         ret_ks = ret_ks.view(nh, bs, sl, actual_topk, d)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
@@ -853,6 +890,8 @@ class MemTransWrapper(object):
         add_after_first: bool = False,
         filter_topk: int = 0,
         filter_order: str = 'original',
+        only_use_head_idx: int = None,
+        cache_indices: bool = False,
         move_dstore_to_mem: bool = False, 
         device: torch.device = None):
         self.dstore_size = dstore_size
@@ -869,6 +908,8 @@ class MemTransWrapper(object):
         self.add_after_first = add_after_first
         self.filter_topk = filter_topk
         self.filter_order = filter_order
+        self.only_use_head_idx = only_use_head_idx
+        self.cache_indices = cache_indices
         self.move_dstore_to_mem = move_dstore_to_mem
         self.device = torch.device('cpu') if device is None else device
     
@@ -896,12 +937,16 @@ class MemTransWrapper(object):
         attn_layers = self.get_layer()
         self.ori_t5attetnion_forwards = []
         self.dstores = []
-        for layer_idx, attn_layer in attn_layers:
+        mtac = MemTransAttnCoordinator()
+        for li, (layer_idx, attn_layer) in enumerate(attn_layers):
             # replace the attention layer with retrieval-augmented attention layer
             self.ori_t5attetnion_forwards.append(attn_layer.forward)
             attn_layer.forward = types.MethodType(t5attetnion_forward, attn_layer)
 
             # load dstore (and index if in retrieval stage)
+            dstore_device = self.device
+            if self.cache_indices and li > 0:  # load index to CPU except for the first one
+                dstore_device = torch.device('cpu')
             dstore = MemTransDatastore(
                 directory=os.path.join(self.dstore_dir, f'layer{layer_idx}'), 
                 model_type=self.model.config.model_type, 
@@ -909,7 +954,7 @@ class MemTransWrapper(object):
                 dimension=self.model.config.d_kv,
                 n_heads=self.model.config.num_heads,
                 move_dstore_to_mem=self.move_dstore_to_mem,
-                device=self.device)
+                device=dstore_device)
             if self.stage == 'retrieve':
                 dstore.load_index(build_offset=True)
             self.dstores.append(dstore)
@@ -927,7 +972,10 @@ class MemTransWrapper(object):
                 skip_first_token=self.skip_first_token,
                 add_after_first=self.add_after_first,
                 filter_topk=self.filter_topk,
-                filter_order=self.filter_order)
+                filter_order=self.filter_order,
+                only_use_head_idx=self.only_use_head_idx,
+                cache_indices=self.cache_indices,
+                mtac=mtac)
             attn_layer.mta = mta
             attn_layer.relative_attention_bias = relative_attention_bias
 
