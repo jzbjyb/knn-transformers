@@ -31,7 +31,10 @@ def load_pred_file(
                 continue
             prev_source = source
             prefix = (items[3] if len(items) >= 4 else '').strip()
-            assert pred.startswith(prefix), f'prediction "{pred}" should start with the prefix "{prefix}"'
+            if not pred.startswith(prefix):
+                print('a case where prediction does not start with prefix')
+                #print(f'prediction "{pred}" should start with the prefix "{prefix}"')
+                continue
             pred = pred[len(prefix):].strip()
             if remove_prediction_prefix and pred.startswith(remove_prediction_prefix):
                 pred = pred[len(remove_prediction_prefix):].strip()

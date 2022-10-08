@@ -35,6 +35,7 @@ class GenerationWrapper(object):
         self.add_question_mark: bool = True
         self.add_period: bool = True
         self.max_evidence_len: int = args.max_evidence_len
+        self.target_as_prefix_len: int = args.target_as_prefix_len  # number of tokens in the target used as prefix
 
         self.batch_size: int = args.batch_size
         self.gen_args: Dict[str, Any] = {
@@ -45,11 +46,19 @@ class GenerationWrapper(object):
     def device(self):
         return self.model.device
     
-    def clean_by_tokenizer(self, text: str, max_lengh: int = None):
+    def clean_by_tokenizer(self, text: str, max_length: int = None):
         text = self.tokenizer.encode(text)
-        if max_lengh:
-            text = text[:max_lengh]
+        if max_length:
+            text = text[:max_length]
         return self.tokenizer.decode(text, skip_special_tokens=True)
+    
+    def split_by_tokenizer(self, text: str, split_length: int):
+        text = self.tokenizer.encode(text, add_special_tokens=False)
+        split_length = max(min(split_length, len(text) - 1), 0)  # at least keep one token for the second piece
+        first, second = text[:split_length], text[split_length:]
+        first = self.tokenizer.decode(first, skip_special_tokens=True)
+        second = self.tokenizer.decode(second, skip_special_tokens=True)
+        return first, second
     
     def load_data(
         self, 
@@ -60,46 +69,61 @@ class GenerationWrapper(object):
         # TODO: for simplicity we reuse the en-zh translation dataset
         sources: List[str] = []
         targets: List[str] = []
-        has_decoder_prefix = self.use_evidence in {'decoder_prefix', 'fixed'}
+        
+        has_decoder_prefix = self.use_evidence in {'decoder_prefix', 'fixed'} or self.target_as_prefix_len > 0
         decoder_prefixes: List[str] = [] if has_decoder_prefix else None
         
         with open(data_file, 'r') as fin:
             prev_source = None
             for l in fin:
+                
                 example = json.loads(l)['translation']
                 source = example['en'].strip()
-                # skip duplicate source if use_evidence is None
-                if self.use_evidence == 'no' and source == prev_source:
+
+                # skip duplicate source if there's no evidence or it's fixed
+                if self.use_evidence in {'no', 'fixed'} and source == prev_source:
                     continue
                 prev_source = source
+                
+                # process source
                 if self.add_question_mark and re.search('[?!.]$', source) is None:
                     source += '?'
                 source = self.source_prefix + source + self.source_suffix
-                target = example['zh']
                 
+                # process evidence
+                dp = ''
                 if self.use_evidence != 'no':
-                    if self.use_evidence == 'fixed':
-                        decoder_prefixes.append(self.evidence_prefix)  # TODO: use another argumenet?
-                    else:
+                    if self.use_evidence == 'fixed':  # fixed evidence (i.e., instruction)
+                        dp += self.evidence_suffix  # TODO: use another argumenet?
+                    else:  # specific evidence
                         evi = example['decoder_prefix'].strip()
                         if self.max_evidence_len:
-                            evi = self.clean_by_tokenizer(evi, max_lengh=self.max_evidence_len)
+                            evi = self.clean_by_tokenizer(evi, max_length=self.max_evidence_len)
                         if self.add_period and re.search('[?!.]$', evi) is None:
                             evi += '.'
                         evi = self.evidence_prefix + evi + self.evidence_suffix
                         if self.use_evidence == 'decoder_prefix':
-                            decoder_prefixes.append(evi)
+                            dp += evi
                         elif self.use_evidence == 'encoder_suffix':
                             source = source + ' ' + evi
                         elif self.use_evidence == 'encoder_prefix':
                             source = evi + ' ' + source
+                
+                # process target
+                target = example['zh'].strip()
+                if self.target_as_prefix_len > 0:
+                    target_prefix, target = self.split_by_tokenizer(target, split_length=self.target_as_prefix_len)
+                    dp = f'{dp} {target_prefix}' if len(dp) else target_prefix
 
+                # save
                 sources.append(source)
                 targets.append(target)
+                if has_decoder_prefix:
+                    decoder_prefixes.append(dp)
 
                 if max_num_examples and len(sources) >= max_num_examples:
                     break
-        
+
         total_count = len(sources)
         assert len(sources) == len(targets)
         if has_decoder_prefix:
@@ -195,6 +219,8 @@ if __name__ == '__main__':
         choices=['no', 'encoder_suffix', 'encoder_prefix', 'decoder_prefix', 'fixed'], help='use evidence in which position')
     parser.add_argument('--max_gen_len', type=int, default=256, help='max generation length')
     parser.add_argument('--max_evidence_len', type=int, default=128, help='max evidence length')
+    parser.add_argument('--target_as_prefix_len', type=int, default=0, help='number of tokens in the target used as prefix')
+
     # model args
     parser.add_argument('--model', type=str, required=True, help='model')
     parser.add_argument('--batch_size', type=int, default=4, help='batch size')
