@@ -227,10 +227,13 @@ if __name__ == '__main__':
     parser.add_argument('--retrieval_topk', type=int, default=0, help='topk tokens retrieved in decoder. 0 deactivates retreival')
     parser.add_argument('--retrieval_layers', type=str, default='[0]', help='python code of layers, e.g., list(range(24)) for all layers')
     parser.add_argument('--retrieval_track', type=str, default=False, help='file to track retrieval')
+    parser.add_argument('--skip_retrieval_steps', type=int, default=0, help='number of steps to skip retrieval')
     parser.add_argument('--filter_topk', type=int, default=0, help='filter_topk')
     parser.add_argument('--filter_order', type=str, default='original', help='filter_order')
     args = parser.parse_args()
     args.use_retrieval = args.retrieval_topk > 0
+    args.retrieval_layers = eval(args.retrieval_layers)
+    dstore_device = torch.device('cpu') if len(args.retrieval_layers) > 3 else args.device
 
     # logging config
     logging.basicConfig(
@@ -258,13 +261,13 @@ if __name__ == '__main__':
 
     if args.use_retrieval:  # add retrieval
         ret_wrapper = MemTransWrapper(
-            dstore_size=206896, dstore_dir='checkpoints/eli5/t53b/val_astarget_answer/memtrans_reproduce_prefix_layerall',
-            move_dstore_to_mem=True, device=args.device,
-            recompute_dists=True, retrieval_layers=eval(args.retrieval_layers),
+            dstore_size=206896, dstore_dir='checkpoints/eli5/prefix_exp/val_astarget_answer/memtrans_reproduce_prefix_layerall',
+            move_dstore_to_mem=True, device=dstore_device,
+            recompute_dists=True, retrieval_layers=args.retrieval_layers,
             k=args.retrieval_topk, stage='retrieve', track=args.retrieval_track, by_ids=True, 
-            skip_retrieval_steps=1, skip_first_token=True, add_after_first=True, 
+            skip_retrieval_steps=args.skip_retrieval_steps, skip_first_token=True, add_after_first=True, 
             filter_topk=args.filter_topk, filter_order=args.filter_order, 
-            only_use_head_idx=None, cache_indices=True, 
+            only_use_head_idx=None, cache_indices=False, 
             shard_start=shard_start)  # TODO: debug
         ret_wrapper.break_into(model)
 

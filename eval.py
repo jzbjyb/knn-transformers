@@ -19,7 +19,9 @@ metric_key_map: Dict[str, Dict[str, str]] = {
 def load_pred_file(
     pred_file: str, 
     dedup: bool = False,  # keep the first instance among those with the same source
-    remove_prediction_prefix: str = 'Answer:'
+    remove_prediction_prefix: str = 'Answer:',
+    remove_repetition: bool = True,
+    debug: bool = False,
     ) -> List[Tuple[str, str, str]]:  # source, target, pred
     examples: List[Tuple[str, str, str]] = []
     with open(pred_file, 'r') as fin:
@@ -38,7 +40,14 @@ def load_pred_file(
             pred = pred[len(prefix):].strip()
             if remove_prediction_prefix and pred.startswith(remove_prediction_prefix):
                 pred = pred[len(remove_prediction_prefix):].strip()
+            if remove_prediction_prefix and remove_repetition:
+                pred = pred.split(remove_prediction_prefix, 1)[0].strip()
             examples.append((source, target, pred))
+            if debug:
+                print('SOURCE\t', source)
+                print('TARGET\t', target)
+                print('PRED\t', pred)
+                input()
     return examples
 
 class EvalWrapper(object):

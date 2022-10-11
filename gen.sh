@@ -8,14 +8,14 @@
 #SBATCH -o slurm/%j.out
 #SBATCH -e slurm/%j.err
 
-#SBATCH --gpus-per-node=8
-#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=2
+#SBATCH --ntasks-per-node=2
 #SBATCH --mem=512GB
 
 # env
 source env.sh
 
-task=evidence+targetprefix
+task=retrieve+targetprefix
 
 model=google/t5-xl-lm-adapt
 
@@ -25,7 +25,7 @@ if [[ ${task} == "normal" || ${task} == "evidence" || ${task} == "targetprefix" 
     out_root=checkpoints/eli5/prefix_exp/val_astarget_selfanswer/prompt1
     #out_file=${out_root}/t53b_targetprefix16.tsv
     out_file=${out_root}/t53b_evidencelen64_targetprefix16.tsv
-elif [[ ${task} == "retrieve" ]]; then
+elif [[ ${task} == "retrieve" || ${task} == "retrieve+targetprefix" ]]; then
     # === w/ memtrans exp ===
     data_file=data/eli5/val_astarget_selfanswer_qa.json
     out_root=checkpoints/eli5/prefix_exp/val_astarget_answer/memtrans_reproduce_prefix_layerall
@@ -34,7 +34,8 @@ elif [[ ${task} == "retrieve" ]]; then
     #track_file=${out_root}/track_topk4.l23.txt
     #out_file=${out_root}/gen_topk4.lall_h9.tsv
     #track_file=${out_root}/track_topk4.lall_h9.txt
-    out_file=${out_root}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.cache.tsv
+    #out_file=${out_root}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.cache.tsv
+    out_file=${out_root}/gen_topk64_byids_skip32_targetprefix16.tsv
 else
     echo "${task} is not defined"
     exit
@@ -46,6 +47,7 @@ gen_len=256
 targetprefix_len=0
 retrieval_topk=0
 retrieval_layers="[]"
+skip_retrieval_steps=0
 filter_topk=0
 filter_order=original
 
@@ -89,6 +91,18 @@ elif [[ ${task} == "retrieve" ]]; then
     evi=fixed
     evi_pre=""
     evi_suf="Answer:"
+elif [[ ${task} == "retrieve+targetprefix" ]]; then
+    targetprefix_len=16
+    retrieval_topk=64
+    retrieval_layers="list(range(24))"
+    skip_retrieval_steps=32
+    filter_topk=0
+    filter_order=original
+    src_pre="Definition: Given a question, generate a descriptive answer. Question: "
+    src_suf=""
+    evi=fixed
+    evi_pre=""
+    evi_suf="Answer:"
 else
     exit
 fi
@@ -108,5 +122,6 @@ srun python generate.py \
     --target_as_prefix_len ${targetprefix_len} \
     --retrieval_topk ${retrieval_topk} \
     --retrieval_layers ${retrieval_layers} \
+    --skip_retrieval_steps ${skip_retrieval_steps} \
     --filter_topk ${filter_topk} \
     --filter_order ${filter_order}
