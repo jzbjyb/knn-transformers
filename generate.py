@@ -228,12 +228,12 @@ if __name__ == '__main__':
     parser.add_argument('--retrieval_layers', type=str, default='[0]', help='python code of layers, e.g., list(range(24)) for all layers')
     parser.add_argument('--retrieval_track', type=str, default=False, help='file to track retrieval')
     parser.add_argument('--skip_retrieval_steps', type=int, default=0, help='number of steps to skip retrieval')
+    parser.add_argument('--accum_retrieval_steps', type=int, default=0, help='number of accumulation steps for retrieval')
     parser.add_argument('--filter_topk', type=int, default=0, help='filter_topk')
     parser.add_argument('--filter_order', type=str, default='original', help='filter_order')
     args = parser.parse_args()
     args.use_retrieval = args.retrieval_topk > 0
     args.retrieval_layers = eval(args.retrieval_layers)
-    dstore_device = torch.device('cpu') if len(args.retrieval_layers) > 3 else args.device
 
     # logging config
     logging.basicConfig(
@@ -250,6 +250,9 @@ if __name__ == '__main__':
     args.out_file = (args.out_file + f'.{args.global_rank}') if type(args.out_file) is str else args.out_file
     args.retrieval_track = (args.retrieval_track + f'.{args.global_rank}') if type(args.retrieval_track) is str else args.retrieval_track
 
+    # dstore device
+    args.dstore_device = torch.device('cpu') if len(args.retrieval_layers) > 3 else args.device
+
     # load model
     model = AutoModelForSeq2SeqLM.from_pretrained(args.model).to(args.device)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
@@ -262,10 +265,11 @@ if __name__ == '__main__':
     if args.use_retrieval:  # add retrieval
         ret_wrapper = MemTransWrapper(
             dstore_size=206896, dstore_dir='checkpoints/eli5/prefix_exp/val_astarget_answer/memtrans_reproduce_prefix_layerall',
-            move_dstore_to_mem=True, device=dstore_device,
+            move_dstore_to_mem=True, device=args.dstore_device,
             recompute_dists=True, retrieval_layers=args.retrieval_layers,
             k=args.retrieval_topk, stage='retrieve', track=args.retrieval_track, by_ids=True, 
-            skip_retrieval_steps=args.skip_retrieval_steps, skip_first_token=True, add_after_first=True, 
+            skip_retrieval_steps=args.skip_retrieval_steps, accum_retrieval_steps=args.accum_retrieval_steps,
+            skip_first_token=True, add_after_first=True, 
             filter_topk=args.filter_topk, filter_order=args.filter_order, 
             only_use_head_idx=None, cache_indices=False, 
             shard_start=shard_start)  # TODO: debug
@@ -277,3 +281,6 @@ if __name__ == '__main__':
         targets=targets, 
         decoder_prefixes=decoder_prefixes, 
         output_file=args.out_file)
+    
+    if args.use_retrieval:
+        ret_wrapper.break_out()

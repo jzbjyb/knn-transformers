@@ -6,6 +6,7 @@ from collections import defaultdict
 import csv
 from tqdm import tqdm
 import numpy as np
+import torch
 from transformers import AutoTokenizer
 from datasets import load_dataset
 from kilt.knowledge_source import KnowledgeSource
@@ -45,8 +46,8 @@ def prep_eli5(
     skip_answer_as_evidence: bool = True):
     assert evidence_method in {'provenance', 'self_provenance', 'answer', 'self_answer'}
 
-    qa_file = f'{args.out_file}_qa.json'
-    prov_file = f'{args.out_file}_evidence.json'
+    qa_file = f'{args.out}_qa.json'
+    prov_file = f'{args.out}_evidence.json'
     eli5 = load_dataset('kilt_tasks', name='eli5')
     wikipedia = Wikipedia()
 
@@ -129,7 +130,7 @@ def retrieval_track(args, n_heads: int = 32, topk: int = 4) -> List[PredictionWi
     tokenizer = AutoTokenizer.from_pretrained('google/t5-xl-lm-adapt')
     pwrs: List[PredictionWithRetrieval] = []
     pwr = PredictionWithRetrieval(n_heads=n_heads, topk=topk, tokenizer=tokenizer, use_tokenizer=False)
-    with open(args.inp_file, 'r') as fin, open(args.inp_file.replace('.txt', '.tsv'), 'w') as fout:
+    with open(args.inp, 'r') as fin, open(args.inp.replace('.txt', '.tsv'), 'w') as fout:
         tsv_writer = csv.writer(fout, delimiter='\t')
         for l in tqdm(fin):
             if l.strip() == '':
@@ -141,11 +142,19 @@ def retrieval_track(args, n_heads: int = 32, topk: int = 4) -> List[PredictionWi
                 #tsv_writer.writerow(l)
     return pwrs
 
+def head_analysis(attn_file: str, rank: bool = True, show_n_heads: int = 5):
+    attensions: torch.FloatTensor = torch.load(attn_file)  # (n_heads, n_examples, n_docs)
+    sorted, indices = torch.sort(attensions, dim=-1, descending=True)  # (n_heads, n_examples, n_docs)
+    top1_acc = indices[:, :, 0].eq(0).float().mean(-1).numpy()  # (n_heads)
+    rank = np.argsort(-top1_acc)[:show_n_heads]
+    print('\t'.join(map(str, rank)))
+    print('\t'.join(map(str, top1_acc[rank])))
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=['eli5', 'retrieval_track'])
-    parser.add_argument('--inp_file', type=str, default=None, help='input file')
-    parser.add_argument('--out_file', type=str, default=None, help='output file')
+    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=['eli5', 'retrieval_track', 'head_analysis'])
+    parser.add_argument('--inp', type=str, default=None, help='input file')
+    parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
 
     # set random seed to make sure the same examples are sampled across multiple runs
@@ -161,3 +170,6 @@ if __name__ == '__main__':
         print(f'total number of examples {len(pwrs)}')
         for head_idx in range(n_heads):
             print(head_idx, np.mean([pwr.get_ids_portion(i, head_idx) for i, pwr in enumerate(pwrs)]))
+    
+    elif args.task == 'head_analysis':
+        head_analysis(args.inp)

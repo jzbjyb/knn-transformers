@@ -66,6 +66,10 @@ class MemTransDatastore(object):
     @property
     def use_cuda(self):
         return self.device.type == 'cuda'
+    
+    @property
+    def num_docs(self):
+        return len(self.lengths)
 
     def get_index_path(self, head_idx: int) -> str:
         return get_index_path(self.directory, self.model_type, self.size, self.dimension, head_idx=head_idx)
@@ -362,10 +366,15 @@ class MemTransDatastore(object):
 
     def get_knns_by_ids(
         self, 
-        ids: torch.LongTensor,  # (batch_size)
+        ids: torch.LongTensor,  # (batch_size) or (batch_size, n_cand)
         topk: int,
         skip_first_token: bool = False,
         return_all: bool = False):
+
+        has_cand = len(ids.size()) > 1
+        if has_cand:
+            batch_size, n_cand = ids.size()
+        ids = ids.view(-1)  # (batch_size) or (batch_size * n_cand)
 
         ret_ks = self.keys_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len, n_heads, dim)
         ret_vs = self.values_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len, n_heads, dim)
@@ -401,6 +410,14 @@ class MemTransDatastore(object):
         if return_all:
             ret_ts = ret_ts.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, topk)
             ret_ids = ret_ids.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, topk)
+        
+        if has_cand:
+            ret_ks = ret_ks.view(*ret_ks.size()[:1], batch_size, n_cand, *ret_ks.size()[2:])  # (n_heads, batch_size, n_cand, topk, dim)
+            ret_vs = ret_vs.view(*ret_vs.size()[:1], batch_size, n_cand, *ret_vs.size()[2:])  # (n_heads, batch_size, n_cand, topk, dim)
+            indices = indices.view(batch_size, n_cand, *indices.size()[1:])  # (batch_size, n_cand, topk)
+            if return_all:
+                ret_ts = ret_ts.view(batch_size, n_cand, *ret_ts.size()[1:])  # (batch_size, n_cand, topk)
+                ret_ids = ret_ids.view(batch_size, n_cand, *ret_ids.size()[1:])  # (batch_size, n_cand, topk)
 
         if return_all:
             return ret_ks, ret_vs, ret_ts, ret_ids, indices
@@ -475,10 +492,12 @@ class MemTransAttn(object):
         topk: int, 
         eos_token_id: int,
         stage: str, 
+        layer_index: int = 0,
         track: Union[bool, str] = False,  # track retrieved tokens by printing (bool) or writing to files (str)
         by_ids: bool = False,  # whether to retrieve documents by ids
         shard_start: int = 0,  # which id to start retrieving from
         skip_retrieval_steps: int = 0,  # number of decoding steps where retrieval is skipped
+        accum_retrieval_steps: int = 0,  # accumulate steps to perform retrieval (i.e., block-wise retrieval)
         skip_first_token: bool = False,  # skip the first token retrieved which is usually bos
         add_after_first: bool = False,  # add the retrieved tokens after the first token which is usually bos
         filter_topk: int = 0,
@@ -490,6 +509,7 @@ class MemTransAttn(object):
         self.dstore = dstore
         self.topk = topk
         self.stage = stage
+        self.layer_index = layer_index
         
         self.track = track
         if self.is_track:
@@ -501,6 +521,8 @@ class MemTransAttn(object):
         self.id_offset = shard_start  # example idx
         
         self.skip_retrieval_steps = skip_retrieval_steps
+        self.accum_retrieval_steps = accum_retrieval_steps
+        assert self.accum_retrieval_steps <= self.skip_retrieval_steps
         self.skip_first_token = skip_first_token
         self.add_after_first = add_after_first
         self.filter_topk = filter_topk
@@ -540,6 +562,33 @@ class MemTransAttn(object):
 
         # save
         self.dstore.save_key_value(key_states, value_states, tokens=tokens, ids=ids)
+    
+    def save_for_accumlation(
+        self,
+        query_states: torch.FloatTensor,  # (n_heads, batch_size, dim)
+        ret_ks: torch.FloatTensor,  # (n_heads, batch_size, n_cand, topk, dim)
+    ):
+        # init cache
+        if not hasattr(self, '_accum_cache'):
+            self._accum_cache = []
+            self._accum_cache_all = []
+
+        assert query_states.size(1) == ret_ks.size(1)
+        attn_scores = torch.einsum("hbd,hbckd->hbck", query_states, ret_ks)  # (n_heads, batch_size, n_cand, topk)
+        attn_scores = attn_scores.max(-1).values  # (n_heads, batch_size, n_cand)
+        self._accum_cache.append(attn_scores.cpu())  # n_steps (n_heads, batch_size, n_cand)
+        
+        # dump cache
+        if len(self._accum_cache) >= self.accum_retrieval_steps:
+            self._accum_cache = torch.stack(self._accum_cache, 0)  # (n_steps, n_heads, batch_size, n_cand)
+            self._accum_cache = self._accum_cache.mean(0)  # (n_heads, batch_size, n_cand)
+            self._accum_cache_all.append(self._accum_cache)
+            self._accum_cache = []
+    
+    def dump_save_for_accumlation(self, file_name: str):
+        if not hasattr(self, '_accum_cache_all') or len(self._accum_cache_all) <= 0:
+            return
+        torch.save(torch.cat(self._accum_cache_all, 1), f'{file_name}{self.layer_index}.pt')
 
     def retrieve(
         self,
@@ -554,12 +603,11 @@ class MemTransAttn(object):
         if sl > 1:  # TODO: eval mode is memory-intensive so we limite topk
             topk = min(self.topk, 0)
 
-        skip_for_retrieval = self.skip_retrieval_steps and key_length <= self.skip_retrieval_steps
+        fake_retrieval = key_length <= self.accum_retrieval_steps
+        fake_retrieval_last_step = key_length == self.accum_retrieval_steps
+        skip_for_retrieval = self.skip_retrieval_steps and key_length <= self.skip_retrieval_steps and not fake_retrieval
         if skip_for_retrieval:  # deactivate retrieval for first seval steps
             topk = 0
-
-        if ids is None:
-            ids = torch.arange(bs).to(query_states.device) + self.id_offset
 
         indices = None
         if self.cache_indices:  # use cached indices
@@ -569,6 +617,17 @@ class MemTransAttn(object):
 
         if not self.cache_indices or indices is None:  # perform retrieval
             if self.by_ids and sl == 1:  # TODO: support by_ids for evaluation mode
+                if ids is None:
+                    if fake_retrieval:
+                        ids = torch.arange(bs).to(query_states.device) + self.id_offset
+                        # for the i-th example, retrieve i, i + 1, ..., i + accum - 1
+                        # (batch_size, accum)
+                        ids = ids.unsqueeze(-1) + torch.arange(20).to(query_states.device).unsqueeze(0)  # TODO: add argument
+                        ids_maks = ids < self.dstore.num_docs  # (batch_size, accum)
+                        ids = ids * ids_maks  # out-of-boundary ids are replaced with 0
+                    else:
+                        ids = torch.arange(bs).to(query_states.device) + self.id_offset
+
                 # (n_heads, batch_size, topk, dim_per_head) * 2, (n_heads, batch_size, topk) * 2
                 if not skip_for_retrieval and self.by_ids_cache:
                     ret_ks, ret_vs, ret_ts, ret_ids, indices = self.by_ids_cache
@@ -576,6 +635,16 @@ class MemTransAttn(object):
                     ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns_by_ids(
                         ids, topk=topk, skip_first_token=self.skip_first_token, return_all=self.is_track)
                     self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids, indices) if not skip_for_retrieval else None
+
+                if fake_retrieval:
+                    # save for accumulation
+                    self.save_for_accumlation(query_states, ret_ks)
+                    # clear retreival
+                    ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns(
+                        query_states, topk=0, return_all=self.is_track)
+                
+                if fake_retrieval_last_step:  # clear the cache
+                    self.by_ids_cache = None                    
                 
                 if self.filter_topk:  # filter
                     ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.filter_by_similarity(
@@ -583,7 +652,8 @@ class MemTransAttn(object):
 
             else:
                 # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
-                ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns(query_states, topk=topk, only_use_head_idx=self.only_use_head_idx, return_all=self.is_track)
+                ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns(
+                    query_states, topk=topk, only_use_head_idx=self.only_use_head_idx, return_all=self.is_track)
         
         if self.cache_indices:  # cache indices
             self.mtac.get_or_save_indices(key_length=key_length, indices=indices)
@@ -921,6 +991,7 @@ class MemTransWrapper(object):
         by_ids: bool = False,
         shard_start: int = 0,  # used for sharded generated with by_ids = True
         skip_retrieval_steps: int = 0,
+        accum_retrieval_steps: int = 0,
         skip_first_token: bool = False,
         add_after_first: bool = False,
         filter_topk: int = 0,
@@ -939,6 +1010,7 @@ class MemTransWrapper(object):
         self.by_ids = by_ids
         self.shard_start = shard_start
         self.skip_retrieval_steps = skip_retrieval_steps
+        self.accum_retrieval_steps = accum_retrieval_steps
         self.skip_first_token = skip_first_token
         self.add_after_first = add_after_first
         self.filter_topk = filter_topk
@@ -1000,10 +1072,12 @@ class MemTransWrapper(object):
                 topk=self.k, 
                 eos_token_id=eos_token_id, 
                 stage=self.stage, 
+                layer_index=layer_idx,
                 track=self.track, 
                 by_ids=self.by_ids, 
                 shard_start=self.shard_start,
                 skip_retrieval_steps=self.skip_retrieval_steps,
+                accum_retrieval_steps=self.accum_retrieval_steps,
                 skip_first_token=self.skip_first_token,
                 add_after_first=self.add_after_first,
                 filter_topk=self.filter_topk,
@@ -1031,6 +1105,7 @@ class MemTransWrapper(object):
             attn_layers = self.get_layer()
             for (layer_idx, attn_layer), ori_fwd in zip(attn_layers, self.ori_t5attetnion_forwards):
                 attn_layer.forward = ori_fwd
+                attn_layer.mta.dump_save_for_accumlation('test')  # TODO: add argument
                 del attn_layer.mta
                 #del attn_layer.relative_attention_bias  # TODO: avoid deleting this for the first layer
             self.model.broken_into = None

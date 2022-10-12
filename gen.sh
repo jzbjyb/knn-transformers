@@ -35,7 +35,7 @@ elif [[ ${task} == "retrieve" || ${task} == "retrieve+targetprefix" ]]; then
     #out_file=${out_root}/gen_topk4.lall_h9.tsv
     #track_file=${out_root}/track_topk4.lall_h9.txt
     #out_file=${out_root}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.cache.tsv
-    out_file=${out_root}/gen_topk64_byids_skip32_targetprefix16.tsv
+    out_file=${out_root}/gen_topk64_byids_skip8_accum8_targetprefix16.tsv
 else
     echo "${task} is not defined"
     exit
@@ -43,11 +43,12 @@ fi
 
 batch_size=32
 evi_len=0
-gen_len=256
+gen_len=32
 targetprefix_len=0
 retrieval_topk=0
 retrieval_layers="[]"
 skip_retrieval_steps=0
+accum_retrieval_steps=0
 filter_topk=0
 filter_order=original
 
@@ -94,8 +95,9 @@ elif [[ ${task} == "retrieve" ]]; then
 elif [[ ${task} == "retrieve+targetprefix" ]]; then
     targetprefix_len=16
     retrieval_topk=64
-    retrieval_layers="list(range(24))"
-    skip_retrieval_steps=32
+    retrieval_layers="[0,6,12,18,23]"
+    skip_retrieval_steps=8
+    accum_retrieval_steps=8
     filter_topk=0
     filter_order=original
     src_pre="Definition: Given a question, generate a descriptive answer. Question: "
@@ -107,7 +109,7 @@ else
     exit
 fi
 
-srun python generate.py \
+python generate.py \
     --model ${model} \
     --data_file ${data_file} \
     --out_file ${out_file} \
@@ -123,5 +125,6 @@ srun python generate.py \
     --retrieval_topk ${retrieval_topk} \
     --retrieval_layers ${retrieval_layers} \
     --skip_retrieval_steps ${skip_retrieval_steps} \
+    --accum_retrieval_steps ${accum_retrieval_steps} \
     --filter_topk ${filter_topk} \
     --filter_order ${filter_order}
