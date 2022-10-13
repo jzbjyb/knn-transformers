@@ -95,7 +95,7 @@ elif [[ ${task} == "retrieve" ]]; then
 elif [[ ${task} == "retrieve+targetprefix" ]]; then
     targetprefix_len=16
     retrieval_topk=64
-    retrieval_layers="[0,6,12,18,23]"
+    retrieval_layers="[0]"
     skip_retrieval_steps=8
     accum_retrieval_steps=8
     filter_topk=0
