@@ -36,7 +36,7 @@ elif [[ ${task} == "retrieve" || ${task} == "retrieve+targetprefix" ]]; then
     #track_file=${out_root}/track_topk4.lall_h9.txt
     #out_file=${out_root}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.cache.tsv
     #out_file=${out_root}/gen_topk64_byids_skip8_accum8_targetprefix16.tsv
-    out_file=${out_root}/gen_evi64_tgt16_skip1_every1_max1.tsv
+    out_file=${out_root}/gen_evi64_tgt16_skip1_every8_max1.tsv
 else
     echo "${task} is not defined"
     exit
@@ -101,7 +101,7 @@ elif [[ ${task} == "retrieve+targetprefix" ]]; then
     retrieval_layers="list(range(24))"
     skip_retrieval_steps=1
     accum_retrieval_steps=0
-    retrieval_every_steps=1
+    retrieval_every_steps=8
     max_retrieval_times=1
     only_use_head_idx=9
     filter_topk=0

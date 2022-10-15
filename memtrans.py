@@ -743,6 +743,8 @@ class MemTransAttn(object):
             if self.mtac is not None:  # clear coordinator
                 self.mtac.clear()
             self._retrieval_cache = {'count': 0, 'query': [], 'key': None, 'value': None}  # clear retrieval cache
+            if self.is_track:  # write retrieval results
+                self.tracker.write()
 
         return ret_ks, ret_vs
 
@@ -754,7 +756,7 @@ class MemTransAttn(object):
         ids: torch.LongTensor = None,  # (batch_size)
     ):
         assert topk > 0, 'this function is called when retrieval is actually performed'
-        bs, nh, sl, dph = query_states.size()
+        bs = query_states.size(0)
         ori_device = query_states.device
         query_states = query_states.transpose(0, 1)  # (n_heads, batch_size, dim_per_head) or (n_heads, batch_size, seq_length, dim_per_head)
 
@@ -770,7 +772,7 @@ class MemTransAttn(object):
                 ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_indices(indices=indices, device=ori_device, return_all=self.is_track)
 
         if not self.cache_indices or indices is None:  # perform retrieval
-            if self.by_ids and sl == 1:  # TODO: support by_ids for seq_len > 1
+            if self.by_ids:
                 if self.by_ids_cache:  # use horizontal cache
                     ret_ks, ret_vs, ret_ts, ret_ids, indices = self.by_ids_cache
                 else:  # retrieval by ids
@@ -814,13 +816,10 @@ class MemTransAttn(object):
         # track retrieval
         if self.is_track:
             input_ids = self.dstore.get_decoder_input_ids()  # (batch_size, seq_length)
-            if sl == 1:  # only track the generation process (not for the evaluation process)
-                self.tracker.add_single_step_batched(
-                    prediction=input_ids.squeeze(-1), 
-                    retrieved_token=ret_ts.permute(1, 0, 2), 
-                    retrieved_id=ret_ids.permute(1, 0, 2))
-            else:  # write in evaluation process
-                self.tracker.write()
+            self.tracker.add_single_step_batched(
+                prediction=input_ids.squeeze(-1), 
+                retrieved_token=ret_ts.permute(1, 0, 2), 
+                retrieved_id=ret_ids.permute(1, 0, 2))
 
         ret_ks = ret_ks.transpose(0, 1)  # (batch_size, n_heads, topk, dim_per_head)
         ret_vs = ret_vs.transpose(0, 1)  # (batch_size, n_heads, topk, dim_per_head)
