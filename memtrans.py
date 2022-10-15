@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from torch import nn
 from pathlib import Path
+import torch_scatter
 import faiss
 import faiss.contrib.torch_utils
 from transformers.models.t5.modeling_t5 import T5Attention
@@ -278,12 +279,99 @@ class MemTransDatastore(object):
             return ret_ks, ret_vs, ret_ts, ret_ids
         return ret_ks, ret_vs, None, None
 
-    def get_knns(
+    def get_knns_block(
         self, 
-        queries: torch.FloatTensor,  # (n_heads, batch_size, dim)
+        queries: torch.FloatTensor,  # (n_heads, batch_size, seq_len, dim)
         topk: int,
         only_use_head_idx: int = None,  # only use a single head to retrieve
+        skip_first_token: bool = False,
         return_all: bool = False):
+
+        assert topk, 'topk should be positive'
+        assert only_use_head_idx is not None, 'not implemented'
+
+        ibs = 1  # inner batch size (to save memory)
+        rerank_topk = topk  # num of docs to rerank  # TODO: use values different from topk
+        doc_seq_len = topk  # TODO: use values different from topk
+        final_topk = 1  # TODO: add an argument
+
+        ori_device = queries.device
+        nh, bs, sl, dim = queries.size()
+        index = self.indices[only_use_head_idx]
+
+        _queries = queries[only_use_head_idx].contiguous()  # (batch_size, seq_len, dim)
+        _queries_to_faiss = _queries.view(-1, dim).cpu().numpy()  # (batch_size * seq_len, dim) TODO: add torch tensor (GPU) support
+        _scores, _indices = index.search(_queries_to_faiss, topk)  # (batch_size * seq_len, topk) * 2
+        _scores = torch.from_numpy(_scores).to(ori_device).view(bs, sl, topk)  # (batch_size, seq_len, topk)
+        _indices = torch.from_numpy(_indices).to(self.ids.device).view(bs, sl, topk)  # (batch_size, seq_len, topk)
+        _ret_ids = self.ids[_indices].to(ori_device)  # (batch_size, seq_len, topk)
+        _ids = []  # list of ids for retrieval (i_batch_size, final_topk)
+
+        for b in range(0, bs, ibs):
+            # get unique ids
+            queries = _queries[b:b + ibs]  # (i_batch_size, seq_len, dim)
+            scores = _scores[b:b + ibs]  # (i_batch_size, seq_len, topk)
+            ret_ids = _ret_ids[b:b + ibs]  # (i_batch_size, seq_len, topk)
+            unique_ret_ids, ret_ids = torch.unique(ret_ids, return_inverse=True)  # (uni,) (i_batch_size, seq_len, topk) uni is the number of unique ids
+            uni = unique_ret_ids.size(0)
+            
+            # max
+            lowest = scores.min()
+            agg_scores = torch.zeros(ibs, sl, uni).to(ori_device) + lowest  # (i_batch_size, seq_len, uni)
+            agg_mask = torch.zeros(ibs, sl, uni).to(ori_device)  # (i_batch_size, seq_len, uni)
+            agg_scores = torch_scatter.scatter_max(scores, ret_ids, out=agg_scores, dim=-1)[0]
+            agg_mask = torch_scatter.scatter_max(torch.ones_like(scores), ret_ids, out=agg_mask, dim=-1)[0]
+            agg_scores = agg_scores * agg_mask  # assume zero for absence
+
+            # sum
+            agg_mask = agg_mask.any(1).to(agg_mask)  # (i_batch_size, uni)
+            agg_scores = agg_scores.sum(1)  # (i_batch_size, uni)
+            agg_scores = agg_scores + agg_mask.log()  # assume -inf for absence
+
+            # rerank
+            sort_indices = torch.topk(agg_scores, min(rerank_topk, uni), dim=-1).indices  # (i_batch_size, n_cand)
+            cand_ret_ids = unique_ret_ids[sort_indices]  # (i_batch_size, n_cand)
+            n_cand = cand_ret_ids.size(-1)
+
+            # get docs
+            ret_ks = self.get_knns_by_ids(
+                cand_ret_ids, topk=doc_seq_len, skip_first_token=skip_first_token, return_all=False)[0]  # (n_heads, i_batch_size, n_cand, doc_seq_len, dim)
+            ret_ks = ret_ks[only_use_head_idx]  # (i_batch_size, n_cand, doc_seq_len, dim)
+            scores = torch.einsum('bqd,bckd->bcqk', queries, ret_ks)  # (i_batch_size, n_cand, seq_len, doc_seq_len)
+
+            # max-sum TODO: add padding and masking
+            scores = scores.max(-1).values.sum(-1)  # (i_batch_size, n_cand)
+            
+            # final rank
+            sort_indices = torch.topk(scores, min(n_cand, final_topk), dim=-1).indices  # (i_batch_size, final_topk)
+            cand_ret_ids = torch.gather(cand_ret_ids, 1, sort_indices)  # (i_batch_size, final_topk)
+            _ids.append(cand_ret_ids)
+                    
+        _ids = torch.cat(_ids, 0)  # (batch_size, final_topk) TODO: different inner batches have different number of returned docs?
+        ret_ks, ret_vs, ret_ts, ret_ids, indices = self.get_knns_by_ids(
+            _ids, topk=doc_seq_len, skip_first_token=skip_first_token, return_all=return_all)
+        ret_ks = ret_ks.flatten(2, 3)  # (n_heads, batch_size, final_topk * doc_seq_len, dim)
+        ret_vs = ret_vs.flatten(2, 3)  # (n_heads, batch_size, final_topk * doc_seq_len, dim)
+        indices = indices.flatten(1, 2)  # (batch_size, final_topk * doc_seq_len)
+        ret_ts = ret_ts.flatten(1, 2) if return_all else None  # (batch_size, final_topk * doc_seq_len)
+        ret_ids = ret_ids.flatten(1, 2) if return_all else None  # (batch_size, final_topk * doc_seq_len)
+        return ret_ks, ret_vs, ret_ts, ret_ids, indices
+
+    def get_knns(
+        self, 
+        queries: torch.FloatTensor,  # (n_heads, batch_size, dim) or (n_heads, batch_size, seq_len, dim)
+        topk: int,
+        only_use_head_idx: int = None,  # only use a single head to retrieve
+        skip_first_token: bool = False,
+        return_all: bool = False):
+
+        if len(queries.size()) == 4:
+            return self.get_knns_block(
+                queries, 
+                topk=topk, 
+                only_use_head_idx=only_use_head_idx, 
+                skip_first_token=skip_first_token, 
+                return_all=return_all)
 
         ori_device = queries.device
         nh, bs, dim = queries.size()
@@ -499,6 +587,7 @@ class MemTransAttn(object):
         skip_retrieval_steps: int = 0,  # number of decoding steps where retrieval is skipped
         accum_retrieval_steps: int = 0,  # accumulate steps to perform retrieval (i.e., block-wise retrieval)
         retrieval_every_steps: int = 1,  # perform retrieval every retrieval_every_steps steps
+        max_retrieval_times: int = None,  # max number of retrieval to performa
         skip_first_token: bool = False,  # skip the first token retrieved which is usually bos
         add_after_first: bool = False,  # add the retrieved tokens after the first token which is usually bos
         filter_topk: int = 0,
@@ -534,10 +623,12 @@ class MemTransAttn(object):
         self.mtac = mtac
 
         self.retrieval_every_steps = retrieval_every_steps
+        self.max_retrieval_times = max_retrieval_times
         self._retrieval_cache = {
-            'query_states': [],  # query states from previous steps
-            'key_states': None,  # key states from previous retrieval
-            'value_states': None,  # value states from previous retrieval
+            'count': 0,
+            'query': [],  # query states from previous steps
+            'key': None,  # key states from previous retrieval
+            'value': None,  # value states from previous retrieval
         }
 
     @property
@@ -603,6 +694,7 @@ class MemTransAttn(object):
         query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
         key_length: int
     ):
+        assert key_length > 0, 'key_length should be positive'
         bs, nh, sl, dph = query_states.size()
         topk = self.topk
         is_eval = sl > 1
@@ -612,59 +704,85 @@ class MemTransAttn(object):
             topk = 0
         # skip retrieval
         fake_retrieval = key_length <= self.accum_retrieval_steps
-        skip_for_retrieval = self.skip_retrieval_steps and key_length <= self.skip_retrieval_steps and not fake_retrieval
-        if skip_for_retrieval:
+        skip_for_retrieval = key_length <= self.skip_retrieval_steps
+        if skip_for_retrieval and not fake_retrieval:
+            topk = 0
+
+        # block-wise retrieval
+        bw_ret = not is_eval and not skip_for_retrieval
+        _bw_offset = key_length - self.skip_retrieval_steps
+        bw_ret_new = bw_ret and _bw_offset % self.retrieval_every_steps == 0 and self._retrieval_cache['count'] < self.max_retrieval_times  # retrieve new results
+        bw_ret_reuse = bw_ret and not bw_ret_new  # reuse previous retrieved results
+
+        if bw_ret:
+            self._retrieval_cache['query'].append(query_states)
+        if bw_ret_new:
+            query_states = torch.cat(self._retrieval_cache['query'], 2)  # (batch_size, n_heads, retrieval_every_steps, dim_per_head)
+        if bw_ret_reuse:
+            if self._retrieval_cache['key'] is not None:
+                ret_ks, ret_vs = self._retrieval_cache['key'], self._retrieval_cache['value']
+                return ret_ks, ret_vs
             topk = 0
 
         if topk == 0:  # no need to perform retrieval, return "empty" tensors
             ret_ks = torch.zeros(bs, nh, sl, 0, dph).to(query_states)  # (batch_size, n_heads, seq_length, topk, dim_per_head)
             ret_vs = torch.zeros(bs, nh, sl, 0, dph).to(query_states)  # (batch_size, n_heads, seq_length, topk, dim_per_head)
         else:  # perform retrieve
-            ret_ks, ret_vs = self._retrieve(query_states, key_length=key_length, topk=topk)
+            if query_states.size(2) == 1:
+                query_states = query_states.squeeze(2)
+            ret_ks, ret_vs = self._retrieve(query_states, key_length=key_length, topk=topk)  # (batch_size, n_heads, topk, dim_per_head) * 2
+            ret_ks = ret_ks.unsqueeze(2)  # (batch_size, n_heads, seq_length=1, topk, dim_per_head)
+            ret_vs = ret_vs.unsqueeze(2)  # (batch_size, n_heads, seq_length=1, topk, dim_per_head)
+
+            if bw_ret_new:  # update key and value
+                self._retrieval_cache = {'count': self._retrieval_cache['count'] + 1, 'query': [], 'key': ret_ks, 'value': ret_vs}
 
         if is_eval:  # move to next batch
             self.id_offset += bs  # change offset
             self.by_ids_cache = None  # clear by_ids cache
             if self.mtac is not None:  # clear coordinator
                 self.mtac.clear()
+            self._retrieval_cache = {'count': 0, 'query': [], 'key': None, 'value': None}  # clear retrieval cache
 
         return ret_ks, ret_vs
 
     def _retrieve(
         self,
-        query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
+        query_states: torch.FloatTensor,  # (batch_size, n_heads, dim_per_head) or (batch_size, n_heads, seq_length, dim_per_head)
         key_length: int,
         topk: int,
         ids: torch.LongTensor = None,  # (batch_size)
     ):
         assert topk > 0, 'this function is called when retrieval is actually performed'
         bs, nh, sl, dph = query_states.size()
-        query_states = query_states.permute(1, 0, 2, 3).flatten(1, 2)  # (n_heads, batch_size * seq_length, dim_per_head)
+        ori_device = query_states.device
+        query_states = query_states.transpose(0, 1)  # (n_heads, batch_size, dim_per_head) or (n_heads, batch_size, seq_length, dim_per_head)
 
         fake_retrieval = key_length <= self.accum_retrieval_steps
         fake_retrieval_last_step = key_length == self.accum_retrieval_steps
 
+        # ret_ks, ret_vs, ret_ts, ret_ids, indices
+        # (n_heads, batch_size, topk, dim_per_head) * 2, (n_heads, batch_size, topk) * 3
         indices = None
         if self.cache_indices:  # use cached indices
             indices = self.mtac.get_or_save_indices(key_length=key_length)
             if indices is not None:
-                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_indices(indices=indices, device=query_states.device, return_all=self.is_track)
+                ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_indices(indices=indices, device=ori_device, return_all=self.is_track)
 
         if not self.cache_indices or indices is None:  # perform retrieval
             if self.by_ids and sl == 1:  # TODO: support by_ids for seq_len > 1
-                # (n_heads, batch_size, topk, dim_per_head) * 2, (n_heads, batch_size, topk) * 2
                 if self.by_ids_cache:  # use horizontal cache
                     ret_ks, ret_vs, ret_ts, ret_ids, indices = self.by_ids_cache
                 else:  # retrieval by ids
                     if ids is None:
                         if fake_retrieval:
-                            ids = torch.arange(bs).to(query_states.device) + self.id_offset
+                            ids = torch.arange(bs).to(ori_device) + self.id_offset
                             # (batch_size, accum) for the i-th example, retrieve i, i + 1, ..., i + accum - 1
-                            ids = ids.unsqueeze(-1) + torch.arange(100).to(query_states.device).unsqueeze(0)  # TODO: add argument
+                            ids = ids.unsqueeze(-1) + torch.arange(100).to(ori_device).unsqueeze(0)  # TODO: add argument
                             ids_maks = ids < self.dstore.num_docs  # (batch_size, accum)
                             ids = ids * ids_maks  # out-of-boundary ids are replaced with 0
                         else:
-                            ids = torch.arange(bs).to(query_states.device) + self.id_offset
+                            ids = torch.arange(bs).to(ori_device) + self.id_offset
                     ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns_by_ids(
                         ids, topk=topk, skip_first_token=self.skip_first_token, return_all=self.is_track)
                     self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids, indices)
@@ -677,15 +795,18 @@ class MemTransAttn(object):
                 
                 if fake_retrieval_last_step:  # clear the cache
                     self.by_ids_cache = None
-                
+
                 if self.filter_topk:  # filter
                     ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.filter_by_similarity(
                         query_states, ret_ks, ret_vs, ret_ts, ret_ids, indices, topk=self.filter_topk, order=self.filter_order)
 
             else:
-                # (n_heads, batch_size * seq_length, topk, dim_per_head) * 2, (n_heads, batch_size * seq_length, topk) * 2
                 ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns(
-                    query_states, topk=topk, only_use_head_idx=self.only_use_head_idx, return_all=self.is_track)
+                    query_states, 
+                    topk=topk, 
+                    only_use_head_idx=self.only_use_head_idx, 
+                    skip_first_token=self.skip_first_token,
+                    return_all=self.is_track)
         
         if self.cache_indices:  # cache indices
             self.mtac.get_or_save_indices(key_length=key_length, indices=indices)
@@ -700,12 +821,9 @@ class MemTransAttn(object):
                     retrieved_id=ret_ids.permute(1, 0, 2))
             else:  # write in evaluation process
                 self.tracker.write()
-    
-        actual_topk = ret_ks.size(2)
-        ret_ks = ret_ks.view(nh, bs, sl, actual_topk, dph)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
-        ret_vs = ret_vs.view(nh, bs, sl, actual_topk, dph)  # (n_heads, batch_size, seq_length, topk, dim_per_head)
-        ret_ks = ret_ks.permute(1, 0, 2, 3, 4)  # (batch_size, n_heads, seq_length, topk, dim_per_head)
-        ret_vs = ret_vs.permute(1, 0, 2, 3, 4)  # (batch_size, n_heads, seq_length, topk, dim_per_head)
+
+        ret_ks = ret_ks.transpose(0, 1)  # (batch_size, n_heads, topk, dim_per_head)
+        ret_vs = ret_vs.transpose(0, 1)  # (batch_size, n_heads, topk, dim_per_head)
         return ret_ks, ret_vs
 
     def update_mask_and_position_bias(
@@ -1018,6 +1136,8 @@ class MemTransWrapper(object):
         shard_start: int = 0,  # used for sharded generated with by_ids = True
         skip_retrieval_steps: int = 0,
         accum_retrieval_steps: int = 0,
+        retrieval_every_steps: int = 1,
+        max_retrieval_times: int = None,
         skip_first_token: bool = False,
         add_after_first: bool = False,
         filter_topk: int = 0,
@@ -1037,6 +1157,8 @@ class MemTransWrapper(object):
         self.shard_start = shard_start
         self.skip_retrieval_steps = skip_retrieval_steps
         self.accum_retrieval_steps = accum_retrieval_steps
+        self.retrieval_every_steps = retrieval_every_steps
+        self.max_retrieval_times = max_retrieval_times
         self.skip_first_token = skip_first_token
         self.add_after_first = add_after_first
         self.filter_topk = filter_topk
@@ -1104,6 +1226,8 @@ class MemTransWrapper(object):
                 shard_start=self.shard_start,
                 skip_retrieval_steps=self.skip_retrieval_steps,
                 accum_retrieval_steps=self.accum_retrieval_steps,
+                retrieval_every_steps=self.retrieval_every_steps,
+                max_retrieval_times=self.max_retrieval_times,
                 skip_first_token=self.skip_first_token,
                 add_after_first=self.add_after_first,
                 filter_topk=self.filter_topk,

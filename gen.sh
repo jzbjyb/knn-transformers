@@ -35,7 +35,8 @@ elif [[ ${task} == "retrieve" || ${task} == "retrieve+targetprefix" ]]; then
     #out_file=${out_root}/gen_topk4.lall_h9.tsv
     #track_file=${out_root}/track_topk4.lall_h9.txt
     #out_file=${out_root}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.cache.tsv
-    out_file=${out_root}/gen_topk64_byids_skip8_accum8_targetprefix16.tsv
+    #out_file=${out_root}/gen_topk64_byids_skip8_accum8_targetprefix16.tsv
+    out_file=${out_root}/gen_evi64_tgt16_skip1_every1_max1.tsv
 else
     echo "${task} is not defined"
     exit
@@ -43,12 +44,14 @@ fi
 
 batch_size=32
 evi_len=0
-gen_len=32
+gen_len=256
 targetprefix_len=0
 retrieval_topk=0
 retrieval_layers="[]"
 skip_retrieval_steps=0
 accum_retrieval_steps=0
+retrieval_every_steps=1
+max_retrieval_times=100000
 filter_topk=0
 filter_order=original
 
@@ -95,9 +98,12 @@ elif [[ ${task} == "retrieve" ]]; then
 elif [[ ${task} == "retrieve+targetprefix" ]]; then
     targetprefix_len=16
     retrieval_topk=64
-    retrieval_layers="[0]"
-    skip_retrieval_steps=8
-    accum_retrieval_steps=8
+    retrieval_layers="list(range(24))"
+    skip_retrieval_steps=1
+    accum_retrieval_steps=0
+    retrieval_every_steps=1
+    max_retrieval_times=1
+    only_use_head_idx=9
     filter_topk=0
     filter_order=original
     src_pre="Definition: Given a question, generate a descriptive answer. Question: "
@@ -109,7 +115,7 @@ else
     exit
 fi
 
-python generate.py \
+srun python generate.py \
     --model ${model} \
     --data_file ${data_file} \
     --out_file ${out_file} \
@@ -126,5 +132,8 @@ python generate.py \
     --retrieval_layers ${retrieval_layers} \
     --skip_retrieval_steps ${skip_retrieval_steps} \
     --accum_retrieval_steps ${accum_retrieval_steps} \
+    --retrieval_every_steps ${retrieval_every_steps} \
+    --max_retrieval_times ${max_retrieval_times} \
     --filter_topk ${filter_topk} \
-    --filter_order ${filter_order}
+    --filter_order ${filter_order} \
+    --only_use_head_idx ${only_use_head_idx}
