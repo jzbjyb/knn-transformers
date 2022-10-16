@@ -5,3 +5,6 @@ pip install -r requirements.txt
 conda install -c anaconda mongodb
 conda install -c conda-forge mongo-tools
 pip install torch-scatter==2.0.9 -f https://data.pyg.org/whl/torch-1.12.1+cu113.html
+
+# mongo for KILT
+#mongod --dbpath /path/to/data --logpath /path/to/mongod.log --fork

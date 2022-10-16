@@ -283,12 +283,12 @@ class MemTransDatastore(object):
         self, 
         queries: torch.FloatTensor,  # (n_heads, batch_size, seq_len, dim)
         topk: int,
-        only_use_head_idx: int = None,  # only use a single head to retrieve
+        only_use_head_idx: int = -1,  # only use a single head to retrieve
         skip_first_token: bool = False,
         return_all: bool = False):
 
         assert topk, 'topk should be positive'
-        assert only_use_head_idx is not None, 'not implemented'
+        assert only_use_head_idx != -1, 'not implemented'
 
         ibs = 1  # inner batch size (to save memory)
         rerank_topk = topk  # num of docs to rerank  # TODO: use values different from topk
@@ -361,7 +361,7 @@ class MemTransDatastore(object):
         self, 
         queries: torch.FloatTensor,  # (n_heads, batch_size, dim) or (n_heads, batch_size, seq_len, dim)
         topk: int,
-        only_use_head_idx: int = None,  # only use a single head to retrieve
+        only_use_head_idx: int = -1,  # only use a single head to retrieve
         skip_first_token: bool = False,
         return_all: bool = False):
 
@@ -387,7 +387,7 @@ class MemTransDatastore(object):
 
         ret_ks, ret_vs, ret_ts, ret_ids = [], [], [], []
 
-        if only_use_head_idx is None:  # different heads retrieve separately
+        if only_use_head_idx == -1:  # different heads retrieve separately
             for h in range(self.n_heads):
                 ret_k, ret_v, ret_t, ret_id, indices = self._get_knns_single_head(
                     ret_head_idx=h, select_head_idx=h, queries=queries, topk=topk, return_all=return_all)
@@ -592,7 +592,7 @@ class MemTransAttn(object):
         add_after_first: bool = False,  # add the retrieved tokens after the first token which is usually bos
         filter_topk: int = 0,
         filter_order: str = 'original',
-        only_use_head_idx: int = None,
+        only_use_head_idx: int = -1,
         cache_indices: bool = False,
         mtac: MemTransAttnCoordinator = None):
         assert stage in {'save', 'retrieve'}
@@ -1141,7 +1141,7 @@ class MemTransWrapper(object):
         add_after_first: bool = False,
         filter_topk: int = 0,
         filter_order: str = 'original',
-        only_use_head_idx: int = None,
+        only_use_head_idx: int = -1,
         cache_indices: bool = False,
         move_dstore_to_mem: bool = False, 
         device: torch.device = None):

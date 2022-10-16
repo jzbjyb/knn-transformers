@@ -21,7 +21,9 @@ model=google/t5-xl-lm-adapt
 
 if [[ ${task} == "normal" || ${task} == "evidence" || ${task} == "targetprefix" || ${task} == "evidence+targetprefix" ]]; then
     # === w/o memtrans exp ===
+    #data_file=data/eli5/val_astarget_selfprov_evidence.json
     data_file=data/eli5/val_astarget_selfanswer_evidence.json
+    #out_root=checkpoints/eli5/prefix_exp/val_astarget_selfprov/prompt1
     out_root=checkpoints/eli5/prefix_exp/val_astarget_selfanswer/prompt1
     #out_file=${out_root}/t53b_targetprefix16.tsv
     out_file=${out_root}/t53b_evidencelen64_targetprefix16.tsv
@@ -36,7 +38,7 @@ elif [[ ${task} == "retrieve" || ${task} == "retrieve+targetprefix" ]]; then
     #track_file=${out_root}/track_topk4.lall_h9.txt
     #out_file=${out_root}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.cache.tsv
     #out_file=${out_root}/gen_topk64_byids_skip8_accum8_targetprefix16.tsv
-    out_file=${out_root}/gen_evi64_tgt16_skip1_every8_max1.tsv
+    out_file=${out_root}/gen_evi64_tgt16_skip1_every8_max1_head30.tsv
 else
     echo "${task} is not defined"
     exit
@@ -54,6 +56,7 @@ retrieval_every_steps=1
 max_retrieval_times=100000
 filter_topk=0
 filter_order=original
+only_use_head_idx=-1
 
 if [[ ${task} == "normal" ]]; then
     src_pre="Definition: Given a question, generate a descriptive answer. Question: "
@@ -103,7 +106,7 @@ elif [[ ${task} == "retrieve+targetprefix" ]]; then
     accum_retrieval_steps=0
     retrieval_every_steps=8
     max_retrieval_times=1
-    only_use_head_idx=9
+    only_use_head_idx=30
     filter_topk=0
     filter_order=original
     src_pre="Definition: Given a question, generate a descriptive answer. Question: "

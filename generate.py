@@ -1,3 +1,4 @@
+from pickle import FALSE
 from typing import List, Dict, Tuple, Any, Union
 import contextlib
 import argparse
@@ -65,7 +66,8 @@ class GenerationWrapper(object):
         data_file: str, 
         shard_id: int = 0, 
         num_shards: int = 1,
-        max_num_examples: int = None) -> Tuple[List, List, List]:
+        max_num_examples: int = None,
+        debug: bool = False) -> Tuple[List, List, List]:
         # TODO: for simplicity we reuse the en-zh translation dataset
         sources: List[str] = []
         targets: List[str] = []
@@ -120,6 +122,12 @@ class GenerationWrapper(object):
                 targets.append(target)
                 if has_decoder_prefix:
                     decoder_prefixes.append(dp)
+                
+                if debug:
+                    print('SOURCE\t', source)
+                    print('TARGET\t', target)
+                    print('PREFIx\t', dp)
+                    input()
 
                 if max_num_examples and len(sources) >= max_num_examples:
                     break
@@ -233,7 +241,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_retrieval_times', type=int, default=None, help='max number of retrieval to perform')
     parser.add_argument('--filter_topk', type=int, default=0, help='filter_topk')
     parser.add_argument('--filter_order', type=str, default='original', help='filter_order')
-    parser.add_argument('--only_use_head_idx', type=int, default=None, help='head index to use')
+    parser.add_argument('--only_use_head_idx', type=int, default=-1, help='head index to use')
     args = parser.parse_args()
     args.use_retrieval = args.retrieval_topk > 0
     args.retrieval_layers = eval(args.retrieval_layers)

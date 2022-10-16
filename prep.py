@@ -1,6 +1,7 @@
 from typing import List, Tuple, Any, Union
 import argparse
 import random
+import os
 import json
 from collections import defaultdict
 import csv
@@ -39,20 +40,24 @@ class Wikipedia(object):
                     prov.append(page['text'][pi])
         return ' '.join(prov)
 
-def prep_eli5(
+def prep_kilt(
     args, 
+    dataset_name: str,
     split: str = 'validation', 
     evidence_method: str = 'provenance', 
+    whole_paragraph_as_evidence: bool = False,
     skip_answer_as_evidence: bool = True):
+    assert dataset_name in {'eli5', 'wow'}
     assert evidence_method in {'provenance', 'self_provenance', 'answer', 'self_answer'}
 
     qa_file = f'{args.out}_qa.json'
     prov_file = f'{args.out}_evidence.json'
-    eli5 = load_dataset('kilt_tasks', name='eli5')
+    data = load_dataset('kilt_tasks', name=dataset_name)
     wikipedia = Wikipedia()
 
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(qa_file, 'w') as qfin, open(prov_file, 'w') as pfin:
-        for i, example in enumerate(eli5[split]):
+        for i, example in enumerate(data[split]):
             inp: str = example['input']
             answer: str = None
             evidences: List[str] = []
@@ -72,7 +77,7 @@ def prep_eli5(
                             wiki_id = prov['wikipedia_id']
                             ps, pe, cs, ce = prov['start_paragraph_id'], prov['end_paragraph_id'], prov['start_character'], prov['end_character']
                             #prov = prov['meta']['evidence_span'][-1].split('\r')[0]
-                            prov = wikipedia.get_provenance(wiki_id, ps, pe, cs, ce, whole_paragraph=True)  # always use the whole paragraph
+                            prov = wikipedia.get_provenance(wiki_id, ps, pe, cs, ce, whole_paragraph=whole_paragraph_as_evidence)  # always use the whole paragraph
                             evidences.append(prov)
                     if 'answer' in evidence_method and ans:
                         evidences.append(ans)
@@ -152,7 +157,7 @@ def head_analysis(attn_file: str, rank: bool = True, show_n_heads: int = 5):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=['eli5', 'retrieval_track', 'head_analysis'])
+    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=['kilt', 'retrieval_track', 'head_analysis'])
     parser.add_argument('--inp', type=str, default=None, help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -160,9 +165,15 @@ if __name__ == '__main__':
     # set random seed to make sure the same examples are sampled across multiple runs
     random.seed(2022)
 
-    if args.task == 'eli5':
-        prep_eli5(args, evidence_method='answer', skip_answer_as_evidence=False)
-    
+    if args.task == 'kilt':
+        prep_kilt(
+            args, 
+            dataset_name='wow', 
+            split='validation', 
+            evidence_method='self_provenance', 
+            whole_paragraph_as_evidence=False, 
+            skip_answer_as_evidence=True)
+
     elif args.task == 'retrieval_track':
         n_heads = 32
         topk = 4
