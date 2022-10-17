@@ -285,7 +285,8 @@ class MemTransDatastore(object):
         topk: int,
         only_use_head_idx: int = -1,  # only use a single head to retrieve
         skip_first_token: bool = False,
-        return_all: bool = False):
+        return_all: bool = False,
+        debug: bool = False):
 
         assert topk, 'topk should be positive'
         assert only_use_head_idx != -1, 'not implemented'
@@ -346,6 +347,9 @@ class MemTransDatastore(object):
             sort_indices = torch.topk(scores, min(n_cand, final_topk), dim=-1).indices  # (i_batch_size, final_topk)
             cand_ret_ids = torch.gather(cand_ret_ids, 1, sort_indices)  # (i_batch_size, final_topk)
             _ids.append(cand_ret_ids)
+
+            if debug:
+                print('||', cand_ret_ids[0, 0].item())
                     
         _ids = torch.cat(_ids, 0)  # (batch_size, final_topk) TODO: different inner batches have different number of returned docs?
         ret_ks, ret_vs, ret_ts, ret_ids, indices = self.get_knns_by_ids(

@@ -1,5 +1,5 @@
 from pickle import FALSE
-from typing import List, Dict, Tuple, Any, Union
+from typing import List, Dict, Tuple, Any, Union, Callable
 import contextlib
 import argparse
 import json
@@ -67,6 +67,7 @@ class GenerationWrapper(object):
         shard_id: int = 0, 
         num_shards: int = 1,
         max_num_examples: int = None,
+        process_exmaple_func: Callable = None,
         debug: bool = False) -> Tuple[List, List, List]:
         # TODO: for simplicity we reuse the en-zh translation dataset
         sources: List[str] = []
@@ -80,6 +81,8 @@ class GenerationWrapper(object):
             for l in fin:
                 
                 example = json.loads(l)['translation']
+                example = process_exmaple_func(example) if process_exmaple_func else example
+
                 source = example['en'].strip()
 
                 # skip duplicate source if there's no evidence or it's fixed
@@ -126,7 +129,7 @@ class GenerationWrapper(object):
                 if debug:
                     print('SOURCE\t', source)
                     print('TARGET\t', target)
-                    print('PREFIx\t', dp)
+                    print('PREFIX\t', dp)
                     input()
 
                 if max_num_examples and len(sources) >= max_num_examples:
@@ -154,7 +157,10 @@ class GenerationWrapper(object):
         self,
         sources: List[str],
         targets: List[str],
-        decoder_prefixes: List[str] = None) -> List[str]:
+        decoder_prefixes: List[str] = None,
+        label_padding: int = -100,
+        only_evaluate: bool = False,
+        dry_run: bool = False) -> List[str]:
 
         # decoder prefix function
         if decoder_prefixes:
@@ -175,12 +181,17 @@ class GenerationWrapper(object):
         targets = self.tokenizer.batch_encode_plus(
             targets, return_tensors='pt', padding=True, truncation=True, max_length=self.gen_args['max_length'])
         labels = targets['input_ids'].to(self.device)
-        labels[labels == self.tokenizer.pad_token_id] = -100
+        labels[labels == self.tokenizer.pad_token_id] = label_padding
 
-        # generate
-        with torch.no_grad():
-            output = self.model.generate(**sources, prefix_allowed_tokens_fn=prefix_allowed_tokens_fn, **self.gen_args)
-            _ = self.model(**sources, labels=labels)
+        if not dry_run:  # generate
+            with torch.no_grad():
+                if not only_evaluate:
+                    output = self.model.generate(**sources, prefix_allowed_tokens_fn=prefix_allowed_tokens_fn, **self.gen_args)
+                else:
+                    output = []
+                _ = self.model(**sources, labels=labels)
+        else:
+            return [(labels != label_padding).sum().item()]
 
         # detokenize
         output = self.tokenizer.batch_decode(output, skip_special_tokens=True)
@@ -191,7 +202,9 @@ class GenerationWrapper(object):
         sources: List[str],
         targets: List[str],
         decoder_prefixes: List[str] = None,
-        output_file: str = None) -> List[str]:
+        output_file: str = None,
+        only_evaluate: bool = False,
+        dry_run: bool = False) -> List[str]:
 
         output: List[str] = []
         with open(output_file, 'w') if output_file else contextlib.nullcontext() as fout, tqdm(total=len(sources)) as pbar:
@@ -199,7 +212,7 @@ class GenerationWrapper(object):
                 batch_s = sources[b : b + self.batch_size]
                 batch_t = targets[b : b + self.batch_size] if targets else None
                 batch_dp = decoder_prefixes[b : b + self.batch_size] if decoder_prefixes else None
-                batch_o = self.generate_batch(batch_s, targets=batch_t, decoder_prefixes=batch_dp)
+                batch_o = self.generate_batch(batch_s, targets=batch_t, decoder_prefixes=batch_dp, only_evaluate=only_evaluate, dry_run=dry_run)
 
                 if output_file:
                     for i, o in enumerate(batch_o):
@@ -229,9 +242,14 @@ if __name__ == '__main__':
     parser.add_argument('--max_evidence_len', type=int, default=128, help='max evidence length')
     parser.add_argument('--target_as_prefix_len', type=int, default=0, help='number of tokens in the target used as prefix')
 
+    # datastore args
+    parser.add_argument('--dstore_dir', type=str, default=None, help='datastore directory')
+    parser.add_argument('--dstore_size', type=int, default=None, help='datastore size')
+
     # model args
     parser.add_argument('--model', type=str, required=True, help='model')
     parser.add_argument('--batch_size', type=int, default=4, help='batch size')
+    parser.add_argument('--stage', type=str, default='retrieve', choices=['save', 'retrieve'], help='save or retrieve')
     parser.add_argument('--retrieval_topk', type=int, default=0, help='topk tokens retrieved in decoder. 0 deactivates retreival')
     parser.add_argument('--retrieval_layers', type=str, default='[0]', help='python code of layers, e.g., list(range(24)) for all layers')
     parser.add_argument('--retrieval_track', type=str, default=False, help='file to track retrieval')
@@ -243,7 +261,8 @@ if __name__ == '__main__':
     parser.add_argument('--filter_order', type=str, default='original', help='filter_order')
     parser.add_argument('--only_use_head_idx', type=int, default=-1, help='head index to use')
     args = parser.parse_args()
-    args.use_retrieval = args.retrieval_topk > 0
+    args.is_save = args.stage == 'save'
+    args.use_retrieval = args.is_save or args.retrieval_topk > 0
     args.retrieval_layers = eval(args.retrieval_layers)
 
     # logging config
@@ -270,24 +289,38 @@ if __name__ == '__main__':
     wrapper = GenerationWrapper(model, tokenizer, args)
 
     # load data
+    process_exmaple_func = None
+    if args.is_save:  # use "decoder_prefix" as target
+        def process_exmaple_func(example: Dict):
+            example['zh'] = example['decoder_prefix']
+            return example
     sources, targets, decoder_prefixes, (shard_start, shard_end) = wrapper.load_data(
-        args.data_file, shard_id=args.global_rank, num_shards=args.world_size)
+        args.data_file, shard_id=args.global_rank, num_shards=args.world_size, process_exmaple_func=process_exmaple_func)
+
+    # prepare for "save" stage
+    only_evaluate = False
+    if args.is_save:
+        num_tokens = wrapper.generate(sources, targets=targets, decoder_prefixes=decoder_prefixes, dry_run=True)
+        num_tokens = sum(num_tokens)
+        logger.info(f'total eval tokens: {num_tokens}')
+        args.dstore_size = num_tokens
+        only_evaluate = True
 
     if args.use_retrieval:  # add retrieval
         ret_wrapper = MemTransWrapper(
-            dstore_size=206896, dstore_dir='checkpoints/eli5/prefix_exp/val_astarget_answer/memtrans_reproduce_prefix_layerall',
+            dstore_size=args.dstore_size, dstore_dir=args.dstore_dir,
             move_dstore_to_mem=True, device=args.dstore_device,
             recompute_dists=True, retrieval_layers=args.retrieval_layers,
-            k=args.retrieval_topk, stage='retrieve', track=args.retrieval_track, 
-            by_ids=False, 
+            k=args.retrieval_topk, stage=args.stage, track=args.retrieval_track, 
+            by_ids=False, cache_indices=True,  # TODO: debug
             skip_retrieval_steps=args.skip_retrieval_steps, 
             accum_retrieval_steps=args.accum_retrieval_steps, 
             retrieval_every_steps=args.retrieval_every_steps,
             max_retrieval_times=args.max_retrieval_times,
             skip_first_token=True, add_after_first=True, 
             filter_topk=args.filter_topk, filter_order=args.filter_order, 
-            only_use_head_idx=args.only_use_head_idx, cache_indices=True, 
-            shard_start=shard_start)  # TODO: debug
+            only_use_head_idx=args.only_use_head_idx, 
+            shard_start=shard_start)
         ret_wrapper.break_into(model)
 
     # generate
@@ -295,7 +328,11 @@ if __name__ == '__main__':
         sources, 
         targets=targets, 
         decoder_prefixes=decoder_prefixes, 
+        only_evaluate=only_evaluate,
         output_file=args.out_file)
+    
+    if args.is_save:  # build index
+        ret_wrapper.build_index()
     
     if args.use_retrieval:
         ret_wrapper.break_out()

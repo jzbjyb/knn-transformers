@@ -15,30 +15,69 @@
 # env
 source env.sh
 
+dataset=wow
 task=retrieve+targetprefix
 
 model=google/t5-xl-lm-adapt
 
+dstore_dir=checkpoints/test
+dstore_size=0
+
 if [[ ${task} == "normal" || ${task} == "evidence" || ${task} == "targetprefix" || ${task} == "evidence+targetprefix" ]]; then
     # === w/o memtrans exp ===
-    #data_file=data/eli5/val_astarget_selfprov_evidence.json
-    data_file=data/eli5/val_astarget_selfanswer_evidence.json
-    #out_root=checkpoints/eli5/prefix_exp/val_astarget_selfprov/prompt1
-    out_root=checkpoints/eli5/prefix_exp/val_astarget_selfanswer/prompt1
-    #out_file=${out_root}/t53b_targetprefix16.tsv
-    out_file=${out_root}/t53b_evidencelen64_targetprefix16.tsv
+    if [[ ${dataset} == 'eli5' ]]; then
+        #data_file=data/eli5/val_astarget_selfprov_evidence.json
+        data_file=data/eli5/val_astarget_selfanswer_evidence.json
+        #out_root=checkpoints/eli5/prefix_exp/val_astarget_selfprov/prompt1
+        out_root=checkpoints/eli5/prefix_exp/val_astarget_selfanswer/prompt1
+        #out_file=${out_root}/t53b_targetprefix16.tsv
+        out_file=${out_root}/t53b_evidencelen64_targetprefix16.tsv
+    elif [[ ${dataset} == 'wow' ]]; then
+        data_file=data/wow/val_astarget_selfprov_evidence.json
+        out_root=checkpoints/wow/prefix_exp/val_astarget_selfprov/prompt1
+        out_file=${out_root}/t53b_evidence32_targetprefix16.tsv
+    else
+        echo "${dataset} is not supported"
+        exit
+    fi
 elif [[ ${task} == "retrieve" || ${task} == "retrieve+targetprefix" ]]; then
     # === w/ memtrans exp ===
-    data_file=data/eli5/val_astarget_selfanswer_qa.json
-    out_root=checkpoints/eli5/prefix_exp/val_astarget_answer/memtrans_reproduce_prefix_layerall
-    #out_file=${out_root}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.filter100_asc.tsv
-    #out_file=${out_root}/gen_topk4.l23.tsv
-    #track_file=${out_root}/track_topk4.l23.txt
-    #out_file=${out_root}/gen_topk4.lall_h9.tsv
-    #track_file=${out_root}/track_topk4.lall_h9.txt
-    #out_file=${out_root}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.cache.tsv
-    #out_file=${out_root}/gen_topk64_byids_skip8_accum8_targetprefix16.tsv
-    out_file=${out_root}/gen_evi64_tgt16_skip1_every8_max1_head30.tsv
+    if [[ ${dataset} == 'eli5' ]]; then
+        dstore_size=206896
+        data_file=data/eli5/val_astarget_selfanswer_qa.json
+        dstore_dir=checkpoints/eli5/prefix_exp/val_astarget_answer/memtrans_reproduce_prefix_layerall
+        #out_file=${dstore_dir}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.filter100_asc.tsv
+        #out_file=${dstore_dir}/gen_topk4.l23.tsv
+        #track_file=${dstore_dir}/track_topk4.l23.txt
+        #out_file=${dstore_dir}/gen_topk4.lall_h9.tsv
+        #track_file=${dstore_dir}/track_topk4.lall_h9.txt
+        #out_file=${dstore_dir}/gen_topk64_byids_skip1_nopad_afterfirst_nospace.cache.tsv
+        #out_file=${dstore_dir}/gen_topk64_byids_skip8_accum8_targetprefix16.tsv
+        out_file=${dstore_dir}/gen_evi64_tgt16_skip1_every8_max1_head30.tsv
+    elif [[ ${dataset} == 'wow' ]]; then
+        dstore_size=102638
+        data_file=data/wow/val_astarget_selfprov_qa.json
+        dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/memtrans_reproduce_prefix_layerall
+        #out_file=${dstore_dir}/gen_evi32_tgt16_byids_skip4.tsv
+        out_file=${dstore_dir}/gen_evi32_tgt16_skip1_every12_max1_head9.tsv
+    else
+        echo "${dataset} is not supported"
+        exit
+    fi
+elif [[ ${task} == "save" ]]; then
+    # === save datastore for memtrans exp ===
+    if [[ ${dataset} == 'eli5' ]]; then
+        data_file=data/eli5/val_astarget_answer_qa.json
+        dstore_dir=checkpoints/eli5/prefix_exp/val_astarget_answer/memtrans_reproduce_prefix_layerall
+        out_file=""
+    elif [[ ${dataset} == 'wow' ]]; then
+        data_file=data/wow/val_astarget_selfprov_evidence.json
+        dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/memtrans_reproduce_prefix_layerall
+        out_file=""
+    else
+        echo "${dataset} is not supported"
+        exit
+    fi
 else
     echo "${task} is not defined"
     exit
@@ -48,6 +87,7 @@ batch_size=32
 evi_len=0
 gen_len=256
 targetprefix_len=0
+stage='retrieve'
 retrieval_topk=0
 retrieval_layers="[]"
 skip_retrieval_steps=0
@@ -60,12 +100,12 @@ only_use_head_idx=-1
 
 if [[ ${task} == "normal" ]]; then
     src_pre="Definition: Given a question, generate a descriptive answer. Question: "
-    src_suf=" Answer:"
-    evi=no
+    src_suf=""
+    evi=fixed
     evi_pre=""
-    evi_suf=""
+    evi_suf="Answer:"
 elif [[ ${task} == "evidence" ]]; then
-    evi_len=64
+    evi_len=32
     gen_len=$( expr ${evi_len} + ${gen_len} )
     src_pre="Definition: Given a question, generate a descriptive answer. Question: "
     src_suf=""
@@ -80,7 +120,7 @@ elif [[ ${task} == "targetprefix" ]]; then
     evi_pre=""
     evi_suf="Answer:"
 elif [[ ${task} == "evidence+targetprefix" ]]; then
-    evi_len=64
+    evi_len=32
     gen_len=$( expr ${evi_len} + ${gen_len} )
     targetprefix_len=16
     src_pre="Definition: Given a question, generate a descriptive answer. Question: "
@@ -98,15 +138,23 @@ elif [[ ${task} == "retrieve" ]]; then
     evi=fixed
     evi_pre=""
     evi_suf="Answer:"
+elif [[ ${task} == "save" ]]; then
+    stage="save"
+    retrieval_layers="list(range(24))"
+    src_pre="Definition: Given a question, generate a descriptive answer. Question: "
+    src_suf=""
+    evi=fixed
+    evi_pre=""
+    evi_suf="Evidence:"
 elif [[ ${task} == "retrieve+targetprefix" ]]; then
     targetprefix_len=16
-    retrieval_topk=64
+    retrieval_topk=32
     retrieval_layers="list(range(24))"
     skip_retrieval_steps=1
     accum_retrieval_steps=0
-    retrieval_every_steps=8
+    retrieval_every_steps=12
     max_retrieval_times=1
-    only_use_head_idx=30
+    only_use_head_idx=9
     filter_topk=0
     filter_order=original
     src_pre="Definition: Given a question, generate a descriptive answer. Question: "
@@ -120,8 +168,11 @@ fi
 
 srun python generate.py \
     --model ${model} \
+    --stage ${stage} \
+    --dstore_dir ${dstore_dir} \
+    --dstore_size ${dstore_size} \
     --data_file ${data_file} \
-    --out_file ${out_file} \
+    --out_file "${out_file}" \
     --batch_size ${batch_size} \
     --source_prefix "${src_pre}" \
     --source_suffix "${src_suf}" \
