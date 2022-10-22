@@ -1,4 +1,4 @@
-from typing import List, Tuple, Any, Union
+from typing import List, Tuple, Any, Union, Dict
 import argparse
 import random
 import os
@@ -147,6 +147,18 @@ def retrieval_track(args, n_heads: int = 32, topk: int = 4) -> List[PredictionWi
                 #tsv_writer.writerow(l)
     return pwrs
 
+def shuffle_evidence(inp_file: str, out_file: str):
+    data: List[Dict] = []
+    evis: List[str] = []
+    with open(inp_file, 'r') as fin, open(out_file, 'w') as fout:
+        for l in fin:
+            data.append(json.loads(l))
+            evis.append(data[-1]['translation']['decoder_prefix'])
+        random.shuffle(evis)
+        for example, evi in zip(data, evis):
+            example['translation']['decoder_prefix'] = evi
+            fout.write(json.dumps(example) + '\n')
+
 def head_analysis(attn_file: str, rank: bool = True, show_n_heads: int = 5):
     attensions: torch.FloatTensor = torch.load(attn_file)  # (n_heads, n_examples, n_docs)
     sorted, indices = torch.sort(attensions, dim=-1, descending=True)  # (n_heads, n_examples, n_docs)
@@ -157,7 +169,7 @@ def head_analysis(attn_file: str, rank: bool = True, show_n_heads: int = 5):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=['kilt', 'retrieval_track', 'head_analysis'])
+    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=['kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence'])
     parser.add_argument('--inp', type=str, default=None, help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -184,3 +196,6 @@ if __name__ == '__main__':
     
     elif args.task == 'head_analysis':
         head_analysis(args.inp)
+    
+    elif args.task == 'shuffle_evidence':
+        shuffle_evidence(args.inp, args.out)

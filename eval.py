@@ -1,6 +1,8 @@
+from pickle import FALSE
 from typing import List, Tuple, Dict, Any
 import argparse
 import random
+import contextlib
 from collections import defaultdict
 from tqdm import tqdm
 import pandas as pd
@@ -18,16 +20,24 @@ metric_key_map: Dict[str, Dict[str, str]] = {
 
 def load_pred_file(
     pred_file: str, 
+    filter_file: str = None, 
     dedup: bool = False,  # keep the first instance among those with the same source
     remove_prediction_prefix: str = 'Answer:',
     remove_repetition: bool = True,
     debug: bool = False,
     ) -> List[Tuple[str, str, str]]:  # source, target, pred
     examples: List[Tuple[str, str, str]] = []
-    with open(pred_file, 'r') as fin:
+    with open(pred_file, 'r') as fin, (open(filter_file, 'r') if filter_file else contextlib.nullcontext()) as ffin:
         prev_source = None
-        for l in fin:
+        for i, l in enumerate(fin):
             items = l.rstrip('\n').split('\t')
+            skip = False
+            retrieval_id = None
+            if filter_file:
+                retrieval_id = int(ffin.readline()[2:].strip())
+                skip = retrieval_id != i
+            #if skip:
+            #    continue
             source, target, pred = items[:3]
             if dedup and prev_source == source:  # TODO: use target if evidence is included in source
                 continue
@@ -42,7 +52,7 @@ def load_pred_file(
                 pred = pred[len(remove_prediction_prefix):].strip()
             if remove_prediction_prefix and remove_repetition:
                 pred = pred.split(remove_prediction_prefix, 1)[0].strip()
-            examples.append((source, target, pred))
+            examples.append((source, target, pred, retrieval_id))
             if debug:
                 print('SOURCE\t', source)
                 print('TARGET\t', target)
@@ -77,19 +87,21 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--pred_file', type=str, required=True, help='prediction file')
     parser.add_argument('--pred_file2', type=str, required=False, default=None, help='another prediction file')
+    parser.add_argument('--filter_file', type=str, required=False, default=None, help='file used to filter examples')
     parser.add_argument('--tokenizer', type=str, default=None, choices=[None, 'zh'], help='tokenizer used in metrics')
     parser.add_argument('--metrics', type=str, default=['rouge', 'sacrebleu'], choices=['rouge', 'sacrebleu'], nargs='+', help='metrics to report')
     parser.add_argument('--aggregate', type=str, default=None, choices=[None, 'mean', 'max'], help='how to aggregate mutiple examples of the same source')
     parser.add_argument('--compare', action='store_true', help='compare the predictions from pred_file and pred_file2')
+    parser.add_argument('--sample', type=int, default=None, help='sample a subset to visualize')
     args = parser.parse_args()
 
     # set random seed to make sure the same examples are sampled across multiple runs
     random.seed(2022)
 
     dedup = args.aggregate is None  # only keep one example with the same source
-    examples = load_pred_file(args.pred_file, dedup=dedup)
-    examples2 = load_pred_file(args.pred_file2 or args.pred_file, dedup=dedup)
-    sources, targets, predictions = list(zip(*examples))
+    examples = load_pred_file(args.pred_file, filter_file=args.filter_file, dedup=dedup)
+    examples2 = load_pred_file(args.pred_file2 or args.pred_file, filter_file=args.filter_file, dedup=dedup)
+    sources, targets, predictions, retreival_ids = list(zip(*examples))
     targets = [e[1] for e in examples2][:len(sources)]
 
     '''
@@ -130,7 +142,7 @@ if __name__ == '__main__':
     print('\t'.join(map(str, metric_vals)))
 
     if args.compare:
-        for (s1, t1, p1), (s2, t2, p2) in zip(examples, examples2):
+        for (s1, t1, p1, rid1), (s2, t2, p2, rid2) in zip(examples, examples2):
             assert t1 == t2
             print('Q:', s1)
             print('A:', t1)

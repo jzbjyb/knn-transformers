@@ -8,15 +8,15 @@
 #SBATCH -o slurm/%j.out
 #SBATCH -e slurm/%j.err
 
-#SBATCH --gpus-per-node=2
-#SBATCH --ntasks-per-node=2
+#SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=4
 #SBATCH --mem=512GB
 
 # env
 source env.sh
 
 dataset=wow
-task=retrieve+targetprefix
+task=evidence+targetprefix
 
 model=google/t5-xl-lm-adapt
 
@@ -33,9 +33,9 @@ if [[ ${task} == "normal" || ${task} == "evidence" || ${task} == "targetprefix" 
         #out_file=${out_root}/t53b_targetprefix16.tsv
         out_file=${out_root}/t53b_evidencelen64_targetprefix16.tsv
     elif [[ ${dataset} == 'wow' ]]; then
-        data_file=data/wow/val_astarget_selfprov_evidence.json
+        data_file=data/wow/val_astarget_selfprov_evidence.shuf.json
         out_root=checkpoints/wow/prefix_exp/val_astarget_selfprov/prompt1
-        out_file=${out_root}/t53b_evidence32_targetprefix16.tsv
+        out_file=${out_root}/t53b_evidenceshuf32_targetprefix16.tsv
     else
         echo "${dataset} is not supported"
         exit
