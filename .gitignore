@@ -176,6 +176,5 @@ cython_debug/
 ## Custom
 checkpoints
 data
-models
 slurm
 .vscode
