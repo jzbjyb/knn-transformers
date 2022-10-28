@@ -13,6 +13,7 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 from utils import setup_multi_gpu_slurm
 from memtrans import MemTransWrapper
+from models.t5 import T5ForConditionalGeneration
 
 logger = logging.getLogger(__name__)
 logger.setLevel(20)
@@ -260,6 +261,8 @@ if __name__ == '__main__':
     parser.add_argument('--filter_topk', type=int, default=0, help='filter_topk')
     parser.add_argument('--filter_order', type=str, default='original', help='filter_order')
     parser.add_argument('--only_use_head_idx', type=int, default=-1, help='head index to use')
+    parser.add_argument('--num_ctxs', type=int, default=1, help='num of ctxs to retrieve')
+    parser.add_argument('--ctx_order', type=str, default='parallel', help='how to ues multiple ctxs')
     args = parser.parse_args()
     args.is_save = args.stage == 'save'
     args.use_retrieval = args.is_save or args.retrieval_topk > 0
@@ -284,7 +287,7 @@ if __name__ == '__main__':
     args.dstore_device = torch.device('cpu') if len(args.retrieval_layers) > 3 else args.device
 
     # load model
-    model = AutoModelForSeq2SeqLM.from_pretrained(args.model).to(args.device)
+    model = T5ForConditionalGeneration.from_pretrained(args.model).to(args.device)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     wrapper = GenerationWrapper(model, tokenizer, args)
 
@@ -320,7 +323,8 @@ if __name__ == '__main__':
             skip_first_token=True, add_after_first=True, 
             filter_topk=args.filter_topk, filter_order=args.filter_order, 
             only_use_head_idx=args.only_use_head_idx, 
-            shard_start=shard_start)
+            shard_start=shard_start,
+            num_ctxs=args.num_ctxs, ctx_order=args.ctx_order)
         ret_wrapper.break_into(model)
 
     # generate

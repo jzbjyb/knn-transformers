@@ -234,7 +234,7 @@ class MemTransDatastore(object):
         ret_head_idx: int = None,  # head on which to perform knn retrieval
         select_head_idx: int = None,  # head from which to select keys and values
         queries: torch.FloatTensor = None,  # (n_heads, batch_size, dim)
-        indices: torch.LongTensor = None,  # (batch_size, topk)  used to avoid retrieval again
+        indices: torch.LongTensor = None,  # (batch_size, n_ctxs, topk)  used to avoid retrieval again
         topk: int = 0,
         return_all: bool = False,
         return_indices: bool = False):
@@ -243,22 +243,22 @@ class MemTransDatastore(object):
             index = self.indices[ret_head_idx]
             # TODO: add torch tensor (GPU) support
             indices = index.search(np.ascontiguousarray(queries[ret_head_idx].cpu().numpy()), topk)[1]  # (batch_size, topk)
-            indices = torch.from_numpy(indices).to(self.keys.device)
+            indices = torch.from_numpy(indices).to(self.keys.device).unsqueeze(1)  # (batch_size, 1 (n_ctxs), topk)
         if return_indices:
             return indices
 
         # select
-        ret_k = self.keys[select_head_idx][indices]  # (batch_size, topk, dim)
-        ret_v = self.values[select_head_idx][indices]  # (batch_size, topk, dim)
+        ret_k = self.keys[select_head_idx][indices]  # (batch_size, n_ctxs, topk, dim)
+        ret_v = self.values[select_head_idx][indices]  # (batch_size, n_ctxs, topk, dim)
         ret_t = ret_id = None
         if return_all:
-            ret_t = self.tokens[indices]  # (batch_size, topk)
-            ret_id = self.ids[indices]  # (batch_size, topk)
+            ret_t = self.tokens[indices]  # (batch_size, n_ctxs, topk)
+            ret_id = self.ids[indices]  # (batch_size, n_ctxs, topk)
         return ret_k, ret_v, ret_t, ret_id, indices
     
     def get_knns_by_indices(
         self,
-        indices: torch.LongTensor,  # (batch_size, topk) indices from previous layers
+        indices: torch.LongTensor,  # (batch_size, n_ctxs, topk), indices from previous layers
         device: torch.device,
         return_all: bool = False,
     ):
@@ -271,11 +271,11 @@ class MemTransDatastore(object):
             ret_ts.append(ret_t)
             ret_ids.append(ret_id)
 
-        ret_ks = torch.stack(ret_ks, dim=0).to(device)  # (n_heads, batch_size, topk, dim)
-        ret_vs = torch.stack(ret_vs, dim=0).to(device)  # (n_heads, batch_size, topk, dim)
+        ret_ks = torch.stack(ret_ks, dim=0).to(device)  # (n_heads, batch_size, n_ctxs, topk, dim)
+        ret_vs = torch.stack(ret_vs, dim=0).to(device)  # (n_heads, batch_size, n_ctxs, topk, dim)
         if return_all:
-            ret_ts = torch.stack(ret_ts, dim=0).to(device)  # (n_heads, batch_size, topk)
-            ret_ids = torch.stack(ret_ids, dim=0).to(device)  # (n_heads, batch_size, topk)
+            ret_ts = torch.stack(ret_ts, dim=0).to(device)  # (n_heads, batch_size, n_ctxs, topk)
+            ret_ids = torch.stack(ret_ids, dim=0).to(device)  # (n_heads, batch_size, n_ctxs, topk)
             return ret_ks, ret_vs, ret_ts, ret_ids
         return ret_ks, ret_vs, None, None
 
@@ -283,6 +283,7 @@ class MemTransDatastore(object):
         self, 
         queries: torch.FloatTensor,  # (n_heads, batch_size, seq_len, dim)
         topk: int,
+        final_topk: int = 1,  # the final number of ctxs returned
         only_use_head_idx: int = -1,  # only use a single head to retrieve
         skip_first_token: bool = False,
         return_all: bool = False,
@@ -294,7 +295,6 @@ class MemTransDatastore(object):
         ibs = 1  # inner batch size (to save memory)
         rerank_topk = topk  # num of docs to rerank  # TODO: use values different from topk
         doc_seq_len = topk  # TODO: use values different from topk
-        final_topk = 1  # TODO: add an argument
 
         ori_device = queries.device
         nh, bs, sl, dim = queries.size()
@@ -352,19 +352,16 @@ class MemTransDatastore(object):
                 print('||', cand_ret_ids[0, 0].item())
                     
         _ids = torch.cat(_ids, 0)  # (batch_size, final_topk) TODO: different inner batches have different number of returned docs?
+        # (n_heads, batch_size, final_topk, doc_seq_len, dim) * 2, (batch_size, final_topk, doc_seq_len) * 3
         ret_ks, ret_vs, ret_ts, ret_ids, indices = self.get_knns_by_ids(
             _ids, topk=doc_seq_len, skip_first_token=skip_first_token, return_all=return_all)
-        ret_ks = ret_ks.flatten(2, 3)  # (n_heads, batch_size, final_topk * doc_seq_len, dim)
-        ret_vs = ret_vs.flatten(2, 3)  # (n_heads, batch_size, final_topk * doc_seq_len, dim)
-        indices = indices.flatten(1, 2)  # (batch_size, final_topk * doc_seq_len)
-        ret_ts = ret_ts.flatten(1, 2) if return_all else None  # (batch_size, final_topk * doc_seq_len)
-        ret_ids = ret_ids.flatten(1, 2) if return_all else None  # (batch_size, final_topk * doc_seq_len)
         return ret_ks, ret_vs, ret_ts, ret_ids, indices
 
     def get_knns(
         self, 
         queries: torch.FloatTensor,  # (n_heads, batch_size, dim) or (n_heads, batch_size, seq_len, dim)
         topk: int,
+        final_topk: int = 1,
         only_use_head_idx: int = -1,  # only use a single head to retrieve
         skip_first_token: bool = False,
         return_all: bool = False):
@@ -373,6 +370,7 @@ class MemTransDatastore(object):
             return self.get_knns_block(
                 queries, 
                 topk=topk, 
+                final_topk=final_topk,
                 only_use_head_idx=only_use_head_idx, 
                 skip_first_token=skip_first_token, 
                 return_all=return_all)
@@ -380,12 +378,12 @@ class MemTransDatastore(object):
         ori_device = queries.device
         nh, bs, dim = queries.size()
         if topk <= 0:  # return "empty" tensors
-            ret_ks = torch.zeros(nh, bs, 0, dim).to(queries)  # (n_heads, batch_size, topk, dim)
-            ret_vs = torch.zeros(nh, bs, 0, dim).to(queries)  # (n_heads, batch_size, topk, dim)
-            indices = torch.zeros(bs, 0).long().to(ori_device)  # (batch_size, topk)
+            ret_ks = torch.zeros(nh, bs, 1, 0, dim).to(queries)  # (n_heads, batch_size, 1 (n_ctxs), topk, dim)
+            ret_vs = torch.zeros(nh, bs, 1, 0, dim).to(queries)  # (n_heads, batch_size, 1 (n_ctxs), topk, dim)
+            indices = torch.zeros(bs, 1, 0).long().to(ori_device)  # (batch_size, 1 (n_ctxs), topk)
             if return_all:
-                ret_ts = torch.zeros(nh, bs, 0).long().to(ori_device)  # (n_heads, batch_size, topk)
-                ret_ids = torch.zeros(nh, bs, 0).long().to(ori_device)  # (n_heads, batch_size, topk)
+                ret_ts = torch.zeros(nh, bs, 1, 0).long().to(ori_device)  # (n_heads, batch_size, 1 (n_ctxs), topk)
+                ret_ids = torch.zeros(nh, bs, 1, 0).long().to(ori_device)  # (n_heads, batch_size, 1 (n_ctxs), topk)
                 return ret_ks, ret_vs, ret_ts, ret_ids, indices
             return ret_ks, ret_vs, None, None, indices
 
@@ -410,24 +408,31 @@ class MemTransDatastore(object):
                 ret_ts.append(ret_t)
                 ret_ids.append(ret_id)
 
-        ret_ks = torch.stack(ret_ks, dim=0).to(ori_device)  # (n_heads, batch_size, topk, dim)
-        ret_vs = torch.stack(ret_vs, dim=0).to(ori_device)  # (n_heads, batch_size, topk, dim)
+        ret_ks = torch.stack(ret_ks, dim=0).to(ori_device)  # (n_heads, batch_size, n_ctxs, topk, dim)
+        ret_vs = torch.stack(ret_vs, dim=0).to(ori_device)  # (n_heads, batch_size, n_ctxs, topk, dim)
         if return_all:
-            ret_ts = torch.stack(ret_ts, dim=0).to(ori_device)  # (n_heads, batch_size, topk)
-            ret_ids = torch.stack(ret_ids, dim=0).to(ori_device)  # (n_heads, batch_size, topk)
+            ret_ts = torch.stack(ret_ts, dim=0).to(ori_device)  # (n_heads, batch_size, n_ctxs, topk)
+            ret_ids = torch.stack(ret_ids, dim=0).to(ori_device)  # (n_heads, batch_size, n_ctxs, topk)
             return ret_ks, ret_vs, ret_ts, ret_ids, indices
         return ret_ks, ret_vs, None, None, indices
     
     def filter_by_similarity(
         self,
         queries: torch.FloatTensor,  # (n_heads, batch_size, dim)
-        ret_ks: torch.FloatTensor,  # (n_heads, batch_size, seq_len, dim)
-        ret_vs: torch.FloatTensor,  # (n_heads, batch_size, seq_len, dim)
-        ret_ts: torch.LongTensor = None,  # (n_heads, batch_size, seq_len)
-        ret_ids: torch.LongTensor = None,  # (n_heads, batch_size, seq_len)
-        indices: torch.LongTensor = None,  # (batch_size, seq_len)
+        ret_ks: torch.FloatTensor,  # (n_heads, batch_size, n_ctxs, seq_len, dim)
+        ret_vs: torch.FloatTensor,  # (n_heads, batch_size, n_ctxs, seq_len, dim)
+        ret_ts: torch.LongTensor = None,  # (n_heads, batch_size, n_ctxs, seq_len)
+        ret_ids: torch.LongTensor = None,  # (n_heads, batch_size, n_ctxs, seq_len)
+        indices: torch.LongTensor = None,  # (batch_size, n_ctxs, seq_len)
         topk: int = 1,
         order: str = 'original'):
+
+        # merge multiple ctxs
+        ret_ks = ret_ks.flatten(2, 3)
+        ret_vs = ret_vs.flatten(2, 3)
+        ret_ts = ret_ts.flatten(2, 3) if ret_ts is not None else None
+        ret_ids = ret_ids.flatten(2, 3) if ret_ids is not None else None
+        indices = indices.flatten(1, 2) if indices is not None else None
 
         seq_len, dim = ret_ks.size()[2:]
         topk = min(topk, seq_len)
@@ -453,6 +458,12 @@ class MemTransDatastore(object):
         topk_inds = topk_inds.unsqueeze(-1).repeat(1, 1, 1, dim)  # (n_heads, batch_size, topk, dim)
         ret_ks = torch.gather(ret_ks, 2, topk_inds)  # (n_heads, batch_size, topk, dim)
         ret_vs = torch.gather(ret_vs, 2, topk_inds)  # (n_heads, batch_size, topk, dim)
+
+        ret_ks = ret_ks.unsqueeze(2)
+        ret_vs = ret_vs.unsqueeze(2)
+        ret_ts = ret_ts.unsqueeze(2) if ret_ts is not None else None
+        ret_ids = ret_ids.unsqueeze(2) if ret_ids is not None else None
+        indices = indices.unsqueeze(1) if indices is not None else None
 
         return ret_ks, ret_vs, ret_ts, ret_ids, indices
 
@@ -598,8 +609,12 @@ class MemTransAttn(object):
         filter_order: str = 'original',
         only_use_head_idx: int = -1,
         cache_indices: bool = False,
-        mtac: MemTransAttnCoordinator = None):
+        mtac: MemTransAttnCoordinator = None,
+        num_ctxs: int = 1,  # num of ctxs retrieved
+        ctx_order: str = 'parallel',  # the ordering of multiple ctxs
+        ):
         assert stage in {'save', 'retrieve'}
+        assert ctx_order in {'parallel', 'near', 'far'}
         self.dstore = dstore
         self.topk = topk
         self.stage = stage
@@ -634,6 +649,9 @@ class MemTransAttn(object):
             'key': None,  # key states from previous retrieval
             'value': None,  # value states from previous retrieval
         }
+
+        self.num_ctxs = num_ctxs
+        self.ctx_order = ctx_order
 
     @property
     def is_track(self):
@@ -696,7 +714,8 @@ class MemTransAttn(object):
     def retrieve(
         self,
         query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
-        key_length: int
+        key_length: int,
+        debug: bool = False,  # TODO: debug
     ):
         assert key_length > 0, 'key_length should be positive'
         bs, nh, sl, dph = query_states.size()
@@ -718,6 +737,9 @@ class MemTransAttn(object):
         bw_ret_new = bw_ret and _bw_offset % self.retrieval_every_steps == 0 and self._retrieval_cache['count'] < self.max_retrieval_times  # retrieve new results
         bw_ret_reuse = bw_ret and not bw_ret_new  # reuse previous retrieved results
 
+        if debug:
+            print(f'step: {key_length}', end='')
+
         if bw_ret:
             self._retrieval_cache['query'].append(query_states)
         if bw_ret_new:
@@ -725,18 +747,24 @@ class MemTransAttn(object):
         if bw_ret_reuse:
             if self._retrieval_cache['key'] is not None:
                 ret_ks, ret_vs = self._retrieval_cache['key'], self._retrieval_cache['value']
+                if debug:
+                    print(f'cache size {ret_ks.size()}')
                 return ret_ks, ret_vs
             topk = 0
 
         if topk == 0:  # no need to perform retrieval, return "empty" tensors
-            ret_ks = torch.zeros(bs, nh, sl, 0, dph).to(query_states)  # (batch_size, n_heads, seq_length, topk, dim_per_head)
-            ret_vs = torch.zeros(bs, nh, sl, 0, dph).to(query_states)  # (batch_size, n_heads, seq_length, topk, dim_per_head)
+            ret_ks = torch.zeros(bs, nh, sl, 1, 0, dph).to(query_states)  # (batch_size, n_heads, seq_length, 1 (n_ctxs), topk, dim_per_head)
+            ret_vs = torch.zeros(bs, nh, sl, 1, 0, dph).to(query_states)  # (batch_size, n_heads, seq_length, 1 (n_ctxs), topk, dim_per_head)
+            if debug:
+                print(f'skip size {ret_ks.size()}')
         else:  # perform retrieve
             if query_states.size(2) == 1:
                 query_states = query_states.squeeze(2)
-            ret_ks, ret_vs = self._retrieve(query_states, key_length=key_length, topk=topk)  # (batch_size, n_heads, topk, dim_per_head) * 2
-            ret_ks = ret_ks.unsqueeze(2)  # (batch_size, n_heads, seq_length=1, topk, dim_per_head)
-            ret_vs = ret_vs.unsqueeze(2)  # (batch_size, n_heads, seq_length=1, topk, dim_per_head)
+            ret_ks, ret_vs = self._retrieve(query_states, key_length=key_length, topk=topk)  # (batch_size, n_heads, n_ctx, topk, dim_per_head) * 2
+            ret_ks = ret_ks.unsqueeze(2)  # (batch_size, n_heads, seq_length=1, n_ctx, topk, dim_per_head)
+            ret_vs = ret_vs.unsqueeze(2)  # (batch_size, n_heads, seq_length=1, n_ctx, topk, dim_per_head)
+            if debug:
+                print(f'retrieved size {ret_ks.size()}')
 
             if bw_ret_new:  # update key and value
                 self._retrieval_cache = {'count': self._retrieval_cache['count'] + 1, 'query': [], 'key': ret_ks, 'value': ret_vs}
@@ -757,7 +785,7 @@ class MemTransAttn(object):
         query_states: torch.FloatTensor,  # (batch_size, n_heads, dim_per_head) or (batch_size, n_heads, seq_length, dim_per_head)
         key_length: int,
         topk: int,
-        ids: torch.LongTensor = None,  # (batch_size)
+        ids: torch.LongTensor = None,  # (batch_size, n_ctxs)
     ):
         assert topk > 0, 'this function is called when retrieval is actually performed'
         bs = query_states.size(0)
@@ -768,7 +796,7 @@ class MemTransAttn(object):
         fake_retrieval_last_step = key_length == self.accum_retrieval_steps
 
         # ret_ks, ret_vs, ret_ts, ret_ids, indices
-        # (n_heads, batch_size, topk, dim_per_head) * 2, (n_heads, batch_size, topk) * 3
+        # (n_heads, batch_size, n_ctxs, topk, dim_per_head) * 2, (n_heads, batch_size, n_ctxs, topk) * 3
         indices = None
         if self.cache_indices:  # use cached indices
             indices = self.mtac.get_or_save_indices(key_length=key_length)
@@ -788,7 +816,7 @@ class MemTransAttn(object):
                             ids_maks = ids < self.dstore.num_docs  # (batch_size, accum)
                             ids = ids * ids_maks  # out-of-boundary ids are replaced with 0
                         else:
-                            ids = torch.arange(bs).to(ori_device) + self.id_offset
+                            ids = torch.arange(bs).to(ori_device).unsqueeze(-1) + self.id_offset  # (batch_size, 1 (n_ctxs))
                     ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns_by_ids(
                         ids, topk=topk, skip_first_token=self.skip_first_token, return_all=self.is_track)
                     self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids, indices)
@@ -810,6 +838,7 @@ class MemTransAttn(object):
                 ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns(
                     query_states, 
                     topk=topk, 
+                    final_topk=self.num_ctxs,
                     only_use_head_idx=self.only_use_head_idx, 
                     skip_first_token=self.skip_first_token,
                     return_all=self.is_track)
@@ -822,11 +851,11 @@ class MemTransAttn(object):
             input_ids = self.dstore.get_decoder_input_ids()  # (batch_size, seq_length)
             self.tracker.add_single_step_batched(
                 prediction=input_ids.squeeze(-1), 
-                retrieved_token=ret_ts.permute(1, 0, 2), 
-                retrieved_id=ret_ids.permute(1, 0, 2))
+                retrieved_token=ret_ts.permute(1, 0, 2, 3).flatten(2, 3), 
+                retrieved_id=ret_ids.permute(1, 0, 2, 3).flatten(2, 3))
 
-        ret_ks = ret_ks.transpose(0, 1)  # (batch_size, n_heads, topk, dim_per_head)
-        ret_vs = ret_vs.transpose(0, 1)  # (batch_size, n_heads, topk, dim_per_head)
+        ret_ks = ret_ks.transpose(0, 1)  # (batch_size, n_heads, n_ctxs, topk, dim_per_head)
+        ret_vs = ret_vs.transpose(0, 1)  # (batch_size, n_heads, n_ctxs, topk, dim_per_head)
         return ret_ks, ret_vs
 
     def update_mask_and_position_bias(
@@ -940,8 +969,8 @@ class MemTransAttn(object):
         query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
         key_states: torch.FloatTensor,  # (batch_size, n_heads, key_length, dim_per_head)
         value_states: torch.FloatTensor,  # (batch_size, n_heads, key_length, dim_per_head)
-        ret_ks: torch.FloatTensor,  # (batch_size, n_heads, seq_length, topk, dim_per_head)
-        ret_vs: torch.FloatTensor,  # (batch_size, n_heads, seq_length, topk, dim_per_head)
+        ret_ks: torch.FloatTensor,  # (batch_size, n_heads, seq_length, n_ctxs, topk, dim_per_head)
+        ret_vs: torch.FloatTensor,  # (batch_size, n_heads, seq_length, n_ctxs, topk, dim_per_head)
         mask: torch.FloatTensor,  # (batch_size, n_heads, seq_length, key_length)
         layer_head_mask,
         real_seq_length: int,
@@ -952,8 +981,19 @@ class MemTransAttn(object):
         
         bs, nh, sl, d = query_states.size()
         kl = key_states.size(2)
-        topk = ret_ks.size(-2)
         multi_token_eval = sl > 1  # multiple tokens per example in the query_states
+
+        if self.ctx_order == 'near':
+            # (batch_size, n_heads, seq_length, 1, n_ctxs * topk, dim_per_head) * 2
+            ret_ks, ret_vs = ret_ks.flip([3]).flatten(3, 4).unsqueeze(3), ret_vs.flip([3]).flatten(3, 4).unsqueeze(3)
+        elif self.ctx_order == 'far':
+            # (batch_size, n_heads, seq_length, 1, n_ctxs * topk, dim_per_head) * 2
+            ret_ks, ret_vs = ret_ks.flatten(3, 4).unsqueeze(3), ret_vs.flatten(3, 4).unsqueeze(3)
+        elif self.ctx_order == 'parallel':
+            pass
+        else:
+            raise NotImplementedError
+        n_ctxs, topk = ret_ks.size(-3), ret_ks.size(-2)
 
         if multi_token_eval:
             # TODO: implement this
@@ -967,27 +1007,29 @@ class MemTransAttn(object):
             scores = torch.matmul(query_states, key_states.transpose(3, 2))
 
             # compute the extended scores over the retrieved context
-            # (batch_size, n_heads, seq_length, topk)
-            _scores = torch.einsum("bnqd,bnqkd->bnqk", query_states, ret_ks)
-
-            # combine scores
-            # (batch_size, n_heads, seq_length, topk + key_length)
-            scores = torch.cat([_scores, scores], dim=-1)
+            # (batch_size, n_heads, seq_length, n_ctxs, topk)
+            _scores = torch.einsum("bnqd,bnqckd->bnqck", query_states, ret_ks)
 
             # apply bias
+            # (batch_size, n_heads, seq_length, topk + key_length)
             position_bias = self.update_mask_and_position_bias(
                 ori_attn, mask, seq_length=sl, real_seq_length=real_seq_length, key_length=key_length, topk=topk)
-            scores += position_bias
+            scores += position_bias[:, :, :, -kl:]
+            _scores += position_bias[:, :, :, None, :topk]
+
+            # combine scores
+            # (batch_size, n_heads, seq_length, n_ctxs * topk + key_length)
+            scores = torch.cat([_scores.flatten(3, 4), scores], dim=-1)
 
             # compute attn distribution
-            # (batch_size, n_heads, seq_length, topk + key_length)
+            # (batch_size, n_heads, seq_length, n_ctxs * topk + key_length)
             attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(scores)
             attn_weights = nn.functional.dropout(attn_weights, p=ori_attn.dropout, training=ori_attn.training)
 
             # compute output
             # (batch_size, n_heads, seq_length, dim_per_head)
             attn_output = torch.matmul(attn_weights[:, :, :, -kl:], value_states)
-            attn_output += torch.einsum("bnqk,bnqkd->bnqd", attn_weights[:, :, :, :topk], ret_vs)
+            attn_output += torch.einsum("bnqk,bnqkd->bnqd", attn_weights[:, :, :, :n_ctxs * topk], ret_vs.flatten(3, 4))
             attn_output = self.unshape(attn_output)  # (batch_size, seq_length, dim)
             attn_output = ori_attn.o(attn_output)
         
@@ -996,8 +1038,10 @@ class MemTransAttn(object):
             assert ret_ks.size(2) == ret_vs.size(2) == sl
             assert real_seq_length == key_length
 
+            ret_ks, ret_vs = ret_ks.flatten(3, 4), ret_vs.flatten(3, 4)  # (batch_size, n_heads, seq_length, n_ctxs * topk, dim_per_head) * 2
+
             # prepend retrieved keys and values
-            # (batch_size, n_heads, topk + key_length, dim_per_head)
+            # (batch_size, n_heads, n_ctxs * topk + key_length, dim_per_head)
             if self.add_after_first and key_length > 1:  # always need to prepend for the first position
                 key_states = torch.cat([key_states[:, :, :1], ret_ks.squeeze(2), key_states[:, :, 1:]], dim=2)
                 value_states = torch.cat([value_states[:, :, :1], ret_vs.squeeze(2), value_states[:, :, 1:]], dim=2)
@@ -1006,16 +1050,20 @@ class MemTransAttn(object):
                 value_states = torch.cat([ret_vs.squeeze(2), value_states], dim=2)
 
             # compute attn scores
-            # (batch_size, n_heads, seq_length, topk + key_length)
+            # (batch_size, n_heads, seq_length, n_ctxs * topk + key_length)
             scores = torch.matmul(query_states, key_states.transpose(3, 2))
 
             # apply bias
+            # (batch_size, n_heads, seq_length, topk + key_length)
             position_bias = self.update_mask_and_position_bias(
                 ori_attn, mask, seq_length=sl, real_seq_length=real_seq_length, key_length=key_length, topk=topk)
-            scores += position_bias
+            _scores = scores[:, :, :, :n_ctxs * topk].view(bs, nh, sl, n_ctxs, topk)  # (batch_size, n_heads, seq_length, n_ctxs, topk)
+            _scores = (_scores + position_bias[:, :, :, None, :topk]).flatten(3, 4)  # (batch_size, n_heads, seq_length, n_ctxs * topk)
+            scores = scores[:, :, :, -kl:] + position_bias[:, :, :, -kl:]  # (batch_size, n_heads, seq_length, key_length)
+            scores = torch.cat([_scores, scores], -1)  # (batch_size, n_heads, seq_length, n_ctxs * topk + key_length)
 
             # compute attn distribution
-            # (batch_size, n_heads, seq_length, topk + key_length)
+            # (batch_size, n_heads, seq_length, n_ctxs * topk + key_length)
             attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(scores)
             attn_weights = nn.functional.dropout(attn_weights, p=ori_attn.dropout, training=ori_attn.training)
             
@@ -1147,6 +1195,8 @@ class MemTransWrapper(object):
         filter_order: str = 'original',
         only_use_head_idx: int = -1,
         cache_indices: bool = False,
+        num_ctxs: int = 1,
+        ctx_order: str = 'parallel',
         move_dstore_to_mem: bool = False, 
         device: torch.device = None):
         self.dstore_size = dstore_size
@@ -1168,6 +1218,8 @@ class MemTransWrapper(object):
         self.filter_order = filter_order
         self.only_use_head_idx = only_use_head_idx
         self.cache_indices = cache_indices
+        self.num_ctxs = num_ctxs
+        self.ctx_order = ctx_order
         self.move_dstore_to_mem = move_dstore_to_mem
         self.device = torch.device('cpu') if device is None else device
     
@@ -1237,7 +1289,9 @@ class MemTransWrapper(object):
                 filter_order=self.filter_order,
                 only_use_head_idx=self.only_use_head_idx,
                 cache_indices=self.cache_indices,
-                mtac=mtac)
+                mtac=mtac,
+                num_ctxs=self.num_ctxs,
+                ctx_order=self.ctx_order)
             attn_layer.mta = mta
             attn_layer.relative_attention_bias = relative_attention_bias
 

@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=gen
-#SBATCH --cpus-per-task=10
-#SBATCH --nodes=1
 #SBATCH --time=3:00:00
 #SBATCH --partition=learnlab
 #SBATCH --constraint=volta32gb
 #SBATCH -o slurm/%j.out
 #SBATCH -e slurm/%j.err
 
-#SBATCH --gpus-per-node=4
-#SBATCH --ntasks-per-node=4
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=2
+#SBATCH --gpus-per-node=2
+#SBATCH --cpus-per-task=10
 #SBATCH --mem=512GB
 
 # env
 source env.sh
 
 dataset=wow
-task=evidence+targetprefix
+task=retrieve+targetprefix
 
 model=google/t5-xl-lm-adapt
 
@@ -59,7 +59,8 @@ elif [[ ${task} == "retrieve" || ${task} == "retrieve+targetprefix" ]]; then
         data_file=data/wow/val_astarget_selfprov_qa.json
         dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/memtrans_reproduce_prefix_layerall
         #out_file=${dstore_dir}/gen_evi32_tgt16_byids_skip4.tsv
-        out_file=${dstore_dir}/gen_evi32_tgt16_skip1_every12_max1_head9.tsv
+        #out_file=${dstore_dir}/gen_evi32_tgt16_skip1_every12_max1_head9.tsv
+        out_file=${dstore_dir}/gen_evi32_tgt16_skip1_every8_max1_head9_ctx10parallel.tsv
     else
         echo "${dataset} is not supported"
         exit
@@ -97,6 +98,8 @@ max_retrieval_times=100000
 filter_topk=0
 filter_order=original
 only_use_head_idx=-1
+num_ctxs=1
+ctx_order=parallel
 
 if [[ ${task} == "normal" ]]; then
     src_pre="Definition: Given a question, generate a descriptive answer. Question: "
@@ -152,11 +155,13 @@ elif [[ ${task} == "retrieve+targetprefix" ]]; then
     retrieval_layers="list(range(24))"
     skip_retrieval_steps=1
     accum_retrieval_steps=0
-    retrieval_every_steps=12
+    retrieval_every_steps=8
     max_retrieval_times=1
     only_use_head_idx=9
     filter_topk=0
     filter_order=original
+    num_ctxs=10
+    ctx_order=parallel
     src_pre="Definition: Given a question, generate a descriptive answer. Question: "
     src_suf=""
     evi=fixed
@@ -190,4 +195,6 @@ srun python generate.py \
     --max_retrieval_times ${max_retrieval_times} \
     --filter_topk ${filter_topk} \
     --filter_order ${filter_order} \
-    --only_use_head_idx ${only_use_head_idx}
+    --only_use_head_idx ${only_use_head_idx} \
+    --num_ctxs ${num_ctxs} \
+    --ctx_order ${ctx_order}
