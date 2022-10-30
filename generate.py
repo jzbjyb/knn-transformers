@@ -13,7 +13,6 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
 from utils import setup_multi_gpu_slurm
 from memtrans import MemTransWrapper
-from models.t5 import T5ForConditionalGeneration
 
 logger = logging.getLogger(__name__)
 logger.setLevel(20)
@@ -287,7 +286,7 @@ if __name__ == '__main__':
     args.dstore_device = torch.device('cpu') if len(args.retrieval_layers) > 3 else args.device
 
     # load model
-    model = T5ForConditionalGeneration.from_pretrained(args.model).to(args.device)
+    model = AutoModelForSeq2SeqLM.from_pretrained(args.model).to(args.device)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     wrapper = GenerationWrapper(model, tokenizer, args)
 
