@@ -23,6 +23,7 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
+from deepspeed import checkpointing as ds_checkpointing
 
 from transformers.modeling_outputs import (
     BaseModelOutput,
@@ -470,7 +471,7 @@ class FusionT5Block(T5Block):
             ctx_hidden_states = self.layer[-1](ctx_hidden_states)
             ctx_hidden_states = clamp_fp16(ctx_hidden_states)
 
-        outputs = ((hidden_states, ctx_hidden_states),)
+        outputs = (hidden_states, ctx_hidden_states,)  # cannot be nested due to gradient checkpointing
 
         if use_cache:
             outputs = outputs + ((present_key_value_state, ctx_past_key_value),) + attention_outputs
@@ -535,7 +536,7 @@ class FusionT5Stack(T5Stack):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
-    ):
+    ):        
         # copy
         self._copy_relative_attention_bias()
 
@@ -679,10 +680,10 @@ class FusionT5Stack(T5Stack):
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
                         return tuple(module(*inputs, use_cache, output_attentions))
-
                     return custom_forward
 
-                layer_outputs = checkpoint(
+                #layer_outputs = checkpoint(
+                layer_outputs = ds_checkpointing.checkpoint(
                     create_custom_forward(layer_module),
                     hidden_states,
                     extended_attention_mask,
@@ -698,6 +699,7 @@ class FusionT5Stack(T5Stack):
                     ctx_self_mask,
                     ctx_all_mask,
                 )
+
             else:
                 layer_outputs = layer_module(
                     hidden_states,
@@ -720,24 +722,24 @@ class FusionT5Stack(T5Stack):
             # layer_outputs is a tuple with:
             # hidden-states, key-value-states, (self-attention position bias), (self-attention weights), (cross-attention position bias), (cross-attention weights)
             if use_cache is False:
-                layer_outputs = layer_outputs[:1] + ((None, None),) + layer_outputs[1:]
+                layer_outputs = layer_outputs[:2] + ((None, None),) + layer_outputs[2:]
 
-            (hidden_states, ctx_hidden_states), (present_key_value_state, ctx_past_key_value) = layer_outputs[:2]
+            hidden_states, ctx_hidden_states, (present_key_value_state, ctx_past_key_value) = layer_outputs[:3]
 
             # We share the position biases between the layers - the first layer store them
             # layer_outputs = hidden-states, key-value-states (self-attention position bias), (self-attention weights),
             # (cross-attention position bias), (cross-attention weights)
-            position_bias = layer_outputs[2]
+            position_bias = layer_outputs[3]
             if self.is_decoder and encoder_hidden_states is not None:
-                encoder_decoder_position_bias = layer_outputs[4 if output_attentions else 3]
+                encoder_decoder_position_bias = layer_outputs[5 if output_attentions else 4]
             # append next layer key value states
             if use_cache:
                 present_key_value_states = present_key_value_states + ((present_key_value_state, ctx_past_key_value),)
 
             if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[3],)
+                all_attentions = all_attentions + (layer_outputs[4],)
                 if self.is_decoder:
-                    all_cross_attentions = all_cross_attentions + (layer_outputs[5],)
+                    all_cross_attentions = all_cross_attentions + (layer_outputs[6],)
 
             # Model Parallel: If it's the last layer for that device, put things on the next device
             if self.model_parallel:
@@ -810,8 +812,6 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         # Model parallel
         self.model_parallel = False
         self.device_map = None
-
-        self.config.decoder_start_token_id = 10  # use ':' as the start token
 
     @add_start_docstrings(PARALLELIZE_DOCSTRING)
     def parallelize(self, device_map=None):
