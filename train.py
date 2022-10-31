@@ -171,6 +171,7 @@ class DataTrainingArguments:
         },
     )
 
+    use_context: Optional[bool] = field(default=True, metadata={"help": "Whether to use context in training"})
     max_question_len: Optional[int] = field(default=128)
     max_context_len: Optional[int] = field(default=128)
     max_answer_len: Optional[int] = field(default=128)
@@ -197,10 +198,11 @@ class DataCollatorForFusion:
     model: transformers.AutoModelForSeq2SeqLM
     tokenizer: transformers.PreTrainedTokenizer
     pad_to_multiple_of: Optional[int] = None
+    use_context: bool = True
     max_question_len: int = None
     max_context_len: int = None
     max_answer_len: int = None
-    add_decoder_start_token_to_ctx: bool = True
+    answer_prefix: str = None
     _train: bool = True
 
     def eval(self):
@@ -208,8 +210,13 @@ class DataCollatorForFusion:
 
     def train(self):
         self._train = True
+    
+    def get_real_decoder_start_token_id(self):
+        if self.use_context:  # use the first token of answer prefix to start generation
+            return self.tokenizer.encode(self.answer_prefix)[0]
+        return self.model.config.decoder_start_token_id
 
-    def __call__(self, examples: List[Dict]):
+    def __call__(self, examples: List[Dict], debug: bool = False):
         decoder_start_token = self.tokenizer.convert_ids_to_tokens([self.model.config.decoder_start_token_id])[0]
 
         # questions
@@ -228,8 +235,7 @@ class DataCollatorForFusion:
         # put ctx on the right to be close to the answer
         self.tokenizer.padding_side = 'left'
         # add decoder_start_token to ctx
-        dst = f'{decoder_start_token} ' if self.add_decoder_start_token_to_ctx else ''
-
+        dst = f'{decoder_start_token} ' if self.use_context else ''
         ctxs = self.tokenizer(
             [dst + ctx for e in examples for ctx in e['ctxs']],
             truncation=True,
@@ -242,8 +248,9 @@ class DataCollatorForFusion:
         decoder_ctx_attention_mask = ctxs.attention_mask.view(bs, n_ctxs, -1)  # (batch_size, n_ctxs, ctx_seq_length)
         
         # answers
+        dst = f'{decoder_start_token} ' if not self.use_context else ''
         answers = self.tokenizer(
-            [random.choice(e['answers']) for e in examples],
+            [dst + random.choice(e['answers']) for e in examples],
             truncation=True,
             padding=True,
             max_length=self.max_answer_len,
@@ -261,12 +268,20 @@ class DataCollatorForFusion:
         batch = {
             'input_ids': input_ids,
             'attention_mask': attention_mask,
-            'decoder_ctx_input_ids': decoder_ctx_input_ids,
-            'decoder_ctx_attention_mask': decoder_ctx_attention_mask,
             'decoder_input_ids': decoder_input_ids,
             'decoder_attention_mask': decoder_attention_mask,
             'labels': labels
         }
+        if self.use_context:
+            batch['decoder_ctx_input_ids'] = decoder_ctx_input_ids
+            batch['decoder_ctx_attention_mask'] = decoder_ctx_attention_mask
+        
+        if debug:
+            print(batch)
+            print(decoder_ctx_input_ids[0, 0])
+            print(decoder_ctx_attention_mask[0, 0])
+            input()
+
         return batch
 
 def _load_data_file(path: str, max_num_samples: int = 0):
@@ -458,9 +473,14 @@ def main():
             metric_func = evaluate.load('rouge')
             metrics = metric_func.compute(predictions=predictions, references=references)
             return metrics
-        def post_processing_function(references, features, outputs, stage='eval'):
+        def post_processing_function(references, features, outputs, stage='eval', debug=False):
             decoded_preds = tokenizer.batch_decode(outputs.predictions, skip_special_tokens=True)
             formatted_predictions = [x.strip().lstrip(data_args.answer_prefix).strip() for x in decoded_preds]
+            if debug:
+                print(outputs.predictions[:2])
+                print(decoded_preds[:2])
+                print([example['answers'][0] for example in references[:2]])
+                input()
             return EvalPrediction(predictions=formatted_predictions, label_ids=references)
     else:
         raise ValueError
@@ -478,7 +498,8 @@ def main():
         max_question_len=data_args.max_question_len,
         max_context_len=data_args.max_context_len,
         max_answer_len=data_args.max_answer_len,
-        add_decoder_start_token_to_ctx=True)
+        answer_prefix=data_args.answer_prefix,
+        use_context=data_args.use_context)
 
     # Initialize our Trainer
     trainer = QuestionAnsweringSeq2SeqTrainer(
@@ -490,8 +511,7 @@ def main():
         tokenizer=tokenizer,
         data_collator=collator,
         compute_metrics=compute_metrics if training_args.do_eval else None,
-        post_process_function=post_processing_function,
-        decoder_start_token_id=tokenizer.encode(data_args.answer_prefix)[0])  # use the first token of answer prefix to start generation
+        post_process_function=post_processing_function)
 
     if training_args.deepspeed:
         ds_checkpointing.configure(None, training_args.hf_deepspeed_config.config)

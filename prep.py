@@ -206,9 +206,21 @@ def head_analysis(attn_file: str, rank: bool = True, show_n_heads: int = 5):
     print('\t'.join(map(str, rank)))
     print('\t'.join(map(str, top1_acc[rank])))
 
+def retrieval_acc(filename: str):
+    ret_ids: List[int] = []
+    with open(filename, 'r') as fin:
+        for l in fin:
+            l = l.strip()
+            if l.startswith('||'):
+                ret_ids.append(int(l[2:]))
+    ret_ids = np.array(ret_ids)
+    print(f'len {len(ret_ids)}')
+    acc = np.mean(ret_ids == np.arange(len(ret_ids)))
+    print(acc)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=['kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence'])
+    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=['kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc'])
     parser.add_argument('--inp', type=str, default=None, help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -241,3 +253,6 @@ if __name__ == '__main__':
     
     elif args.task == 'shuffle_evidence':
         shuffle_evidence(args.inp, args.out)
+    
+    elif args.task == 'retrieval_acc':
+        retrieval_acc(args.inp)

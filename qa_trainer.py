@@ -32,12 +32,10 @@ class QuestionAnsweringSeq2SeqTrainer(Seq2SeqTrainer):
         *args, 
         eval_examples: List[Dict] = None,
         post_process_function: Callable = None,
-        decoder_start_token_id: int = None,
         **kwargs):
         super().__init__(*args, **kwargs)
         self.eval_examples = eval_examples
         self.post_process_function = post_process_function
-        self.decoder_start_token_id = decoder_start_token_id
 
     # def evaluate(self, eval_dataset=None, eval_examples=None, ignore_keys=None, metric_key_prefix: str = "eval"):
     def evaluate(
@@ -170,7 +168,7 @@ class QuestionAnsweringSeq2SeqTrainer(Seq2SeqTrainer):
         gen_kwargs["synced_gpus"] = (
             gen_kwargs["synced_gpus"] if gen_kwargs.get("synced_gpus") is not None else default_synced_gpus
         )
-        gen_kwargs['decoder_start_token_id'] = self.decoder_start_token_id
+        gen_kwargs['decoder_start_token_id'] = self.data_collator.get_real_decoder_start_token_id()
         
         generation_inputs = dict(inputs)
         for key in ['labels', 'decoder_input_ids', 'decoder_attention_mask']:
