@@ -21,9 +21,9 @@ conda activate knn
 export WANDB_PROJECT=unifiedrlm
 export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
-output_dir=checkpoints/models/t53b_wow_nocontext
+output_dir=checkpoints/models/t53b_wow_alpha4_hard
 run_name="$(basename $output_dir)"
-use_context=false
+use_context=true
 
 deepspeed train.py \
     --deepspeed deepspeed/lr-decay-zero1.json \

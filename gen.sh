@@ -18,7 +18,8 @@ source env.sh
 dataset=wow
 task=retrieve+targetprefix
 
-model=google/t5-xl-lm-adapt
+#model=google/t5-xl-lm-adapt
+model=checkpoints/models/t53b_wow_alpha4_hard
 
 dstore_dir=checkpoints/test
 dstore_size=0
@@ -33,9 +34,13 @@ if [[ ${task} == "normal" || ${task} == "evidence" || ${task} == "targetprefix" 
         #out_file=${out_root}/t53b_targetprefix16.tsv
         out_file=${out_root}/t53b_evidencelen64_targetprefix16.tsv
     elif [[ ${dataset} == 'wow' ]]; then
-        data_file=data/wow/val_astarget_selfprov_evidence.shuf.json
+        data_file=data/wow/val_astarget_selfprov_evidence.json
         out_root=checkpoints/wow/prefix_exp/val_astarget_selfprov/prompt1
-        out_file=${out_root}/t53b_evidenceshuf32_targetprefix16.tsv
+        out_file=${out_root}/t53b_wow_alpha4_hard.tsv
+    elif [[ ${dataset} == 'test' ]]; then
+        data_file=data/test/test.json
+        out_root=checkpoints/test
+        out_file=${out_root}/test.tsv
     else
         echo "${dataset} is not supported"
         exit
@@ -60,7 +65,7 @@ elif [[ ${task} == "retrieve" || ${task} == "retrieve+targetprefix" ]]; then
         dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/memtrans_reproduce_prefix_layerall
         #out_file=${dstore_dir}/gen_evi32_tgt16_byids_skip4.tsv
         #out_file=${dstore_dir}/gen_evi32_tgt16_skip1_every12_max1_head9.tsv
-        out_file=${dstore_dir}/gen_evi32_tgt16_skip1_every8_max1_head9_ctx10parallel.tsv
+        out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_evi32_tgt16_skip1_every8_max1_head9_ctx10parallel.tsv
     else
         echo "${dataset} is not supported"
         exit
