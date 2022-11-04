@@ -95,13 +95,15 @@ class StridedTensor(StridedTensorCore):
 
         pids, lengths, offsets = self._prepare_lookup(pids)
 
-        stride = lengths.max().item()
-        stride = next(s for s in self.strides if stride <= s)
+        maxlen = lengths.max().item()
+        stride = next(s for s in self.strides if maxlen <= s)
 
         tensor = self.views[stride][offsets].to(self.device)
         mask = _create_mask(lengths, stride)
 
         if output == 'padded':
+            tensor = tensor[:, :maxlen].contiguous()
+            mask = mask[:, :maxlen].contiguous()
             return tensor.to(ori_device), mask.to(ori_device)
 
         assert output == 'packed'

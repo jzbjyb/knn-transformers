@@ -21,18 +21,21 @@ conda activate knn
 export WANDB_PROJECT=unifiedrlm
 export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
-output_dir=checkpoints/models/t53b_wow_alpha4_hard
+train_file=data/wow/train_neg100_dpr.json
+val_file=data/wow/val_neg100_dpr.json
+output_dir=checkpoints/models/t53b_wow_alpha4_hard_neg20
 run_name="$(basename $output_dir)"
+depth=20
 use_context=true
 
 deepspeed train.py \
     --deepspeed deepspeed/lr-decay-zero1.json \
     --model_name_or_path google/t5-xl-lm-adapt \
-    --train_file data/wow/train_dpr.json \
-    --validation_file data/wow/val_dpr.json \
+    --train_file ${train_file} \
+    --validation_file ${val_file} \
     --output_dir ${output_dir} \
     --remove_unused_columns false \
-    --depth 10 \
+    --depth ${depth} \
     --max_question_len 128 \
     --max_context_len 128 \
     --max_answer_len 128 \

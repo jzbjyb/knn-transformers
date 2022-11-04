@@ -3,6 +3,7 @@ import argparse
 import random
 import os
 import json
+import time
 from collections import defaultdict
 import csv
 from tqdm import tqdm
@@ -11,6 +12,9 @@ import torch
 from transformers import AutoTokenizer
 from datasets import load_dataset
 from kilt.knowledge_source import KnowledgeSource
+from beir.datasets.data_loader import GenericDataLoader
+from beir.retrieval.evaluation import EvaluateRetrieval
+from beir.retrieval.search.lexical import BM25Search as BM25
 
 class Wikipedia(object):
     def __init__(self):
@@ -47,6 +51,7 @@ def prep_kilt(
     evidence_method: str = 'provenance', 
     whole_paragraph_as_evidence: bool = False,
     skip_answer_as_evidence: bool = True,
+    remove_wo_ctx: bool = True,
     num_negative_evidence: int = 0,
     subsample: int = 0,
     output_format: str = 'translation'):
@@ -83,7 +88,7 @@ def prep_kilt(
                 if 'answer' in evidence_method and ans:
                     evidences.append(ans)
         
-        if len(evidences) <= 0 and num_negative_evidence:  # remove examples without ctx
+        if len(evidences) <= 0 and remove_wo_ctx:  # remove examples without ctx
             continue
         formatteds.append((inp, evidences, answer))
     
@@ -100,10 +105,21 @@ def prep_kilt(
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     if output_format == 'translation':
-        qa_file = f'{output_file}_qa.json'
-        prov_file = f'{output_file}_evidence.json'
+        assert num_negative_evidence == 0
+
+        if subsample:
+            subsample = min(subsample, len(formatteds))
+            qa_file = f'{output_file}_qa.{subsample}.json'
+            prov_file = f'{output_file}_evidence.{subsample}.json'
+            inds = np.random.choice(len(formatteds), subsample, replace=False)
+        else:
+            qa_file = f'{output_file}_qa.json'
+            prov_file = f'{output_file}_evidence.json'
+            inds = range(len(formatteds))
+        
         with open(qa_file, 'w') as qfin, open(prov_file, 'w') as pfin:
-            for inp, evidences, answer in formatted:
+            for ind in inds:
+                inp, evidences, answer = formatteds[ind]
                 # write qa pairs
                 qfin.write(json.dumps({'translation': {'en': inp, 'zh': answer}}) + '\n')
                 # write evidences
@@ -113,6 +129,7 @@ def prep_kilt(
                 else:
                     for evi in evidences:
                         pfin.write(json.dumps({'translation': {'en': inp, 'zh': evi}}) + '\n')
+
     elif output_format == 'dpr':
         assert num_negative_evidence, 'dpr format requires negative evidence'
         if subsample:
@@ -218,9 +235,167 @@ def retrieval_acc(filename: str):
     acc = np.mean(ret_ids == np.arange(len(ret_ids)))
     print(acc)
 
+def save_beir_format(
+    beir_dir: str,
+    qid2dict: Dict[str, Dict] = None,
+    did2dict: Dict[str, Dict] = None,
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = None):
+    # save
+    os.makedirs(beir_dir, exist_ok=True)
+    if qid2dict is not None:
+        with open(os.path.join(beir_dir, 'queries.jsonl'), 'w') as fout:
+            for qid in qid2dict:
+                fout.write(json.dumps(qid2dict[qid]) + '\n')
+    if did2dict is not None:
+        with open(os.path.join(beir_dir, 'corpus.jsonl'), 'w') as fout:
+            for did in did2dict:
+                fout.write(json.dumps(did2dict[did]) + '\n')
+    if split2qiddid is not None:
+        os.makedirs(os.path.join(beir_dir, 'qrels'), exist_ok=True)
+        for split in split2qiddid:
+            with open(os.path.join(beir_dir, 'qrels', f'{split}.tsv'), 'w') as fout:
+                fout.write('query-id\tcorpus-id\tscore\n')
+                for qid, did in split2qiddid[split]:
+                    fout.write(f'{qid}\t{did}\t1\n')
+
+def translation_to_beir(translation_file: str, beir_dir: str, split: str = 'dev'):
+    qid2dict: Dict[str, Dict] = {}
+    did2dict: Dict[str, Dict] = {}
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    with open(translation_file, 'r') as fin:
+        for l in fin:
+            example = json.loads(l)['translation']
+            question = example['en']
+            answer = example['zh']
+            evidence = example['decoder_prefix']
+            qid = f'{str(len(qid2dict) + len(did2dict))}'
+            qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer}}
+            did = f'{str(len(qid2dict) + len(did2dict))}'
+            did2dict[did] = {'_id': did, 'title': '', 'text': evidence}
+            split2qiddid[split].append((qid, did))
+    save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
+
+def use_answer_as_query_in_beir(
+    beir_dir: str, 
+    out_dir: str, 
+    truncate_to: int = None, 
+    tokenizer: AutoTokenizer = None):
+    from_query_file = os.path.join(beir_dir, 'queries.jsonl')
+    to_query_file = os.path.join(out_dir, 'queries.jsonl')
+    
+    # query file
+    os.makedirs(out_dir, exist_ok=True)
+    with open(from_query_file, 'r') as fin, open(to_query_file, 'w') as fout:
+        for l in fin:
+            example = json.loads(l)
+            ans = example['metadata']['answer']
+            if truncate_to:
+                ans = tokenizer.decode(tokenizer.encode(ans, add_special_tokens=False)[:truncate_to])
+            example['text'] = ans
+            fout.write(json.dumps(example) + '\n')
+    
+    # corpus and qrel
+    rel_dir = os.path.relpath(beir_dir, out_dir)
+    os.symlink(os.path.join(rel_dir, 'corpus.jsonl'), os.path.join(out_dir, 'corpus.jsonl'))
+    os.symlink(os.path.join(rel_dir, 'qrels'), os.path.join(out_dir, 'qrels'))
+
+class BEIRDataset:
+    def __init__(self, root_dir: str, name: str):
+        self.name = name
+        self.qid2answer, self.qid2meta = self.load_query(os.path.join(root_dir, 'queries.jsonl'))
+
+    @classmethod
+    def get_answer_wow(cls, metadata: Dict) -> List[str]:
+        return [metadata['answer']]
+
+    def load_query(self, filename: str):
+        qid2meta: Dict[str, Dict] = {}
+        qid2answer: Dict[str, Any] = {}
+        with open(filename, 'r') as fin:
+            for l in fin:
+                l = json.loads(l)
+                id, text, metadata = l['_id'], l['text'], l['metadata']
+                qid2meta[id] = metadata
+                ans = getattr(self, f'get_answer_{self.name}')(metadata)
+                if ans is None:
+                    continue
+                qid2answer[id] = ans
+        return qid2answer, qid2meta
+
+def convert_beir_to_fid_format(
+    beir_dir: str,
+    out_dir: str,
+    dataset_name: str,
+    splits: List[str],
+    topk: int = 100,
+    add_self: bool = False,
+    add_qrel_as_answer: str = None):
+    
+    assert add_qrel_as_answer in {None, 'title', 'text'}
+    clean_text_for_tsv = lambda x: '' if x is None else x.replace('\n', ' ').replace('\t', ' ').replace('\r', ' ')
+    beir_data = BEIRDataset(beir_dir, name=dataset_name)
+
+    # build index
+    hostname = 'localhost'
+    number_of_shards = 1  # TODO
+    corpus, _, _ = GenericDataLoader(data_folder=beir_dir).load(split=splits[0])
+    model = BM25(index_name=dataset_name, hostname=hostname, initialize=True, number_of_shards=number_of_shards)
+    model.index(corpus)
+    time.sleep(5)
+
+    for split_ind, split in enumerate(splits):
+        corpus, queries, qrels = GenericDataLoader(data_folder=beir_dir).load(split=split)
+
+        # retrieve
+        model = BM25(index_name=dataset_name, hostname=hostname, initialize=False, number_of_shards=number_of_shards)
+        retriever = EvaluateRetrieval(model)
+        results = retriever.retrieve(corpus, queries)
+        print(f'retriever evaluation for k in: {retriever.k_values}')
+        ndcg, _map, recall, precision = retriever.evaluate(qrels, results, retriever.k_values)
+        print(ndcg, _map, recall, precision)
+
+        # output
+        os.makedirs(out_dir, exist_ok=True)
+        if split_ind == 0:
+            with open(os.path.join(out_dir, 'psgs.tsv'), 'w') as fout, \
+                open(os.path.join(out_dir, 'line2docid.tsv'), 'w') as l2dfout:
+                fout.write('id\ttext\ttitle\n')
+                for lid, did in enumerate(corpus):
+                    title = clean_text_for_tsv(corpus[did].get('title'))
+                    text = clean_text_for_tsv(corpus[did].get('text'))
+                    assert '\n' not in title and '\n' not in text
+                    fout.write(f'{did}\t{text}\t{title}\n')
+                    l2dfout.write(f'{lid}\t{did}\n')
+
+        examples: List[Dict] = []
+        for qid, scores_dict in results.items():
+            if add_qrel_as_answer:
+                answer = [clean_text_for_tsv(corpus[did].get(add_qrel_as_answer)) for did, rel in qrels[qid].items() if rel]
+            else:
+                answer = beir_data.qid2answer[qid]
+            query = clean_text_for_tsv(queries[qid])
+            example = {'question': query, 'id': qid, 'answers': answer, 'ctxs': []}
+            scores = sorted(scores_dict.items(), key=lambda item: item[1], reverse=True)[:topk]
+            if add_self:
+                if beir_data.qid2meta[qid]['docid'] not in set(x[0] for x in scores):  # self doc not retrieved
+                    scores.insert(0, (beir_data.qid2meta[qid]['docid'], scores[0][1] + 1.0))  # highest score
+                    scores = scores[:topk]
+            for rank in range(len(scores)):
+                did = scores[rank][0]
+                title = clean_text_for_tsv(corpus[did].get('title'))
+                if add_self and did == beir_data.qid2meta[qid]['docid']:
+                    text = clean_text_for_tsv(beir_data.qid2meta[qid]['context'])
+                else:
+                    text = clean_text_for_tsv(corpus[did].get('text'))
+                example['ctxs'].append({'id': did, 'title': title, 'text': text})
+            examples.append(example)
+    os.makedirs(out_dir, exist_ok=True)
+    json.dump(examples, open(os.path.join(out_dir, f'{split}.json'), 'w'), indent=2)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=['kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc'])
+    parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
+        'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc', 'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir'])
     parser.add_argument('--inp', type=str, default=None, help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -232,12 +407,13 @@ if __name__ == '__main__':
         prep_kilt(
             output_file=args.out, 
             dataset_name='wow', 
-            split='train', 
+            split='validation', 
             evidence_method='self_provenance', 
             whole_paragraph_as_evidence=False, 
             skip_answer_as_evidence=True,
-            num_negative_evidence=9,
-            subsample=10000,
+            remove_wo_ctx=True,
+            num_negative_evidence=99,
+            subsample=0,
             output_format='dpr')
 
     elif args.task == 'retrieval_track':
@@ -256,3 +432,24 @@ if __name__ == '__main__':
     
     elif args.task == 'retrieval_acc':
         retrieval_acc(args.inp)
+    
+    elif args.task == 'translation_to_beir':
+        translation_file = args.inp
+        beir_dir = args.out
+        translation_to_beir(translation_file, beir_dir, split='dev')
+    
+    elif args.task == 'convert_beir_to_fid_format':
+        beir_dir = args.inp
+        out_dir = args.out
+        convert_beir_to_fid_format(
+            beir_dir, 
+            out_dir, 
+            dataset_name='wow',
+            splits=['dev'],
+            topk=100)
+    
+    elif args.task == 'use_answer_as_query_in_beir':
+        beir_dir = args.inp
+        out_dir = args.out
+        tokenizer = AutoTokenizer.from_pretrained('google/t5-xl-lm-adapt')
+        use_answer_as_query_in_beir(beir_dir, out_dir, truncate_to=None, tokenizer=tokenizer)
