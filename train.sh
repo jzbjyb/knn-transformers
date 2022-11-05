@@ -21,12 +21,13 @@ conda activate knn
 export WANDB_PROJECT=unifiedrlm
 export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
-train_file=data/wow/train_neg100_dpr.json
-val_file=data/wow/val_neg100_dpr.json
-output_dir=checkpoints/models/t53b_wow_alpha4_hard_neg20
+train_file=data/wow/train_neg10_dpr.json
+val_file=data/wow/val_neg10_dpr.json
+output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4
 run_name="$(basename $output_dir)"
-depth=20
+depth=10
 use_context=true
+ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
 
 deepspeed train.py \
     --deepspeed deepspeed/lr-decay-zero1.json \
@@ -40,6 +41,7 @@ deepspeed train.py \
     --max_context_len 128 \
     --max_answer_len 128 \
     --use_context ${use_context} \
+    --ctx_attention_loss ${ctx_attention_loss} \
     --do_train \
     --do_eval \
     --per_device_train_batch_size 1 \

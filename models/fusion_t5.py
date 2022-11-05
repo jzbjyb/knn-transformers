@@ -17,7 +17,7 @@
 
 import copy
 import warnings
-from typing import Optional, Tuple, Union, List
+from typing import Optional, Tuple, Union, List, Dict, Any
 
 import torch
 from torch import nn
@@ -60,16 +60,39 @@ from transformers.models.t5.modeling_t5 import (
 logger = logging.get_logger(__name__)
 
 
+class FusionT5Config(T5Config):
+    def __init__(
+        self,
+        ctx_attention_loss: Dict[str, Any] = None,
+        **kwargs
+    ):  
+        super().__init__(**kwargs)
+        self.ctx_attention_loss = ctx_attention_loss
+        if ctx_attention_loss is not None:
+            assert ctx_attention_loss['layer'] < self.num_decoder_layers
+            assert ctx_attention_loss['head'] < self.num_heads
+
+    @staticmethod
+    def parse_ctx_attention_loss(ctx_attention_loss: str = None):  # 'block:8-layer:0-head:9-loss:hard-alpha:8'
+        if ctx_attention_loss is None:
+            return None
+        parsed = dict(tuple(field.split(':')) for field in ctx_attention_loss.strip().split('-'))
+        parsed = {k: (int(v) if k not in {'loss'} else v) for k, v in parsed.items()}
+        return parsed
+
 class FusionT5Attention(T5Attention):
     def __init__(
         self, 
-        config: T5Config,
-        has_relative_attention_bias: bool = False, 
-        block_ctx_attention: int = 0,
-        ctx_attention_loss: str = None):
+        config: FusionT5Config,
+        has_relative_attention_bias: bool = False,
+        layer_index: int = -1):
         super().__init__(config, has_relative_attention_bias=has_relative_attention_bias)
-        self.block_ctx_attention = block_ctx_attention
-        self.ctx_attention_loss = ctx_attention_loss
+        self.attn_specific = config.ctx_attention_loss is not None
+        self.compute_loss = self.attn_specific and config.ctx_attention_loss['layer'] == layer_index
+        if self.attn_specific:
+            self.block_size = config.ctx_attention_loss['block']
+            self.use_head = config.ctx_attention_loss['head']
+            self.loss_type = config.ctx_attention_loss['loss']
 
     def add_position_bias(
         self, 
@@ -234,37 +257,40 @@ class FusionT5Attention(T5Attention):
             extended_seq_length=ctx_seq_length + real_seq_length, extended_key_length=ctx_seq_length + key_length, scores=ctx_scores, mask=ctx_all_mask)
         
         ctx_attention_loss = None
-        if self.training:  # TODO: implement for inference
-            if self.ctx_attention_loss:  # compute
-                use_head = 9  # TODO: use specified head
-                assert self.block_ctx_attention > 0, 'computing ctx attention loss requires block_ctx_attention > 0'
+        if self.training and self.attn_specific:  # TODO: implement for inference
+            if self.compute_loss:  # compute loss
+                assert self.block_size > 0, 'computing ctx attention loss requires block_ctx_attention > 0'
 
-                first_block_attn = ctx_scores[:, use_head, :self.block_ctx_attention]  # (batch_size, first_block_size, n_ctxs, ctx_seq_length)
+                first_block_attn = ctx_scores[:, self.use_head, :self.block_size]  # (batch_size, first_block_size, n_ctxs, ctx_seq_length)
                 # ues -1 since mask is autoregressive so the last position has the complete mask
-                first_block_mask = mask[:, 0, -1, :self.block_ctx_attention].eq(0).to(first_block_attn)  # (batch_size, first_block_size)
+                first_block_mask = mask[:, 0, -1, :self.block_size].eq(0).to(first_block_attn)  # (batch_size, first_block_size)
 
-                second_block_attn = ctx_scores[:, use_head, self.block_ctx_attention:]  # (batch_size, second_block_size, n_ctxs, ctx_seq_length)
+                second_block_attn = ctx_scores[:, self.use_head, self.block_size:]  # (batch_size, second_block_size, n_ctxs, ctx_seq_length)
                 # ues -1 since mask is autoregressive so the last position has the complete mask
-                second_block_mask = mask[:, 0, -1, self.block_ctx_attention:].eq(0).to(first_block_attn)  # (batch_size, second_block_size)
+                second_block_mask = mask[:, 0, -1, self.block_size:].eq(0).to(second_block_attn)  # (batch_size, second_block_size)
 
                 first_dist = (first_block_attn.max(-1).values * first_block_mask.unsqueeze(-1)).mean(1).log_softmax(-1)  # (batch_size, n_ctxs)
-                second_dist = (second_block_attn.max(-1).values * second_block_mask.unsqueeze(-1)).mean(1).softmax(-1)  # (batch_size, n_ctxs)
-                second_dist = torch.zeros_like(second_dist)
-                second_dist[:, 0] = 1.0  # TODO: debug
+                if self.loss_type == 'soft':
+                    second_dist = (second_block_attn.max(-1).values * second_block_mask.unsqueeze(-1)).mean(1).softmax(-1)  # (batch_size, n_ctxs)
+                elif self.loss_type == 'hard':
+                    second_dist = torch.zeros_like(first_dist)  # (batch_size, n_ctxs)
+                    second_dist[:, 0] = 1.0
+                else:
+                    raise NotImplementedError
 
                 kldiv = torch.nn.KLDivLoss(reduction='batchmean')
                 ctx_attention_loss = kldiv(first_dist, second_dist.detach())
 
-            if self.block_ctx_attention:
-                ctm_shifted_right = torch.cat([torch.ones_like(ctx_all_mask)[..., :1] * torch.finfo(ctx_all_mask.dtype).min, ctx_all_mask[..., :-1]], -1)
-                # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
-                block_mask = ctm_shifted_right.eq(0) & ctx_all_mask.eq(0)  # mask all ctx tokens except the first token
-                # only do mask for the first block of sequence
-                if block_mask.size(2) == 1:
-                    block_mask = block_mask.repeat(1, 1, ctx_scores.size(2), 1, 1)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
-                block_mask[:, :, self.block_ctx_attention:] = False
-                block_mask = block_mask.to(ctx_all_mask) * torch.finfo(ctx_all_mask.dtype).min
-                ctx_scores += block_mask
+            # skip the first block
+            ctm_shifted_right = torch.cat([torch.ones_like(ctx_all_mask)[..., :1] * torch.finfo(ctx_all_mask.dtype).min, ctx_all_mask[..., :-1]], -1)
+            # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
+            block_mask = ctm_shifted_right.eq(0) & ctx_all_mask.eq(0)  # mask all ctx tokens except the first token
+            # only do mask for the first block of sequence
+            if block_mask.size(2) == 1:
+                block_mask = block_mask.repeat(1, 1, ctx_scores.size(2), 1, 1)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
+            block_mask[:, :, self.block_size:] = False
+            block_mask = block_mask.to(ctx_all_mask) * torch.finfo(ctx_all_mask.dtype).min
+            ctx_scores += block_mask
 
         cat_scores = torch.cat([ctx_scores.flatten(3, 4), scores], -1)  # (batch_size, n_heads, seq_length, n_ctxs * ctx_seq_length + key_length)
         cat_attn_weights = nn.functional.softmax(cat_scores.float(), dim=-1).type_as(cat_scores)  # (batch_size, n_heads, seq_length, n_ctxs * ctx_seq_length + key_length)
@@ -294,14 +320,12 @@ class FusionT5LayerSelfAttention(T5LayerSelfAttention):
         self, 
         config, 
         has_relative_attention_bias: bool = False,
-        block_ctx_attention: int = 0,
-        ctx_attention_loss: str = None):
+        layer_index: int = -1):
         super().__init__(config, has_relative_attention_bias=has_relative_attention_bias)
         self.SelfAttention = FusionT5Attention(
             config, 
             has_relative_attention_bias=has_relative_attention_bias, 
-            block_ctx_attention=block_ctx_attention, 
-            ctx_attention_loss=ctx_attention_loss)
+            layer_index=layer_index)
 
     def forward(
         self,
@@ -422,16 +446,14 @@ class FusionT5Block(T5Block):
         self, 
         config, 
         has_relative_attention_bias: bool = False,
-        block_ctx_attention: int = 0,
-        ctx_attention_loss: str = None):
+        layer_index: int = -1):
         super().__init__(config, has_relative_attention_bias=has_relative_attention_bias)
         if self.is_decoder:
             self.layer = nn.ModuleList()
             self.layer.append(FusionT5LayerSelfAttention(
                 config, 
                 has_relative_attention_bias=has_relative_attention_bias,
-                block_ctx_attention=block_ctx_attention,
-                ctx_attention_loss=ctx_attention_loss))
+                layer_index=layer_index))
             self.layer.append(FusionT5LayerCrossAttention(config))
             self.layer.append(T5LayerFF(config))
 
@@ -547,7 +569,7 @@ class FusionT5PreTrainedModel(T5PreTrainedModel):
     models.
     """
 
-    config_class = T5Config
+    config_class = FusionT5Config
     load_tf_weights = load_tf_weights_in_t5
     base_model_prefix = "transformer"
     is_parallelizable = True
@@ -565,10 +587,8 @@ class FusionT5Stack(T5Stack):
         self.block = nn.ModuleList(
             [FusionT5Block(
                 config, 
-                has_relative_attention_bias=True, 
-                ctx_attention_loss='head' if i == 0 else None, 
-                block_ctx_attention=8) for i in range(config.num_layers)]  # has_relative_attention_bias for all layers
-        )  # TODO: debug
+                has_relative_attention_bias=True,  # has_relative_attention_bias for all layers
+                layer_index=i) for i in range(config.num_layers)])
         rab = self.block[0].layer[0].SelfAttention.relative_attention_bias
         for block in self.block:  # copy relative_attention_bias to all layers to enable on-the-fly computation of position_bias 
             block.layer[0].SelfAttention.relative_attention_bias = rab
@@ -850,7 +870,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         r"decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight",
     ]
 
-    def __init__(self, config: T5Config):
+    def __init__(self, config: FusionT5Config):
         super().__init__(config)
         self.model_dim = config.d_model
 
@@ -869,6 +889,10 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         self.decoder = FusionT5Stack(decoder_config, self.shared)
 
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        self.attn_specific = config.ctx_attention_loss is not None
+        if self.attn_specific:
+            self.loss_alpha = config.ctx_attention_loss['alpha']
+            self.loss_layer = config.ctx_attention_loss['layer']
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1066,8 +1090,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
             # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
             
-            alpha = 4.0
-            loss = loss + alpha * decoder_outputs.attentions[0]  # TODO: debug
+            if self.attn_specific:
+                loss = loss + self.loss_alpha * decoder_outputs.attentions[self.loss_layer]
 
         if not return_dict:
             output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs

@@ -53,10 +53,9 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 from transformers.trainer_utils import EvalLoopOutput, EvalPrediction
-from transformers import T5Config
 
 from deepspeed import checkpointing as ds_checkpointing
-from models.fusion_t5 import FusionT5ForConditionalGeneration
+from models.fusion_t5 import FusionT5Config, FusionT5ForConditionalGeneration
 
 from em_eval import ems
 
@@ -126,6 +125,7 @@ class ModelArguments:
     decode_offset: Optional[int] = field(default=160)
     ctx_attn_add_bias: Optional[bool] = field(default=False)
     ctx_position_shift_right: Optional[bool] = field(default=False)
+    ctx_attention_loss: Optional[str] = field(default=None)
 
     def __post_init__(self):
         if self.config_overrides is not None and (self.config_name is not None or self.model_name_or_path is not None):
@@ -360,6 +360,17 @@ def main():
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
     }
+
+    if 'opt' in model_args.model_name_or_path or 'gpt2' in model_args.model_name_or_path:
+        config_specific_kwargs = {
+            'decode_offset': model_args.decode_offset,
+            'ctx_attn_add_bias': model_args.ctx_attn_add_bias,
+            'ctx_position_shift_right': model_args.ctx_position_shift_right
+        }
+    elif 't5' in model_args.model_name_or_path:
+        config_specific_kwargs = {'ctx_attention_loss': FusionT5Config.parse_ctx_attention_loss(model_args.ctx_attention_loss)}
+    else:
+        config_specific_kwargs = {}
     
     if 'opt' in model_args.model_name_or_path:
         _config_class = FusionOPTConfig
@@ -368,7 +379,7 @@ def main():
         _config_class = FusionGPT2Config
         _model_class = FusionGPT2LMHeadModel
     elif 't5' in model_args.model_name_or_path:
-        _config_class = T5Config
+        _config_class = FusionT5Config
         _model_class = FusionT5ForConditionalGeneration
     else:
         raise ValueError
@@ -376,14 +387,13 @@ def main():
     if model_args.config_name:
         config = _config_class.from_pretrained(model_args.config_name, **config_kwargs)
     elif model_args.model_name_or_path:
-        config = _config_class.from_pretrained(model_args.model_name_or_path, **config_kwargs)
+        # get original config
+        _dict = _config_class.get_config_dict(model_args.model_name_or_path, **config_kwargs)[0]
+        # update config with new fields
+        _dict.update(config_specific_kwargs)
+        config = _config_class.from_dict(_dict)
     else:
         raise ValueError
-    
-    if 'opt' in model_args.model_name_or_path or 'gpt2' in model_args.model_name_or_path:
-        config.decode_offset = model_args.decode_offset
-        config.ctx_attn_add_bias = model_args.ctx_attn_add_bias
-        config.ctx_position_shift_right = model_args.ctx_position_shift_right
 
     tokenizer_kwargs = {
         "cache_dir": model_args.cache_dir,
