@@ -1,8 +1,9 @@
-from typing import Tuple, Union, List
+from typing import Tuple, Union, List, Dict
 import os
 import logging
 import time
 import types
+from collections import defaultdict
 from tqdm import tqdm
 import numpy as np
 import torch
@@ -63,6 +64,7 @@ class MemTransDatastore(object):
         self.cur_idx = 0
         self.precision = np.float32
         self.load_or_init_dstore()
+        self.head2ids: Dict[int, List] = defaultdict(list)  # each item in list is (batch_size, final_topk)
     
     @property
     def use_cuda(self):
@@ -284,7 +286,7 @@ class MemTransDatastore(object):
         queries: torch.FloatTensor,  # (n_heads, batch_size, seq_len, dim)
         topk: int,
         final_topk: int = 1,  # the final number of ctxs returned
-        only_use_head_idx: int = -1,  # only use a single head to retrieve
+        only_use_head_idx: Union[int, List[int]] = -1,  # only use a single head to retrieve
         skip_first_token: bool = False,
         return_all: bool = False,
         debug: bool = False):
@@ -292,70 +294,80 @@ class MemTransDatastore(object):
         assert topk, 'topk should be positive'
         assert only_use_head_idx != -1, 'not implemented'
 
+        only_use_head_idxs = [only_use_head_idx] if type(only_use_head_idx) is not list else only_use_head_idx
+        assert len(only_use_head_idxs) == 1 or debug, 'can only use multiple heads in debug mode'
+
         ibs = 1  # inner batch size (to save memory)
         rerank_topk = topk  # num of docs to rerank  # TODO: use values different from topk
         doc_seq_len = topk  # TODO: use values different from topk
 
-        ori_device = queries.device
-        nh, bs, sl, dim = queries.size()
-        index = self.indices[only_use_head_idx]
+        all_queries = queries
+        ori_device = all_queries.device
+        nh, bs, sl, dim = all_queries.size()
 
-        _queries = queries[only_use_head_idx].contiguous()  # (batch_size, seq_len, dim)
-        _queries_to_faiss = _queries.view(-1, dim).cpu().numpy()  # (batch_size * seq_len, dim) TODO: add torch tensor (GPU) support
-        _scores, _indices = index.search(_queries_to_faiss, topk)  # (batch_size * seq_len, topk) * 2
-        _scores = torch.from_numpy(_scores).to(ori_device).view(bs, sl, topk)  # (batch_size, seq_len, topk)
-        _indices = torch.from_numpy(_indices).to(self.ids.device).view(bs, sl, topk)  # (batch_size, seq_len, topk)
-        _ret_ids = self.ids[_indices].to(ori_device)  # (batch_size, seq_len, topk)
-        _ids = []  # list of ids for retrieval (i_batch_size, final_topk)
+        for only_use_head_idx in only_use_head_idxs:
+            index = self.indices[only_use_head_idx]
 
-        for b in range(0, bs, ibs):
-            # get unique ids
-            queries = _queries[b:b + ibs]  # (i_batch_size, seq_len, dim)
-            scores = _scores[b:b + ibs]  # (i_batch_size, seq_len, topk)
-            ret_ids = _ret_ids[b:b + ibs]  # (i_batch_size, seq_len, topk)
-            unique_ret_ids, ret_ids = torch.unique(ret_ids, return_inverse=True)  # (uni,) (i_batch_size, seq_len, topk) uni is the number of unique ids
-            uni = unique_ret_ids.size(0)
-            
-            # max
-            lowest = scores.min()
-            agg_scores = torch.zeros(ibs, sl, uni).to(ori_device) + lowest  # (i_batch_size, seq_len, uni)
-            agg_mask = torch.zeros(ibs, sl, uni).to(ori_device)  # (i_batch_size, seq_len, uni)
-            agg_scores = torch_scatter.scatter_max(scores, ret_ids, out=agg_scores, dim=-1)[0]
-            agg_mask = torch_scatter.scatter_max(torch.ones_like(scores), ret_ids, out=agg_mask, dim=-1)[0]
-            agg_scores = agg_scores * agg_mask  # assume zero for absence
+            _queries = all_queries[only_use_head_idx].contiguous()  # (batch_size, seq_len, dim)
+            _queries_to_faiss = _queries.view(-1, dim).cpu().numpy()  # (batch_size * seq_len, dim) TODO: add torch tensor (GPU) support
+            _scores, _indices = index.search(_queries_to_faiss, topk)  # (batch_size * seq_len, topk) * 2
+            _scores = torch.from_numpy(_scores).to(ori_device).view(bs, sl, topk)  # (batch_size, seq_len, topk)
+            _indices = torch.from_numpy(_indices).to(self.ids.device).view(bs, sl, topk)  # (batch_size, seq_len, topk)
+            _ret_ids = self.ids[_indices].to(ori_device)  # (batch_size, seq_len, topk)
+            _ids = []  # list of ids for retrieval (i_batch_size, final_topk)
 
-            # sum
-            agg_mask = agg_mask.any(1).to(agg_mask)  # (i_batch_size, uni)
-            agg_scores = agg_scores.sum(1)  # (i_batch_size, uni)
-            agg_scores = agg_scores + agg_mask.log()  # assume -inf for absence
+            for b in range(0, bs, ibs):
+                # get unique ids
+                queries = _queries[b:b + ibs]  # (i_batch_size, seq_len, dim)
+                scores = _scores[b:b + ibs]  # (i_batch_size, seq_len, topk)
+                ret_ids = _ret_ids[b:b + ibs]  # (i_batch_size, seq_len, topk)
+                unique_ret_ids, ret_ids = torch.unique(ret_ids, return_inverse=True)  # (uni,) (i_batch_size, seq_len, topk) uni is the number of unique ids
+                uni = unique_ret_ids.size(0)
+                
+                # max
+                lowest = scores.min()
+                agg_scores = torch.zeros(ibs, sl, uni).to(ori_device) + lowest  # (i_batch_size, seq_len, uni)
+                agg_mask = torch.zeros(ibs, sl, uni).to(ori_device)  # (i_batch_size, seq_len, uni)
+                agg_scores = torch_scatter.scatter_max(scores, ret_ids, out=agg_scores, dim=-1)[0]
+                agg_mask = torch_scatter.scatter_max(torch.ones_like(scores), ret_ids, out=agg_mask, dim=-1)[0]
+                agg_scores = agg_scores * agg_mask  # assume zero for absence
 
-            # rerank
-            sort_indices = torch.topk(agg_scores, min(rerank_topk, uni), dim=-1).indices  # (i_batch_size, n_cand)
-            cand_ret_ids = unique_ret_ids[sort_indices]  # (i_batch_size, n_cand)
-            n_cand = cand_ret_ids.size(-1)
+                # sum
+                agg_mask = agg_mask.any(1).to(agg_mask)  # (i_batch_size, uni)
+                agg_scores = agg_scores.sum(1)  # (i_batch_size, uni)
+                agg_scores = agg_scores + agg_mask.log()  # assume -inf for absence
 
-            # get docs
-            ret_ks = self.get_knns_by_ids(
-                cand_ret_ids, topk=doc_seq_len, skip_first_token=skip_first_token, return_all=False)[0]  # (n_heads, i_batch_size, n_cand, doc_seq_len, dim)
-            ret_ks = ret_ks[only_use_head_idx]  # (i_batch_size, n_cand, doc_seq_len, dim)
-            scores = torch.einsum('bqd,bckd->bcqk', queries, ret_ks)  # (i_batch_size, n_cand, seq_len, doc_seq_len)
+                # rerank
+                sort_indices = torch.topk(agg_scores, min(rerank_topk, uni), dim=-1).indices  # (i_batch_size, n_cand)
+                cand_ret_ids = unique_ret_ids[sort_indices]  # (i_batch_size, n_cand)
+                n_cand = cand_ret_ids.size(-1)
 
-            # max-sum TODO: add padding and masking
-            scores = scores.max(-1).values.sum(-1)  # (i_batch_size, n_cand)
-            
-            # final rank
-            sort_indices = torch.topk(scores, min(n_cand, final_topk), dim=-1).indices  # (i_batch_size, final_topk)
-            cand_ret_ids = torch.gather(cand_ret_ids, 1, sort_indices)  # (i_batch_size, final_topk)
-            _ids.append(cand_ret_ids)
+                # get docs
+                ret_ks = self.get_knns_by_ids(
+                    cand_ret_ids, topk=doc_seq_len, skip_first_token=skip_first_token, return_all=False)[0]  # (n_heads, i_batch_size, n_cand, doc_seq_len, dim)
+                ret_ks = ret_ks[only_use_head_idx]  # (i_batch_size, n_cand, doc_seq_len, dim)
+                scores = torch.einsum('bqd,bckd->bcqk', queries, ret_ks)  # (i_batch_size, n_cand, seq_len, doc_seq_len)
 
+                # max-sum TODO: add padding and masking
+                scores = scores.max(-1).values.sum(-1)  # (i_batch_size, n_cand)
+                
+                # final rank
+                sort_indices = torch.topk(scores, min(n_cand, final_topk), dim=-1).indices  # (i_batch_size, final_topk)
+                cand_ret_ids = torch.gather(cand_ret_ids, 1, sort_indices)  # (i_batch_size, final_topk)
+                _ids.append(cand_ret_ids)
+
+                if debug:
+                    print(f'||{only_use_head_idx}||{cand_ret_ids[0, 0].item()}')
+
+            _ids = torch.cat(_ids, 0)  # (batch_size, final_topk) TODO: different inner batches have different number of returned docs?
             if debug:
-                print('||', cand_ret_ids[0, 0].item())
-                    
-        _ids = torch.cat(_ids, 0)  # (batch_size, final_topk) TODO: different inner batches have different number of returned docs?
-        # (n_heads, batch_size, final_topk, doc_seq_len, dim) * 2, (batch_size, final_topk, doc_seq_len) * 3
-        ret_ks, ret_vs, ret_ts, ret_ids, indices = self.get_knns_by_ids(
-            _ids, topk=doc_seq_len, skip_first_token=skip_first_token, return_all=return_all)
-        return ret_ks, ret_vs, ret_ts, ret_ids, indices
+                self.head2ids[only_use_head_idx].append(_ids)
+
+            # (n_heads, batch_size, final_topk, doc_seq_len, dim) * 2, (batch_size, final_topk, doc_seq_len) * 3
+            ret_ks, ret_vs, ret_ts, ret_ids, indices = self.get_knns_by_ids(
+                _ids, topk=doc_seq_len, skip_first_token=skip_first_token, return_all=return_all)
+
+        return ret_ks, ret_vs, ret_ts, ret_ids, indices  # return the results of the last head
 
     def get_knns(
         self, 
@@ -711,6 +723,12 @@ class MemTransAttn(object):
             return
         torch.save(torch.cat(self._accum_cache_all, 1), f'{file_name}{self.layer_index}.pt')
     
+    def dump_retrieval(self, file_name: str):
+        if not len(self.dstore.head2ids):
+            return
+        todump = {head: torch.cat(ids, 0) for head, ids in self.dstore.head2ids.items()}
+        torch.save(todump, f'{file_name}{self.layer_index}.pt')
+
     def retrieve(
         self,
         query_states: torch.FloatTensor,  # (batch_size, n_heads, seq_length, dim_per_head)
@@ -1312,7 +1330,8 @@ class MemTransWrapper(object):
             attn_layers = self.get_layer()
             for (layer_idx, attn_layer), ori_fwd in zip(attn_layers, self.ori_t5attetnion_forwards):
                 attn_layer.forward = ori_fwd
-                attn_layer.mta.dump_save_for_accumlation('test')  # TODO: add argument
+                #attn_layer.mta.dump_save_for_accumlation('test')  # TODO: add argument
+                attn_layer.mta.dump_retrieval('test')  # TODO: add argument
                 del attn_layer.mta
                 #del attn_layer.relative_attention_bias  # TODO: avoid deleting this for the first layer
             self.model.broken_into = None

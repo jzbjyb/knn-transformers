@@ -259,13 +259,14 @@ if __name__ == '__main__':
     parser.add_argument('--max_retrieval_times', type=int, default=None, help='max number of retrieval to perform')
     parser.add_argument('--filter_topk', type=int, default=0, help='filter_topk')
     parser.add_argument('--filter_order', type=str, default='original', help='filter_order')
-    parser.add_argument('--only_use_head_idx', type=int, default=-1, help='head index to use')
+    parser.add_argument('--only_use_head_idx', type=str, default="-1", help='head index to use (could be an integer or a list)')
     parser.add_argument('--num_ctxs', type=int, default=1, help='num of ctxs to retrieve')
     parser.add_argument('--ctx_order', type=str, default='parallel', help='how to ues multiple ctxs')
     args = parser.parse_args()
     args.is_save = args.stage == 'save'
     args.use_retrieval = args.is_save or args.retrieval_topk > 0
     args.retrieval_layers = eval(args.retrieval_layers)
+    args.only_use_head_idx = eval(args.only_use_head_idx)
 
     # logging config
     logging.basicConfig(
@@ -297,7 +298,8 @@ if __name__ == '__main__':
             example['zh'] = example['decoder_prefix']
             return example
     sources, targets, decoder_prefixes, (shard_start, shard_end) = wrapper.load_data(
-        args.data_file, shard_id=args.global_rank, num_shards=args.world_size, process_exmaple_func=process_exmaple_func)
+        args.data_file, shard_id=args.global_rank, num_shards=args.world_size, 
+        process_exmaple_func=process_exmaple_func, max_num_examples=None)
 
     # prepare for "save" stage
     only_evaluate = False

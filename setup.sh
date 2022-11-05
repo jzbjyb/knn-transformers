@@ -10,7 +10,6 @@ pip install accelerate
 # need to set CUDA_HOME
 # has bugs with --global-option="build_ext" --global-option="-j8"
 DS_BUILD_OPS=1 DS_BUILD_FUSED_LAMB=1 DS_BUILD_SPARSE_ATTN=0 DS_BUILD_AIO=0 pip install deepspeed
-pip install beir==1.0.1
 
 # mongo for KILT
 #mongod --dbpath /path/to/data --logpath /path/to/mongod.log --fork

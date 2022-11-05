@@ -223,17 +223,33 @@ def head_analysis(attn_file: str, rank: bool = True, show_n_heads: int = 5):
     print('\t'.join(map(str, rank)))
     print('\t'.join(map(str, top1_acc[rank])))
 
-def retrieval_acc(filename: str):
+def retrieval_acc(filename: str, format: str = 'out'):
+    assert format in {'out', 'pt'}
+    if format == 'pt':
+        return retrieval_acc_pt(filename)
     ret_ids: List[int] = []
     with open(filename, 'r') as fin:
         for l in fin:
             l = l.strip()
             if l.startswith('||'):
-                ret_ids.append(int(l[2:]))
+                ret_ids.append(int(l.split('||')[-1]))
     ret_ids = np.array(ret_ids)
     print(f'len {len(ret_ids)}')
     acc = np.mean(ret_ids == np.arange(len(ret_ids)))
     print(acc)
+
+def retrieval_acc_pt(filename: str):
+    head2ids = torch.load(filename, map_location='cpu')
+    head_accs: List[Tuple[int, float]] = []
+    for head, ids in head2ids.items():
+        acc = ids.eq(torch.arange(ids.size(0)).unsqueeze(-1)).any(-1).float().mean(0).item()
+        head_accs.append((head, acc))
+        print(f'{head}: {acc}')
+    
+    head_accs = sorted(head_accs, key=lambda x: (-x[1], x[0]))
+    print('ranked')
+    for i in range(min(len(head_accs), 5)):
+        print(f'{head_accs[i][0]}: {head_accs[i][1]}')
 
 def save_beir_format(
     beir_dir: str,
@@ -431,7 +447,7 @@ if __name__ == '__main__':
         shuffle_evidence(args.inp, args.out)
     
     elif args.task == 'retrieval_acc':
-        retrieval_acc(args.inp)
+        retrieval_acc(args.inp, format='pt')
     
     elif args.task == 'translation_to_beir':
         translation_file = args.inp
