@@ -216,7 +216,10 @@ class DataCollatorForFusion:
             return self.tokenizer.encode(self.answer_prefix)[0]
         return self.model.config.decoder_start_token_id
 
-    def __call__(self, examples: List[Dict], debug: bool = False):
+    def __call__(
+        self, 
+        examples: List[Dict], 
+        debug: bool = False):
         decoder_start_token = self.tokenizer.convert_ids_to_tokens([self.model.config.decoder_start_token_id])[0]
 
         # questions

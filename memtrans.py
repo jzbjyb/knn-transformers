@@ -613,6 +613,7 @@ class MemTransAttn(object):
         shard_start: int = 0,  # which id to start retrieving from
         skip_retrieval_steps: int = 0,  # number of decoding steps where retrieval is skipped
         accum_retrieval_steps: int = 0,  # accumulate steps to perform retrieval (i.e., block-wise retrieval)
+        retrieval_for_next_step_at_layer: int = -1,  # retrieve indices for the next step at this layer
         retrieval_every_steps: int = 1,  # perform retrieval every retrieval_every_steps steps
         max_retrieval_times: int = None,  # max number of retrieval to performa
         skip_first_token: bool = False,  # skip the first token retrieved which is usually bos
@@ -644,6 +645,7 @@ class MemTransAttn(object):
         self.skip_retrieval_steps = skip_retrieval_steps
         self.accum_retrieval_steps = accum_retrieval_steps
         assert self.accum_retrieval_steps <= self.skip_retrieval_steps
+        self.retrieval_for_next_step_at_layer = retrieval_for_next_step_at_layer
         self.skip_first_token = skip_first_token
         self.add_after_first = add_after_first
         self.filter_topk = filter_topk
@@ -754,19 +756,28 @@ class MemTransAttn(object):
         _bw_offset = key_length - self.skip_retrieval_steps
         bw_ret_new = bw_ret and _bw_offset % self.retrieval_every_steps == 0 and self._retrieval_cache['count'] < self.max_retrieval_times  # retrieve new results
         bw_ret_reuse = bw_ret and not bw_ret_new  # reuse previous retrieved results
+        # TODO: debug check corner case retrieval_every_steps == 1
+        bw_ret_reuse_and_for_next = bw_ret_reuse and self.retrieval_for_next_step_at_layer == self.layer_index and \
+            self._retrieval_cache['count'] < self.max_retrieval_times and \
+            (self.retrieval_every_steps == 1 or (_bw_offset + 1) % self.retrieval_every_steps == 0)  # next step is the retrieval step
 
         if debug:
-            print(f'step: {key_length}', end='')
+            print(f'== step: {key_length} layer: {self.layer_index} ==')
 
         if bw_ret:
             self._retrieval_cache['query'].append(query_states)
         if bw_ret_new:
             query_states = torch.cat(self._retrieval_cache['query'], 2)  # (batch_size, n_heads, retrieval_every_steps, dim_per_head)
+        if bw_ret_reuse_and_for_next:
+            if debug:
+                print('retrieve for next step')
+            query_states = torch.cat(self._retrieval_cache['query'], 2)  # (batch_size, n_heads, retrieval_every_steps, dim_per_head)
+            self._retrieve(query_states, key_length=key_length + 1, topk=topk)  # save indices for the next step
         if bw_ret_reuse:
             if self._retrieval_cache['key'] is not None:
                 ret_ks, ret_vs = self._retrieval_cache['key'], self._retrieval_cache['value']
                 if debug:
-                    print(f'cache size {ret_ks.size()}')
+                    print(f'use horizontal cache {ret_ks.size()}')
                 return ret_ks, ret_vs
             topk = 0
 
@@ -774,7 +785,7 @@ class MemTransAttn(object):
             ret_ks = torch.zeros(bs, nh, sl, 1, 0, dph).to(query_states)  # (batch_size, n_heads, seq_length, 1 (n_ctxs), topk, dim_per_head)
             ret_vs = torch.zeros(bs, nh, sl, 1, 0, dph).to(query_states)  # (batch_size, n_heads, seq_length, 1 (n_ctxs), topk, dim_per_head)
             if debug:
-                print(f'skip size {ret_ks.size()}')
+                print(f'skip')
         else:  # perform retrieve
             if query_states.size(2) == 1:
                 query_states = query_states.squeeze(2)
@@ -782,7 +793,7 @@ class MemTransAttn(object):
             ret_ks = ret_ks.unsqueeze(2)  # (batch_size, n_heads, seq_length=1, n_ctx, topk, dim_per_head)
             ret_vs = ret_vs.unsqueeze(2)  # (batch_size, n_heads, seq_length=1, n_ctx, topk, dim_per_head)
             if debug:
-                print(f'retrieved size {ret_ks.size()}')
+                print(f'retrieve for current step {ret_ks.size()}')
 
             if bw_ret_new:  # update key and value
                 self._retrieval_cache = {'count': self._retrieval_cache['count'] + 1, 'query': [], 'key': ret_ks, 'value': ret_vs}
@@ -804,6 +815,7 @@ class MemTransAttn(object):
         key_length: int,
         topk: int,
         ids: torch.LongTensor = None,  # (batch_size, n_ctxs)
+        debug: bool = False,
     ):
         assert topk > 0, 'this function is called when retrieval is actually performed'
         bs = query_states.size(0)
@@ -819,9 +831,13 @@ class MemTransAttn(object):
         if self.cache_indices:  # use cached indices
             indices = self.mtac.get_or_save_indices(key_length=key_length)
             if indices is not None:
+                if debug:
+                    print('use indicies')
                 ret_ks, ret_vs, ret_ts, ret_ids = self.dstore.get_knns_by_indices(indices=indices, device=ori_device, return_all=self.is_track)
 
         if not self.cache_indices or indices is None:  # perform retrieval
+            if debug:
+                print('use knn')
             if self.by_ids:
                 if self.by_ids_cache:  # use horizontal cache
                     ret_ks, ret_vs, ret_ts, ret_ids, indices = self.by_ids_cache
@@ -1205,6 +1221,7 @@ class MemTransWrapper(object):
         shard_start: int = 0,  # used for sharded generated with by_ids = True
         skip_retrieval_steps: int = 0,
         accum_retrieval_steps: int = 0,
+        retrieval_for_next_step_at_layer: int = -1,
         retrieval_every_steps: int = 1,
         max_retrieval_times: int = None,
         skip_first_token: bool = False,
@@ -1228,6 +1245,7 @@ class MemTransWrapper(object):
         self.shard_start = shard_start
         self.skip_retrieval_steps = skip_retrieval_steps
         self.accum_retrieval_steps = accum_retrieval_steps
+        self.retrieval_for_next_step_at_layer = retrieval_for_next_step_at_layer
         self.retrieval_every_steps = retrieval_every_steps
         self.max_retrieval_times = max_retrieval_times
         self.skip_first_token = skip_first_token
@@ -1299,6 +1317,7 @@ class MemTransWrapper(object):
                 shard_start=self.shard_start,
                 skip_retrieval_steps=self.skip_retrieval_steps,
                 accum_retrieval_steps=self.accum_retrieval_steps,
+                retrieval_for_next_step_at_layer=self.retrieval_for_next_step_at_layer,
                 retrieval_every_steps=self.retrieval_every_steps,
                 max_retrieval_times=self.max_retrieval_times,
                 skip_first_token=self.skip_first_token,

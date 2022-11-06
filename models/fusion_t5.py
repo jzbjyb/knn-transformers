@@ -23,6 +23,7 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.utils.checkpoint import checkpoint
+from dataclasses import dataclass
 from deepspeed import checkpointing as ds_checkpointing
 
 from transformers.modeling_outputs import (
@@ -859,6 +860,12 @@ class FusionT5Stack(T5Stack):
         )
 
 
+@dataclass
+class FusionSeq2SeqLMOutput(Seq2SeqLMOutput):
+    ctx_attention_loss: Optional[torch.FloatTensor] = None
+    rerank_accuracy: Optional[torch.FloatTensor] = None
+
+
 @add_start_docstrings("""T5 Model with a `language modeling` head on top.""", T5_START_DOCSTRING)
 class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multiple inheritance
     _keys_to_ignore_on_load_missing = [
@@ -1084,20 +1091,21 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
         lm_logits = self.lm_head(sequence_output)
 
-        loss = None
+        loss = ctx_attention_loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss(ignore_index=-100)
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
             # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
             
             if self.attn_specific:
-                loss = loss + self.loss_alpha * decoder_outputs.attentions[self.loss_layer]
+                ctx_attention_loss = decoder_outputs.attentions[self.loss_layer]
+                loss = loss + self.loss_alpha * ctx_attention_loss
 
         if not return_dict:
             output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
             return ((loss,) + output) if loss is not None else output
 
-        return Seq2SeqLMOutput(
+        return FusionSeq2SeqLMOutput(
             loss=loss,
             logits=lm_logits,
             past_key_values=decoder_outputs.past_key_values,
@@ -1107,6 +1115,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             encoder_last_hidden_state=encoder_outputs.last_hidden_state,
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
+            ctx_attention_loss=ctx_attention_loss,
         )
 
     def prepare_inputs_for_generation(

@@ -255,6 +255,7 @@ if __name__ == '__main__':
     parser.add_argument('--retrieval_track', type=str, default=False, help='file to track retrieval')
     parser.add_argument('--skip_retrieval_steps', type=int, default=0, help='number of steps to skip retrieval')
     parser.add_argument('--accum_retrieval_steps', type=int, default=0, help='number of accumulation steps for retrieval')
+    parser.add_argument('--retrieval_for_next_step_at_layer', type=int, default=-1, help='perform retrieval for the next step at this layer')
     parser.add_argument('--retrieval_every_steps', type=int, default=1, help='block-wise retrieval')
     parser.add_argument('--max_retrieval_times', type=int, default=None, help='max number of retrieval to perform')
     parser.add_argument('--filter_topk', type=int, default=0, help='filter_topk')
@@ -319,6 +320,7 @@ if __name__ == '__main__':
             by_ids=False, cache_indices=True,  # TODO: debug
             skip_retrieval_steps=args.skip_retrieval_steps, 
             accum_retrieval_steps=args.accum_retrieval_steps, 
+            retrieval_for_next_step_at_layer=args.retrieval_for_next_step_at_layer,
             retrieval_every_steps=args.retrieval_every_steps,
             max_retrieval_times=args.max_retrieval_times,
             skip_first_token=True, add_after_first=True, 

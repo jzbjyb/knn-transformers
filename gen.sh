@@ -19,7 +19,7 @@ dataset=wow
 task=retrieve+targetprefix
 
 #model=google/t5-xl-lm-adapt
-model=checkpoints/models/t53b_wow_alpha4_hard_neg20
+model=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32
 
 dstore_dir=checkpoints/test
 dstore_size=0
@@ -36,7 +36,7 @@ if [[ ${task} == "normal" || ${task} == "evidence" || ${task} == "targetprefix" 
     elif [[ ${dataset} == 'wow' ]]; then
         data_file=data/wow/val_astarget_selfprov_evidence.json
         out_root=checkpoints/wow/prefix_exp/val_astarget_selfprov/prompt1
-        out_file=${out_root}/t53b_wow_alpha4_hard_neg20_targetprefix16.tsv
+        out_file=${out_root}/t53b_wow_alpha4_hard_layer12_head4_ctx32.tsv
     elif [[ ${dataset} == 'test' ]]; then
         data_file=data/test/test.json
         out_root=checkpoints/test
@@ -65,13 +65,20 @@ elif [[ ${task} == "retrieve" || ${task} == "retrieve+targetprefix" ]]; then
         #dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/memtrans_reproduce_prefix_layerall
         #out_file=${dstore_dir}/gen_evi32_tgt16_byids_skip4.tsv
         #out_file=${dstore_dir}/gen_evi32_tgt16_skip1_every12_max1_head9.tsv
-        dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b_wow_alpha4_hard_neg20
-        out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_neg20_evi32_tgt16_skip1_every8_max1_head9.reindex.tsv
+        #dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b_wow_alpha4_hard_neg20
+        #out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_neg20_evi32_tgt16_skip1_every8_max1_head9_fornext.reindex.tsv
+        #dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b_wow_alpha4_hard_layer12_head4
+        #out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_layer12_head4_evi32_tgt16_skip1_every8_max1_head9_fornext.tsv
+        dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b_wow_alpha4_hard_layer12_head4_ctx32
+        out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_layer12_head4_ctx32_evi32_tgt16_skip1_every8_max1_head9_fornext.tsv
     elif [[ ${dataset} == 'wow_train_5k' ]]; then
         dstore_size=176143
         data_file=data/wow/train_astarget_selfprov_qa.5000.json
-        dstore_dir=checkpoints/wow/prefix_exp/train5k_astarget_selfprov/t53b_wow_alpha4_hard_neg20
-        out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_neg20_evi32_tgt16_skip1_every8_max1_head9.reindex.tsv
+        #dstore_dir=checkpoints/wow/prefix_exp/train5k_astarget_selfprov/t53b_wow_alpha4_hard_neg20
+        #out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_neg20_evi32_tgt16_skip1_every8_max1_head9.reindex.tsv
+        dstore_dir=checkpoints/wow/prefix_exp/train5k_astarget_selfprov/t53b_wow_alpha4_hard_layer12_head4
+        #out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_layer12_head4_evi32_tgt16_skip1_every8_max1_head9_fornext.tsv
+        out_file=${dstore_dir}/test.tsv
     else
         echo "${dataset} is not supported"
         exit
@@ -84,11 +91,11 @@ elif [[ ${task} == "save" ]]; then
         out_file=""
     elif [[ ${dataset} == 'wow' ]]; then
         data_file=data/wow/val_astarget_selfprov_evidence.json
-        dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b_wow_alpha4_hard_neg20
+        dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b_wow_alpha4_hard_layer12_head4_ctx32
         out_file=""
     elif [[ ${dataset} == 'wow_train_5k' ]]; then
         data_file=data/wow/train_astarget_selfprov_evidence.5000.json
-        dstore_dir=checkpoints/wow/prefix_exp/train5k_astarget_selfprov/t53b_wow_alpha4_hard_neg20
+        dstore_dir=checkpoints/wow/prefix_exp/train5k_astarget_selfprov/t53b_wow_alpha4_hard_layer12_head4
         out_file=""
     else
         echo "${dataset} is not supported"
@@ -108,6 +115,7 @@ retrieval_topk=0
 retrieval_layers="[]"
 skip_retrieval_steps=0
 accum_retrieval_steps=0
+retrieval_for_next_step_at_layer=-1
 retrieval_every_steps=1
 max_retrieval_times=100000
 filter_topk=0
@@ -170,9 +178,10 @@ elif [[ ${task} == "retrieve+targetprefix" ]]; then
     retrieval_layers="list(range(24))"
     skip_retrieval_steps=1
     accum_retrieval_steps=0
+    retrieval_for_next_step_at_layer=12
     retrieval_every_steps=8
     max_retrieval_times=1
-    only_use_head_idx=9
+    only_use_head_idx=4
     filter_topk=0
     filter_order=original
     num_ctxs=1
@@ -206,6 +215,7 @@ srun python generate.py \
     --retrieval_layers ${retrieval_layers} \
     --skip_retrieval_steps ${skip_retrieval_steps} \
     --accum_retrieval_steps ${accum_retrieval_steps} \
+    --retrieval_for_next_step_at_layer ${retrieval_for_next_step_at_layer} \
     --retrieval_every_steps ${retrieval_every_steps} \
     --max_retrieval_times ${max_retrieval_times} \
     --filter_topk ${filter_topk} \

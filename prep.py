@@ -244,7 +244,7 @@ def retrieval_acc_pt(filename: str):
     for head, ids in head2ids.items():
         acc = ids.eq(torch.arange(ids.size(0)).unsqueeze(-1)).any(-1).float().mean(0).item()
         head_accs.append((head, acc))
-        print(f'{head}: {acc}')
+        print(f'{head}: {ids.size(0)} {acc}')
     
     head_accs = sorted(head_accs, key=lambda x: (-x[1], x[0]))
     print('ranked')

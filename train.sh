@@ -23,11 +23,13 @@ export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
 train_file=data/wow/train_neg10_dpr.json
 val_file=data/wow/val_neg10_dpr.json
-output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4
+output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32
+#output_dir=checkpoints/models/test
 run_name="$(basename $output_dir)"
 depth=10
 use_context=true
 ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
+max_context_len=32
 
 deepspeed train.py \
     --deepspeed deepspeed/lr-decay-zero1.json \
@@ -38,7 +40,7 @@ deepspeed train.py \
     --remove_unused_columns false \
     --depth ${depth} \
     --max_question_len 128 \
-    --max_context_len 128 \
+    --max_context_len ${max_context_len} \
     --max_answer_len 128 \
     --use_context ${use_context} \
     --ctx_attention_loss ${ctx_attention_loss} \
