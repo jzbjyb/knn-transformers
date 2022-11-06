@@ -257,8 +257,8 @@ class FusionT5Attention(T5Attention):
         ctx_scores, _ = self.add_position_bias(
             extended_seq_length=ctx_seq_length + real_seq_length, extended_key_length=ctx_seq_length + key_length, scores=ctx_scores, mask=ctx_all_mask)
         
-        ctx_attention_loss = None
-        if self.training and self.attn_specific:  # TODO: implement for inference
+        two_dists = None
+        if self.attn_specific:  # TODO: implement for inference
             if self.compute_loss:  # compute loss
                 assert self.block_size > 0, 'computing ctx attention loss requires block_ctx_attention > 0'
 
@@ -279,8 +279,7 @@ class FusionT5Attention(T5Attention):
                 else:
                     raise NotImplementedError
 
-                kldiv = torch.nn.KLDivLoss(reduction='batchmean')
-                ctx_attention_loss = kldiv(first_dist, second_dist.detach())
+                two_dists = torch.stack([first_dist, second_dist], 0)  # (2, batch_size, n_ctxs)
 
             # skip the first block
             ctm_shifted_right = torch.cat([torch.ones_like(ctx_all_mask)[..., :1] * torch.finfo(ctx_all_mask.dtype).min, ctx_all_mask[..., :-1]], -1)
@@ -310,8 +309,8 @@ class FusionT5Attention(T5Attention):
         outputs = ((attn_output, ctx_hidden_states),) + ((present_key_value_state, ctx_past_key_value),) + (position_bias,)
 
         if output_attentions:
-            if ctx_attention_loss is not None:
-                cat_attn_weights = ctx_attention_loss  # avoid checkpoint bug
+            if two_dists is not None:
+                cat_attn_weights = two_dists  # avoid checkpoint bug TODO: better workaround?
             outputs = outputs + (cat_attn_weights,)
         return outputs
 
@@ -864,6 +863,8 @@ class FusionT5Stack(T5Stack):
 class FusionSeq2SeqLMOutput(Seq2SeqLMOutput):
     ctx_attention_loss: Optional[torch.FloatTensor] = None
     rerank_accuracy: Optional[torch.FloatTensor] = None
+    ctx_pred_dist: Optional[torch.FloatTensor] = None
+    ctx_gold_dist: Optional[torch.FloatTensor] = None
 
 
 @add_start_docstrings("""T5 Model with a `language modeling` head on top.""", T5_START_DOCSTRING)
@@ -1091,14 +1092,17 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
         lm_logits = self.lm_head(sequence_output)
 
-        loss = ctx_attention_loss = None
+        loss = ctx_pred_dist = ctx_gold_dist = ctx_attention_loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss(ignore_index=-100)
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
             # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
             
             if self.attn_specific:
-                ctx_attention_loss = decoder_outputs.attentions[self.loss_layer]
+                two_dists = decoder_outputs.attentions[self.loss_layer]
+                ctx_pred_dist, ctx_gold_dist = two_dists[0], two_dists[1]
+                kldiv = torch.nn.KLDivLoss(reduction='batchmean')
+                ctx_attention_loss = kldiv(ctx_pred_dist, ctx_gold_dist.detach())
                 loss = loss + self.loss_alpha * ctx_attention_loss
 
         if not return_dict:
@@ -1115,6 +1119,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             encoder_last_hidden_state=encoder_outputs.last_hidden_state,
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
+            ctx_pred_dist=ctx_pred_dist,
+            ctx_gold_dist=ctx_gold_dist,
             ctx_attention_loss=ctx_attention_loss,
         )
 

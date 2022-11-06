@@ -27,6 +27,7 @@ from typing import Optional, List, Dict
 
 import torch
 import torch.cuda.amp
+from torch.utils.data import DataLoader
 from tqdm import trange
 
 import evaluate
@@ -50,6 +51,7 @@ from transformers import (
 from qa_trainer import QuestionAnsweringSeq2SeqTrainer
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
+from transformers.trainer_pt_utils import ShardSampler
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 from transformers.trainer_utils import EvalLoopOutput, EvalPrediction
@@ -301,6 +303,7 @@ def _load_data_file(path: str, max_num_samples: int = 0):
 @dataclass
 class TrainingArgs(Seq2SeqTrainingArguments):
     extract_attention: bool = field(default=False)
+    do_eval_rerank: bool = field(default=False)
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -549,6 +552,44 @@ def main():
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
+    
+    if training_args.do_eval and training_args.do_eval_rerank:
+        logger.info("*** Evaluate reranking ***")
+        model.eval()
+        accuracies = []
+
+        sampler = ShardSampler(
+            validation_dataset,
+            batch_size=training_args.per_device_eval_batch_size,
+            num_processes=training_args.world_size,
+            process_index=training_args.process_index)
+        
+        dataloader = DataLoader(
+            validation_dataset,
+            sampler=sampler,
+            batch_size=training_args.eval_batch_size,
+            collate_fn=collator,
+            drop_last=False,
+            num_workers=training_args.dataloader_num_workers,
+            pin_memory=training_args.dataloader_pin_memory)
+
+        for step, batch in enumerate(dataloader):
+            batch = trainer._prepare_inputs(batch)
+            with torch.no_grad():
+                outputs = model(**batch)
+            # gather
+            ctx_pred_dist = outputs.ctx_pred_dist
+            ctx_pred_dist = trainer._pad_across_processes(ctx_pred_dist)
+            ctx_pred_dist = trainer._nested_gather(ctx_pred_dist)
+            
+            ranks = torch.sort(ctx_pred_dist, descending=True, dim=-1).indices
+            top1_accs = ranks[:, 0].eq(0).float()
+            accuracies.append(top1_accs)
+
+        if trainer.is_world_process_zero():
+            acc = torch.cat(accuracies).mean()
+            print(f'#examples {len(accuracies)}, accuracy: {acc}')
+        exit()
 
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
