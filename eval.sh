@@ -21,18 +21,41 @@ conda activate knn
 export WANDB_PROJECT=unifiedrlm
 export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
-train_file=data/wow/train_neg10_dpr.json
-#val_file=data/wow/train_neg10_dpr.json
-val_file=data/wow/val_neg10_dpr.json
-output_dir=test
-#model=google/t5-xl-lm-adapt
-model=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32
+train_file=data/wow/train_neg100_dpr.json
 
-depth=10
+# random docs
+#val_file=data/wow/train_neg100_dpr.json
+#val_file=data/wow/val_neg100_dpr.json
+
+# bm25 docs
+#val_file=data/wow/train_astarget_selfprov_evidence.5000.json.beir_ans.fid/dev.json
+#val_file=data/wow/val_astarget_selfprov_evidence.json.beir_ans.fid/dev.json
+
+# bm25 docs (dedup)
+val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
+
+output_dir=test
+
+# original
+#model=google/t5-xl-lm-adapt
+
+# no retrieval loss
+#model=checkpoints/models/t53b_wow
+#model=checkpoints/models/t53b_wow_nocontext
+
+# random
+#model=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32
+#model=checkpoints/models/t53b_wow_alpha4_hard
+
+# bm25
+model=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25
+
+depth=100
 max_context_len=32
 use_context=true
 
 ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
+#ctx_attention_loss="block:8-layer:0-head:9-loss:hard-alpha:4"
 #ctx_attention_loss="block:8-layer:0-head:0-loss:hard-alpha:4"
 
 deepspeed train.py \

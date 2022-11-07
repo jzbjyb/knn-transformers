@@ -147,6 +147,8 @@ class FusionT5Attention(T5Attention):
         """
         Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
         """
+        in_generation = ctx_past_key_value is not None or past_key_value is not None
+
         if ctx_hidden_states is None and ctx_past_key_value is None:  # no ctx, run original attn
             attention_output = super().forward(
                 hidden_states=hidden_states,
@@ -258,7 +260,7 @@ class FusionT5Attention(T5Attention):
             extended_seq_length=ctx_seq_length + real_seq_length, extended_key_length=ctx_seq_length + key_length, scores=ctx_scores, mask=ctx_all_mask)
         
         two_dists = None
-        if self.attn_specific:  # TODO: implement for inference
+        if self.attn_specific and not in_generation:  # TODO: implement for inference
             if self.compute_loss:  # compute loss
                 assert self.block_size > 0, 'computing ctx attention loss requires block_ctx_attention > 0'
 

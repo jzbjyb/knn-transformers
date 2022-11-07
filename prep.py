@@ -274,20 +274,29 @@ def save_beir_format(
                 for qid, did in split2qiddid[split]:
                     fout.write(f'{qid}\t{did}\t1\n')
 
-def translation_to_beir(translation_file: str, beir_dir: str, split: str = 'dev'):
+def translation_to_beir(
+    translation_file: str, 
+    beir_dir: str, 
+    split: str = 'dev', 
+    dedup_doc: bool = False):
     qid2dict: Dict[str, Dict] = {}
     did2dict: Dict[str, Dict] = {}
+    doc2did: Dict[str, str] = {}
     split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
     with open(translation_file, 'r') as fin:
         for l in fin:
             example = json.loads(l)['translation']
             question = example['en']
             answer = example['zh']
-            evidence = example['decoder_prefix']
+            evidence = example['decoder_prefix'].strip()
+            if dedup_doc and evidence in doc2did:
+                did = doc2did[evidence]
+            else:
+                did = f'{str(len(qid2dict) + len(did2dict))}'
+                did2dict[did] = {'_id': did, 'title': '', 'text': evidence}
+                doc2did[evidence] = did
             qid = f'{str(len(qid2dict) + len(did2dict))}'
-            qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer}}
-            did = f'{str(len(qid2dict) + len(did2dict))}'
-            did2dict[did] = {'_id': did, 'title': '', 'text': evidence}
+            qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer, 'docid': did}}
             split2qiddid[split].append((qid, did))
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
@@ -307,6 +316,7 @@ def use_answer_as_query_in_beir(
             ans = example['metadata']['answer']
             if truncate_to:
                 ans = tokenizer.decode(tokenizer.encode(ans, add_special_tokens=False)[:truncate_to])
+            example['metadata']['original_text'] = example['text']
             example['text'] = ans
             fout.write(json.dumps(example) + '\n')
     
@@ -345,6 +355,7 @@ def convert_beir_to_fid_format(
     splits: List[str],
     topk: int = 100,
     add_self: bool = False,
+    add_self_to_the_first: bool = False,
     add_qrel_as_answer: str = None):
     
     assert add_qrel_as_answer in {None, 'title', 'text'}
@@ -389,17 +400,26 @@ def convert_beir_to_fid_format(
                 answer = [clean_text_for_tsv(corpus[did].get(add_qrel_as_answer)) for did, rel in qrels[qid].items() if rel]
             else:
                 answer = beir_data.qid2answer[qid]
-            query = clean_text_for_tsv(queries[qid])
+            if 'original_text' in beir_data.qid2meta[qid]:  # for wow dataset the query is the answer while the real query is in original_text
+                query = clean_text_for_tsv(beir_data.qid2meta[qid]['original_text'])
+            else:
+                query = clean_text_for_tsv(queries[qid])
             example = {'question': query, 'id': qid, 'answers': answer, 'ctxs': []}
             scores = sorted(scores_dict.items(), key=lambda item: item[1], reverse=True)[:topk]
             if add_self:
                 if beir_data.qid2meta[qid]['docid'] not in set(x[0] for x in scores):  # self doc not retrieved
                     scores.insert(0, (beir_data.qid2meta[qid]['docid'], scores[0][1] + 1.0))  # highest score
                     scores = scores[:topk]
+                elif add_self_to_the_first:  # move this doc to the first position
+                    pos = [x[0] for x in scores].index(beir_data.qid2meta[qid]['docid'])
+                    if pos != 0:
+                        ori = scores[0]
+                        scores[0] = scores[pos]
+                        scores[pos] = ori
             for rank in range(len(scores)):
                 did = scores[rank][0]
                 title = clean_text_for_tsv(corpus[did].get('title'))
-                if add_self and did == beir_data.qid2meta[qid]['docid']:
+                if add_self and did == beir_data.qid2meta[qid]['docid'] and 'context' in beir_data.qid2meta[qid]:  # avoid leaking
                     text = clean_text_for_tsv(beir_data.qid2meta[qid]['context'])
                 else:
                     text = clean_text_for_tsv(corpus[did].get('text'))
@@ -423,14 +443,14 @@ if __name__ == '__main__':
         prep_kilt(
             output_file=args.out, 
             dataset_name='wow', 
-            split='validation', 
+            split='train', 
             evidence_method='self_provenance', 
             whole_paragraph_as_evidence=False, 
             skip_answer_as_evidence=True,
             remove_wo_ctx=True,
-            num_negative_evidence=99,
+            num_negative_evidence=0,
             subsample=0,
-            output_format='dpr')
+            output_format='translation')
 
     elif args.task == 'retrieval_track':
         n_heads = 32
@@ -452,7 +472,7 @@ if __name__ == '__main__':
     elif args.task == 'translation_to_beir':
         translation_file = args.inp
         beir_dir = args.out
-        translation_to_beir(translation_file, beir_dir, split='dev')
+        translation_to_beir(translation_file, beir_dir, split='dev', dedup_doc=True)
     
     elif args.task == 'convert_beir_to_fid_format':
         beir_dir = args.inp
@@ -462,10 +482,12 @@ if __name__ == '__main__':
             out_dir, 
             dataset_name='wow',
             splits=['dev'],
+            add_self=True,
+            add_self_to_the_first=True,
             topk=100)
     
     elif args.task == 'use_answer_as_query_in_beir':
         beir_dir = args.inp
         out_dir = args.out
         tokenizer = AutoTokenizer.from_pretrained('google/t5-xl-lm-adapt')
-        use_answer_as_query_in_beir(beir_dir, out_dir, truncate_to=None, tokenizer=tokenizer)
+        use_answer_as_query_in_beir(beir_dir, out_dir, truncate_to=8, tokenizer=tokenizer)

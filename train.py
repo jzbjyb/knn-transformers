@@ -24,7 +24,9 @@ import random
 import sys
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
+from tqdm import tqdm
 
+import numpy as np
 import torch
 import torch.cuda.amp
 from torch.utils.data import DataLoader
@@ -236,6 +238,8 @@ class DataCollatorForFusion:
 
         # ctxs
         bs, n_ctxs = len(examples), len(examples[0]['ctxs'])
+        if bs > 1 and len(np.unique([len(e['ctxs']) for e in examples])) > 1:
+            raise Exception('num of ctxs is inconsistent')
         # TODO: problem with multiple processes?
         # put ctx on the right to be close to the answer
         self.tokenizer.padding_side = 'left'
@@ -573,7 +577,7 @@ def main():
             num_workers=training_args.dataloader_num_workers,
             pin_memory=training_args.dataloader_pin_memory)
 
-        for step, batch in enumerate(dataloader):
+        for step, batch in tqdm(enumerate(dataloader)):
             batch = trainer._prepare_inputs(batch)
             with torch.no_grad():
                 outputs = model(**batch)
