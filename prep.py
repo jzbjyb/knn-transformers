@@ -1,4 +1,4 @@
-from typing import List, Tuple, Any, Union, Dict
+from typing import List, Tuple, Any, Union, Dict, Set
 import argparse
 import random
 import os
@@ -84,7 +84,7 @@ def prep_kilt(
                         ps, pe, cs, ce = prov['start_paragraph_id'], prov['end_paragraph_id'], prov['start_character'], prov['end_character']
                         #prov = prov['meta']['evidence_span'][-1].split('\r')[0]
                         prov = wikipedia.get_provenance(wiki_id, ps, pe, cs, ce, whole_paragraph=whole_paragraph_as_evidence)  # always use the whole paragraph
-                        evidences.append(prov)
+                        evidences.append(prov.strip())
                 if 'answer' in evidence_method and ans:
                     evidences.append(ans)
         
@@ -95,13 +95,24 @@ def prep_kilt(
     print(f'#examples {len(formatteds)}')
 
     if num_negative_evidence:
+        # collect unique evidences
+        evidence2id = {}
+        for example in formatteds:
+            for evi in example[1]:
+                if evi not in evidence2id:
+                    evidence2id[evi] = len(evidence2id)
+        evidences = list(evidence2id.keys())  # TODO: make sure the dict is ordered
+
         for i, example in tqdm(enumerate(formatteds), desc='generate negatives'):
-            inds = np.random.choice(len(formatteds), num_negative_evidence + 1, replace=False)
-            negs = [evi for ind in inds if ind != i for evi in formatteds[ind][1]]
-            random.shuffle(negs)
-            negs = negs[:num_negative_evidence]
-            assert len(negs) == num_negative_evidence
-            formatteds[i] = formatteds[i] + (negs,)
+            gold_inds: Set[int] = set(evidence2id[evi] for evi in example[1])
+            to_sample_count = min(num_negative_evidence + len(gold_inds), len(evidences))
+            to_keep_count = min(num_negative_evidence, len(evidences) - len(gold_inds))
+            sample_inds: Set[int] = set(np.random.choice(len(evidences), to_sample_count, replace=False).tolist())
+            keep_inds: List[int] = list(sample_inds - gold_inds)
+            random.shuffle(keep_inds)
+            keep_inds = keep_inds[:to_keep_count]
+            assert len(keep_inds) == to_keep_count
+            formatteds[i] = formatteds[i] + ([evidences[ind] for ind in keep_inds],)
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
     if output_format == 'translation':
@@ -443,14 +454,14 @@ if __name__ == '__main__':
         prep_kilt(
             output_file=args.out, 
             dataset_name='wow', 
-            split='train', 
+            split='validation', 
             evidence_method='self_provenance', 
             whole_paragraph_as_evidence=False, 
             skip_answer_as_evidence=True,
             remove_wo_ctx=True,
-            num_negative_evidence=0,
+            num_negative_evidence=10000,
             subsample=0,
-            output_format='translation')
+            output_format='dpr')
 
     elif args.task == 'retrieval_track':
         n_heads = 32

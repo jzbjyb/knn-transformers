@@ -385,6 +385,8 @@ class FusionT5LayerCrossAttention(T5LayerCrossAttention):
         layer_head_mask=None,
         past_key_value: torch.Tensor = None,  # (batch_size, n_heads, encoder_seq_length, dim_per_head)
         ctx_hidden_states: torch.Tensor = None,  # (batch_size, n_ctxs, ctx_seq_length, dim)
+        key_value_states_for_ctx: torch.Tensor = None,  # (batch_size, n_ctxs, encoder_seq_length_for_ctx, dim)
+        attention_mask_for_ctx: torch.Tensor = None,  # (batch_size, n_ctxs, 1, 1, encoder_seq_length_for_ctx)
         use_cache=False,
         query_length=None,
         output_attentions=False,
@@ -416,9 +418,18 @@ class FusionT5LayerCrossAttention(T5LayerCrossAttention):
             # duplicate
             bs, n_ctxs = ctx_hidden_states.shape[:2]
             ctx_hidden_states = ctx_hidden_states.flatten(0, 1)  # (batch_size * n_ctxs, ctx_seq_length, dim)
-            _attention_mask = attention_mask.unsqueeze(1).repeat(1, n_ctxs, 1, 1, 1).flatten(0, 1)  # (batch_size * n_ctxs, 1, 1, encoder_seq_length)
-            _key_value_states = key_value_states.unsqueeze(1).repeat(1, n_ctxs, 1, 1).flatten(0, 1)  # (batch_size * n_ctxs, encoder_seq_length, dim)
-            _past_key_value = past_key_value.unsqueeze(1).repeat(1, n_ctxs, 1, 1, 1).flatten(0, 1) if past_key_value is not None else None  # (batch_size * n_ctxs, n_heads, encoder_seq_length, dim_per_head)
+            if key_value_states_for_ctx is None:  # use the same encoder hidden states as what target uses
+                _attention_mask = attention_mask.unsqueeze(1).repeat(1, n_ctxs, 1, 1, 1).flatten(0, 1)  # (batch_size * n_ctxs, 1, 1, encoder_seq_length)
+                _key_value_states = key_value_states.unsqueeze(1).repeat(1, n_ctxs, 1, 1).flatten(0, 1)  # (batch_size * n_ctxs, encoder_seq_length, dim)
+            else:
+                _bs, _nc = attention_mask_for_ctx.shape[:2]
+                assert _bs in {1, bs} and _nc in {1, n_ctxs}
+                attention_mask_for_ctx = attention_mask_for_ctx.repeat(bs // _bs, n_ctxs // _nc, 1, 1, 1)
+                _bs, _nc = key_value_states_for_ctx.shape[:2]
+                assert _bs in {1, bs} and _nc in {1, n_ctxs}
+                key_value_states_for_ctx = key_value_states_for_ctx.repeat(bs // _bs, n_ctxs // _nc, 1, 1)
+                _attention_mask = attention_mask_for_ctx.flatten(0, 1)  # (batch_size * n_ctxs, 1, 1, encoder_seq_length_for_ctx)
+                _key_value_states = key_value_states_for_ctx.flatten(0, 1)  # (batch_size * n_ctxs, encoder_seq_length_for_ctx, dim)
             # TODO: position_bias
             # layer norm
             normed_ctx_hidden_states = self.layer_norm(ctx_hidden_states)
@@ -429,7 +440,7 @@ class FusionT5LayerCrossAttention(T5LayerCrossAttention):
                 key_value_states=_key_value_states,
                 position_bias=None,
                 layer_head_mask=layer_head_mask,
-                past_key_value=_past_key_value,
+                past_key_value=None,  # generation mode doesn't require ctx cross-attention
                 use_cache=use_cache,
                 query_length=None,
                 output_attentions=output_attentions,
@@ -467,6 +478,8 @@ class FusionT5Block(T5Block):
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         encoder_decoder_position_bias=None,
+        encoder_hidden_states_for_ctx=None,
+        encoder_attention_mask_for_ctx=None,
         layer_head_mask=None,
         cross_attn_layer_head_mask=None,
         past_key_value=None,
@@ -535,6 +548,8 @@ class FusionT5Block(T5Block):
                 layer_head_mask=cross_attn_layer_head_mask,
                 past_key_value=cross_attn_past_key_value,
                 ctx_hidden_states=ctx_hidden_states,
+                key_value_states_for_ctx=encoder_hidden_states_for_ctx,
+                attention_mask_for_ctx=encoder_attention_mask_for_ctx,
                 query_length=query_length,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
@@ -612,6 +627,8 @@ class FusionT5Stack(T5Stack):
         attention_mask=None,
         encoder_hidden_states=None,
         encoder_attention_mask=None,
+        encoder_hidden_states_for_ctx=None,  # (batch_size, n_ctxs, encoder_seq_length_for_ctx, dim)
+        encoder_attention_mask_for_ctx=None,  # (batch_size, n_ctxs, encoder_seq_length_for_ctx)
         inputs_embeds=None,
         head_mask=None,
         cross_attn_head_mask=None,
@@ -681,6 +698,11 @@ class FusionT5Stack(T5Stack):
             encoder_attention_mask = torch.ones(
                 batch_size, encoder_seq_length, device=inputs_embeds.device, dtype=torch.long
             )  # (batch_size, encoder_seq_length)
+        if self.is_decoder and encoder_attention_mask_for_ctx is None and encoder_hidden_states_for_ctx is not None:
+            encoder_seq_length_for_ctx = encoder_hidden_states_for_ctx.shape[2]
+            encoder_attention_mask_for_ctx = torch.ones(
+                batch_size, n_ctxs, encoder_seq_length_for_ctx, device=inputs_embeds.device, dtype=torch.long
+            )  # (batch_size, n_ctxs, encoder_seq_length_for_ctx)
 
         if has_ctx and ctx_attention_mask is None:
             ctx_attention_mask = torch.ones(batch_size, n_ctxs, ctx_seq_length).to(inputs_embeds.device)  # (batch_size, n_ctxs, ctx_seq_length)
@@ -710,6 +732,15 @@ class FusionT5Stack(T5Stack):
             encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)  # (batch_size, 1, 1, encoder_sequence_length)
         else:
             encoder_extended_attention_mask = None
+
+        if self.is_decoder and encoder_hidden_states_for_ctx is not None:
+            if encoder_attention_mask_for_ctx is None:
+                encoder_attention_mask_for_ctx = torch.ones(encoder_hidden_states_for_ctx.shape[:3], device=inputs_embeds.device)
+            encoder_extended_attention_mask_for_ctx = self.invert_attention_mask(encoder_attention_mask_for_ctx.flatten(0, 1))  # (batch_size * n_ctxs, 1, 1, encoder_sequence_length_for_ctx)
+            encoder_extended_attention_mask_for_ctx = encoder_extended_attention_mask_for_ctx.view(
+                *encoder_attention_mask_for_ctx.shape[:2], *encoder_extended_attention_mask_for_ctx.shape[1:])  # (batch_size, n_ctxs, 1, 1, encoder_sequence_length_for_ctx)
+        else:
+            encoder_extended_attention_mask_for_ctx = None
 
         # Prepare head mask if needed
         head_mask = self.get_head_mask(head_mask, self.config.num_layers)
@@ -745,8 +776,12 @@ class FusionT5Stack(T5Stack):
                     position_bias = position_bias.to(hidden_states.device)
                 if encoder_hidden_states is not None:
                     encoder_hidden_states = encoder_hidden_states.to(hidden_states.device)
+                if encoder_hidden_states_for_ctx is not None:
+                    encoder_hidden_states_for_ctx = encoder_hidden_states_for_ctx.to(hidden_states.device)
                 if encoder_extended_attention_mask is not None:
                     encoder_extended_attention_mask = encoder_extended_attention_mask.to(hidden_states.device)
+                if encoder_extended_attention_mask_for_ctx is not None:
+                    encoder_extended_attention_mask_for_ctx = encoder_extended_attention_mask_for_ctx.to(hidden_states.device)
                 if encoder_decoder_position_bias is not None:
                     encoder_decoder_position_bias = encoder_decoder_position_bias.to(hidden_states.device)
                 if layer_head_mask is not None:
@@ -777,6 +812,8 @@ class FusionT5Stack(T5Stack):
                     encoder_hidden_states,
                     encoder_extended_attention_mask,
                     encoder_decoder_position_bias,
+                    encoder_hidden_states_for_ctx,
+                    encoder_extended_attention_mask_for_ctx,
                     layer_head_mask,
                     cross_attn_layer_head_mask,
                     None,  # past_key_value is always None with gradient checkpointing
@@ -794,6 +831,8 @@ class FusionT5Stack(T5Stack):
                     encoder_hidden_states=encoder_hidden_states,
                     encoder_attention_mask=encoder_extended_attention_mask,
                     encoder_decoder_position_bias=encoder_decoder_position_bias,
+                    encoder_hidden_states_for_ctx=encoder_hidden_states_for_ctx,
+                    encoder_attention_mask_for_ctx=encoder_extended_attention_mask_for_ctx,
                     layer_head_mask=layer_head_mask,
                     cross_attn_layer_head_mask=cross_attn_layer_head_mask,
                     past_key_value=past_key_value,
@@ -961,6 +1000,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         self,
         input_ids: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.FloatTensor] = None,
+        input_ids_for_ctx: Optional[torch.LongTensor] = None,  # (batch_size, n_ctxs, seq_length_for_ctx)
+        attention_mask_for_ctx: Optional[torch.FloatTensor] = None,  # (batch_size, n_ctxs, seq_length_for_ctx)
         decoder_input_ids: Optional[torch.LongTensor] = None,
         decoder_attention_mask: Optional[torch.BoolTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
@@ -1039,6 +1080,20 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
         hidden_states = encoder_outputs[0]
 
+        hidden_states_for_ctx = None
+        if input_ids_for_ctx is not None:  # encode the input for ctx
+            bs, n_ctxs = input_ids_for_ctx.shape[:2]
+            hidden_states_for_ctx = self.encoder(
+                input_ids=input_ids_for_ctx.flatten(0, 1),  # (batch_size * n_ctxs, seq_length_for_ctx)
+                attention_mask=attention_mask_for_ctx.flatten(0, 1),  # (batch_size * n_ctxs, seq_length_for_ctx)
+                inputs_embeds=None,
+                head_mask=head_mask,
+                output_attentions=None,
+                output_hidden_states=None,
+                return_dict=return_dict,
+            )[0]  # (batch_size * n_ctxs, seq_length_for_ctx, dim)
+            hidden_states_for_ctx = hidden_states_for_ctx.view(bs, n_ctxs, *hidden_states_for_ctx.shape[1:])
+
         if self.model_parallel:
             torch.cuda.set_device(self.decoder.first_device)
 
@@ -1050,12 +1105,16 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         if self.model_parallel:
             torch.cuda.set_device(self.decoder.first_device)
             hidden_states = hidden_states.to(self.decoder.first_device)
+            if hidden_states_for_ctx is not None:
+                hidden_states_for_ctx = hidden_states_for_ctx.to(self.decoder.first_device)
             if decoder_input_ids is not None:
                 decoder_input_ids = decoder_input_ids.to(self.decoder.first_device)
             if decoder_ctx_input_ids is not None:
                 decoder_ctx_input_ids = decoder_ctx_input_ids.to(self.decoder.first_device)
             if attention_mask is not None:
                 attention_mask = attention_mask.to(self.decoder.first_device)
+            if attention_mask_for_ctx is not None:
+                attention_mask_for_ctx = attention_mask_for_ctx.to(self.decoder.first_device)
             if decoder_attention_mask is not None:
                 decoder_attention_mask = decoder_attention_mask.to(self.decoder.first_device)
             if decoder_ctx_attention_mask is not None:
@@ -1071,6 +1130,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             decoder_ctx_attention_mask=decoder_ctx_attention_mask,
             encoder_hidden_states=hidden_states,
             encoder_attention_mask=attention_mask,
+            encoder_hidden_states_for_ctx=hidden_states_for_ctx,
+            encoder_attention_mask_for_ctx=attention_mask_for_ctx,
             head_mask=decoder_head_mask,
             cross_attn_head_mask=cross_attn_head_mask,
             use_cache=use_cache,

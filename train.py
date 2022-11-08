@@ -182,6 +182,7 @@ class DataTrainingArguments:
     question_prefix: Optional[str] = field(default='Definition: Given a question, generate a descriptive answer. Question: ')
     context_prefix: Optional[str] = field(default='Evidence: ')
     answer_prefix: Optional[str] = field(default='Answer: ')
+    encoder_input_for_context: Optional[str] = field(default='Definition: Given a question, generate a descriptive answer.')
 
     overwrite_cache: bool = field(
         default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
@@ -203,6 +204,7 @@ class DataCollatorForFusion:
     tokenizer: transformers.PreTrainedTokenizer
     pad_to_multiple_of: Optional[int] = None
     use_context: bool = True
+    encoder_input_for_context: str = None  # the input to encoder that contexts attend to (through cross-attention)
     max_question_len: int = None
     max_context_len: int = None
     max_answer_len: int = None
@@ -223,7 +225,7 @@ class DataCollatorForFusion:
     def __call__(
         self, 
         examples: List[Dict], 
-        debug: bool = False):
+        debug: True = False):
         decoder_start_token = self.tokenizer.convert_ids_to_tokens([self.model.config.decoder_start_token_id])[0]
 
         # questions
@@ -235,6 +237,17 @@ class DataCollatorForFusion:
             return_tensors='pt')
         input_ids = questions.input_ids  # (batch_size, encoder_seq_length)
         attention_mask = questions.attention_mask  # (batch_size, encoder_seq_length)
+
+        # encoder input for context
+        if self.encoder_input_for_context:
+            eifc = self.tokenizer(
+                [self.encoder_input_for_context],
+                truncation=True,
+                padding=True,
+                max_length=self.max_question_len,
+                return_tensors='pt')
+            input_ids_for_ctx = eifc.input_ids.unsqueeze(1)  # (1 (batch_size), 1 (n_ctxs), encoder_seq_length_for_context)
+            attention_mask_for_ctx = eifc.attention_mask.unsqueeze(1)  # (1 (batch_size), 1 (n_ctxs), encoder_seq_length_for_context)
 
         # ctxs
         bs, n_ctxs = len(examples), len(examples[0]['ctxs'])
@@ -284,6 +297,9 @@ class DataCollatorForFusion:
         if self.use_context:
             batch['decoder_ctx_input_ids'] = decoder_ctx_input_ids
             batch['decoder_ctx_attention_mask'] = decoder_ctx_attention_mask
+        if self.encoder_input_for_context and self._train:  # TODO: add inference support
+            batch['input_ids_for_ctx'] = input_ids_for_ctx
+            batch['attention_mask_for_ctx'] = attention_mask_for_ctx
         
         if debug:
             print(batch)
@@ -519,7 +535,8 @@ def main():
         max_context_len=data_args.max_context_len,
         max_answer_len=data_args.max_answer_len,
         answer_prefix=data_args.answer_prefix,
-        use_context=data_args.use_context)
+        use_context=data_args.use_context,
+        encoder_input_for_context=data_args.encoder_input_for_context)
 
     # Initialize our Trainer
     trainer = QuestionAnsweringSeq2SeqTrainer(

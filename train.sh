@@ -29,12 +29,12 @@ export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 train_file=data/wow/train_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 
-output_dir=checkpoints/models/t53b_wow_alpha4_hard_ctx32_bm25
+output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn
 #output_dir=checkpoints/models/test
 run_name="$(basename $output_dir)"
 depth=10
 use_context=true
-ctx_attention_loss="block:8-layer:0-head:9-loss:hard-alpha:4"
+ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
 max_context_len=32
 
 deepspeed train.py \
