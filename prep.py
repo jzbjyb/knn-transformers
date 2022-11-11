@@ -249,11 +249,18 @@ def retrieval_acc(filename: str, format: str = 'out'):
     acc = np.mean(ret_ids == np.arange(len(ret_ids)))
     print(acc)
 
-def retrieval_acc_pt(filename: str):
+def retrieval_acc_pt(filename: str, method: str = 'str'):
+    examples = [json.loads(l) for l in open('data/wow/val_astarget_selfprov_evidence.json', 'r')]
+    examples_dedup = [json.loads(l) for l in open('data/wow/val_astarget_selfprov_evidence.dedup.json', 'r')]
+    assert method in {'index', 'str'}
     head2ids = torch.load(filename, map_location='cpu')
     head_accs: List[Tuple[int, float]] = []
     for head, ids in head2ids.items():
-        acc = ids.eq(torch.arange(ids.size(0)).unsqueeze(-1)).any(-1).float().mean(0).item()
+        if method == 'index':
+            acc = ids.eq(torch.arange(ids.size(0)).unsqueeze(-1)).any(-1).float().mean(0).item()
+        elif method == 'str':
+            acc = np.mean([examples_dedup[did]['translation']['decoder_prefix'].strip() == examples[i]['translation']['decoder_prefix'].strip() 
+                for i, did in enumerate(ids[:, 0])])
         head_accs.append((head, acc))
         print(f'{head}: {ids.size(0)} {acc}')
     
@@ -439,10 +446,22 @@ def convert_beir_to_fid_format(
     os.makedirs(out_dir, exist_ok=True)
     json.dump(examples, open(os.path.join(out_dir, f'{split}.json'), 'w'), indent=2)
 
+def dedup_translation(inp_file: str, out_file: str, dedup_field: str = 'decoder_prefix'):
+    fields: Set[str] = set()
+    with open(inp_file, 'r') as fin, open(out_file, 'w') as fout:
+        for l in fin:
+            example = json.loads(l)
+            field = example['translation'][dedup_field]
+            if field in fields:
+                continue
+            fields.add(field)
+            fout.write(json.dumps(example) + '\n')
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
-        'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc', 'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir'])
+        'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc', 
+        'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir', 'dedup_translation'])
     parser.add_argument('--inp', type=str, default=None, help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -502,3 +521,8 @@ if __name__ == '__main__':
         out_dir = args.out
         tokenizer = AutoTokenizer.from_pretrained('google/t5-xl-lm-adapt')
         use_answer_as_query_in_beir(beir_dir, out_dir, truncate_to=8, tokenizer=tokenizer)
+    
+    elif args.task == 'dedup_translation':
+        inp_file = args.inp
+        out_file = args.out
+        dedup_translation(inp_file, out_file)

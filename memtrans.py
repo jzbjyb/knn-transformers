@@ -3,6 +3,7 @@ import os
 import logging
 import time
 import types
+import json
 from collections import defaultdict
 from tqdm import tqdm
 import numpy as np
@@ -22,6 +23,34 @@ logger.setLevel(20)
 
 def get_index_path(dstore_dir, model_type, dstore_size, dimension, head_idx):
     return f'{dstore_dir}/index_{model_type}_{dstore_size}_{dimension}_{head_idx}.indexed'
+
+class FixedRetrieval(object):
+    def __init__(self, line2did_file: str, fid_file: str):
+        line2did: Dict[int, int] = {}
+        did2line: Dict[int, int] = {}
+        with open(line2did_file, 'r') as fin:
+            for l in fin:
+                line, did = l.strip().split()
+                line, did = int(line), int(did)
+                line2did[line] = did
+                did2line[did] = line
+        
+        self._offset = 0
+        with open(fid_file, 'r') as fin:
+            self.examples: List[Dict] = json.load(fin)
+            for example in self.examples:
+                example['ctxs'] = [did2line[int(ctx['id'])] for ctx in example['ctxs']]
+    
+    def get_ctxs(self, batch_size) -> List[List[int]]:
+        start = self._offset
+        end = min(start + batch_size, len(self.examples))
+        print(start, end)
+        self._offset = end
+        return [self.examples[i]['ctxs'] for i in range(start, end)]
+
+fixed_retrieval = FixedRetrieval(
+    line2did_file='data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/line2docid.tsv', 
+    fid_file='data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json')  
 
 class MemTransAttnCoordinator(object):
     def __init__(self):
@@ -315,6 +344,7 @@ class MemTransDatastore(object):
             _indices = torch.from_numpy(_indices).to(self.ids.device).view(bs, sl, topk)  # (batch_size, seq_len, topk)
             _ret_ids = self.ids[_indices].to(ori_device)  # (batch_size, seq_len, topk)
             _ids = []  # list of ids for retrieval (i_batch_size, final_topk)
+            #_ctxs: List[List[int]] = fixed_retrieval.get_ctxs(batch_size=bs)
 
             for b in range(0, bs, ibs):
                 # get unique ids
@@ -323,6 +353,7 @@ class MemTransDatastore(object):
                 ret_ids = _ret_ids[b:b + ibs]  # (i_batch_size, seq_len, topk)
                 unique_ret_ids, ret_ids = torch.unique(ret_ids, return_inverse=True)  # (uni,) (i_batch_size, seq_len, topk) uni is the number of unique ids
                 uni = unique_ret_ids.size(0)
+                #ctxs = _ctxs[b:b + ibs]
                 
                 # max
                 lowest = scores.min()
@@ -340,16 +371,17 @@ class MemTransDatastore(object):
                 # rerank
                 sort_indices = torch.topk(agg_scores, min(rerank_topk, uni), dim=-1).indices  # (i_batch_size, n_cand)
                 cand_ret_ids = unique_ret_ids[sort_indices]  # (i_batch_size, n_cand)
+                #cand_ret_ids = torch.tensor(ctxs).to(cand_ret_ids)
                 n_cand = cand_ret_ids.size(-1)
 
                 # get docs
-                ret_ks = self.get_knns_by_ids(
-                    cand_ret_ids, topk=doc_seq_len, skip_first_token=skip_first_token, return_all=False)[0]  # (n_heads, i_batch_size, n_cand, doc_seq_len, dim)
+                ret_ks, _, _, _, _, ret_mask = self.get_knns_by_ids(
+                    cand_ret_ids, topk=doc_seq_len, skip_first_token=skip_first_token, return_all=False)  # (n_heads, i_batch_size, n_cand, doc_seq_len, dim), (i_batch_size, n_cand, doc_seq_len)
                 ret_ks = ret_ks[only_use_head_idx]  # (i_batch_size, n_cand, doc_seq_len, dim)
                 scores = torch.einsum('bqd,bckd->bcqk', queries, ret_ks)  # (i_batch_size, n_cand, seq_len, doc_seq_len)
 
                 # max-sum TODO: add padding and masking
-                scores = scores.max(-1).values.sum(-1)  # (i_batch_size, n_cand)
+                scores = (scores + ret_mask.to(scores).log().unsqueeze(-2)).max(-1).values.sum(-1)  # (i_batch_size, n_cand)
                 
                 # final rank
                 sort_indices = torch.topk(scores, min(n_cand, final_topk), dim=-1).indices  # (i_batch_size, final_topk)
@@ -364,7 +396,7 @@ class MemTransDatastore(object):
                 self.head2ids[only_use_head_idx].append(_ids)
 
             # (n_heads, batch_size, final_topk, doc_seq_len, dim) * 2, (batch_size, final_topk, doc_seq_len) * 3
-            ret_ks, ret_vs, ret_ts, ret_ids, indices = self.get_knns_by_ids(
+            ret_ks, ret_vs, ret_ts, ret_ids, indices, _ = self.get_knns_by_ids(
                 _ids, topk=doc_seq_len, skip_first_token=skip_first_token, return_all=return_all)
 
         return ret_ks, ret_vs, ret_ts, ret_ids, indices  # return the results of the last head
@@ -446,7 +478,7 @@ class MemTransDatastore(object):
         ret_ids = ret_ids.flatten(2, 3) if ret_ids is not None else None
         indices = indices.flatten(1, 2) if indices is not None else None
 
-        seq_len, dim = ret_ks.size()[2:]
+        seq_len, dim = ret_ks.shape[2:]
         topk = min(topk, seq_len)
         assert order in {'original', 'descending', 'ascending'}
 
@@ -493,20 +525,21 @@ class MemTransDatastore(object):
 
         ret_ks = self.keys_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len, n_heads, dim)
         ret_vs = self.values_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len, n_heads, dim)
-        indices = self.positions_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len)
+        indices, mask = self.positions_strided.lookup(ids, output='padded')  # (batch_size, seq_len) * 2
         if return_all:
             ret_ts = self.tokens_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len)
             ret_ids = self.ids_strided.lookup(ids, output='padded')[0]  # (batch_size, seq_len)
 
         if return_all:
-            assert ret_ks.size(1) == ret_vs.size(1) == indices.size(1) == ret_ts.size(1) == ret_ids.size(1)
+            assert ret_ks.size(1) == ret_vs.size(1) == indices.size(1) == mask.size(1) == ret_ts.size(1) == ret_ids.size(1)
         else:
-            assert ret_ks.size(1) == ret_vs.size(1) == indices.size(1)
+            assert ret_ks.size(1) == ret_vs.size(1) == indices.size(1) == mask.size(1)
 
         if skip_first_token:  # skip the first token which is usually the bos token (e.g., the pad token for T5)
             ret_ks = ret_ks[:, 1:]  # (batch_size, seq_len - 1, n_heads, dim)
             ret_vs = ret_vs[:, 1:]  # (batch_size, seq_len - 1, n_heads, dim)
             indices = indices[:, 1:]  # (batch_size, seq_len - 1)
+            mask = mask[:, 1:]  # (batch_size, seq_len - 1)
             if return_all:
                 ret_ts = ret_ts[:, 1:]  # (batch_size, seq_len - 1)
                 ret_ids = ret_ids[:, 1:]  # (batch_size, seq_len - 1)
@@ -516,6 +549,7 @@ class MemTransDatastore(object):
             ret_ks = ret_ks[:, :topk]  # (batch_size, topk, n_heads, dim)
             ret_vs = ret_vs[:, :topk]  # (batch_size, topk, n_heads, dim)
             indices = indices[:, :topk]  # (batch_size, topk)
+            mask = mask[:, :topk]  # (batch_size, topk)
             if return_all:
                 ret_ts = ret_ts[:, :topk]  # (batch_size, topk)
                 ret_ids = ret_ids[:, :topk]  # (batch_size, topk)
@@ -527,17 +561,18 @@ class MemTransDatastore(object):
             ret_ids = ret_ids.unsqueeze(0).repeat(self.n_heads, 1, 1)  # (n_heads, batch_size, topk)
         
         if has_cand:
-            ret_ks = ret_ks.view(*ret_ks.size()[:1], batch_size, n_cand, *ret_ks.size()[2:])  # (n_heads, batch_size, n_cand, topk, dim)
-            ret_vs = ret_vs.view(*ret_vs.size()[:1], batch_size, n_cand, *ret_vs.size()[2:])  # (n_heads, batch_size, n_cand, topk, dim)
-            indices = indices.view(batch_size, n_cand, *indices.size()[1:])  # (batch_size, n_cand, topk)
+            ret_ks = ret_ks.view(*ret_ks.shape[:1], batch_size, n_cand, *ret_ks.shape[2:])  # (n_heads, batch_size, n_cand, topk, dim)
+            ret_vs = ret_vs.view(*ret_vs.shape[:1], batch_size, n_cand, *ret_vs.shape[2:])  # (n_heads, batch_size, n_cand, topk, dim)
+            indices = indices.view(batch_size, n_cand, *indices.shape[1:])  # (batch_size, n_cand, topk)
+            mask = mask.view(batch_size, n_cand, *mask.shape[1:])  # (batch_size, n_cand, topk)
             if return_all:
-                ret_ts = ret_ts.view(batch_size, n_cand, *ret_ts.size()[1:])  # (batch_size, n_cand, topk)
-                ret_ids = ret_ids.view(batch_size, n_cand, *ret_ids.size()[1:])  # (batch_size, n_cand, topk)
+                ret_ts = ret_ts.view(batch_size, n_cand, *ret_ts.shape[1:])  # (batch_size, n_cand, topk)
+                ret_ids = ret_ids.view(batch_size, n_cand, *ret_ids.shape[1:])  # (batch_size, n_cand, topk)
 
         if return_all:
-            return ret_ks, ret_vs, ret_ts, ret_ids, indices
+            return ret_ks, ret_vs, ret_ts, ret_ids, indices, mask
         else:
-            return ret_ks, ret_vs, None, None, indices
+            return ret_ks, ret_vs, None, None, indices, mask
 
 class RetrievalTracker(object):
     def __init__(
@@ -851,7 +886,7 @@ class MemTransAttn(object):
                             ids = ids * ids_maks  # out-of-boundary ids are replaced with 0
                         else:
                             ids = torch.arange(bs).to(ori_device).unsqueeze(-1) + self.id_offset  # (batch_size, 1 (n_ctxs))
-                    ret_ks, ret_vs, ret_ts, ret_ids, indices = self.dstore.get_knns_by_ids(
+                    ret_ks, ret_vs, ret_ts, ret_ids, indices, _ = self.dstore.get_knns_by_ids(
                         ids, topk=topk, skip_first_token=self.skip_first_token, return_all=self.is_track)
                     self.by_ids_cache = (ret_ks, ret_vs, ret_ts, ret_ids, indices)
 
@@ -903,7 +938,7 @@ class MemTransAttn(object):
     ):
         # extend the mask
         if mask is not None:
-            ext_size = mask.size()[:3] + (topk,)
+            ext_size = mask.shape[:3] + (topk,)
             # (batch_size, n_heads, seq_length, topk + key_length)
             mask = torch.cat([torch.zeros(*ext_size).to(mask), mask], dim=3)
         

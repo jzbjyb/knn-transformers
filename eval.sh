@@ -57,7 +57,7 @@ output_dir=test
 #model=checkpoints/models/t53b_wow_alpha4_hard
 
 # bm25
-model=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25
+model=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn
 
 
 # ------------- hyperparameters -------------

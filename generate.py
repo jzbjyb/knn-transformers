@@ -86,7 +86,7 @@ class GenerationWrapper(object):
                 source = example['en'].strip()
 
                 # skip duplicate source if there's no evidence or it's fixed
-                if self.use_evidence in {'no', 'fixed'} and source == prev_source:
+                if self.use_evidence in {'no'} and source == prev_source:
                     continue
                 prev_source = source
                 
@@ -236,6 +236,7 @@ if __name__ == '__main__':
     parser.add_argument('--source_suffix', type=str, default='', help='source suffix')
     parser.add_argument('--evidence_prefix', type=str, default='', help='decoder prefix prefix')
     parser.add_argument('--evidence_suffix', type=str, default='', help='decoder prefix suffix')
+    parser.add_argument('--evidence_encoder_input', type=str, default='', help='input to encoder when building the index of evidences')
     parser.add_argument('--use_evidence', type=str, default='no', 
         choices=['no', 'encoder_suffix', 'encoder_prefix', 'decoder_prefix', 'fixed'], help='use evidence in which position')
     parser.add_argument('--max_gen_len', type=int, default=256, help='max generation length')
@@ -297,6 +298,8 @@ if __name__ == '__main__':
     if args.is_save:  # use "decoder_prefix" as target
         def process_exmaple_func(example: Dict):
             example['zh'] = example['decoder_prefix']
+            if args.evidence_encoder_input:  # use the same encoder input for all evidences
+                example['en'] = args.evidence_encoder_input
             return example
     sources, targets, decoder_prefixes, (shard_start, shard_end) = wrapper.load_data(
         args.data_file, shard_id=args.global_rank, num_shards=args.world_size, 

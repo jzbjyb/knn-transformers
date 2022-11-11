@@ -19,7 +19,7 @@ dataset=wow
 task=retrieve+targetprefix
 
 #model=google/t5-xl-lm-adapt
-model=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32
+model=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn
 
 dstore_dir=checkpoints/test
 dstore_size=0
@@ -60,7 +60,7 @@ elif [[ ${task} == "retrieve" || ${task} == "retrieve+targetprefix" ]]; then
         #out_file=${dstore_dir}/gen_topk64_byids_skip8_accum8_targetprefix16.tsv
         out_file=${dstore_dir}/gen_evi64_tgt16_skip1_every8_max1_head30.tsv
     elif [[ ${dataset} == 'wow' ]]; then
-        dstore_size=102638
+        dstore_size=38131
         data_file=data/wow/val_astarget_selfprov_qa.json
         #dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/memtrans_reproduce_prefix_layerall
         #out_file=${dstore_dir}/gen_evi32_tgt16_byids_skip4.tsv
@@ -69,8 +69,11 @@ elif [[ ${task} == "retrieve" || ${task} == "retrieve+targetprefix" ]]; then
         #out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_neg20_evi32_tgt16_skip1_every8_max1_head9_fornext.reindex.tsv
         #dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b_wow_alpha4_hard_layer12_head4
         #out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_layer12_head4_evi32_tgt16_skip1_every8_max1_head9_fornext.tsv
-        dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b_wow_alpha4_hard_layer12_head4_ctx32
-        out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_layer12_head4_ctx32_evi32_tgt16_skip1_every8_max1_head9_fornext.tsv
+        #dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b_wow_alpha4_hard_layer12_head4_ctx32
+        #out_file=${dstore_dir}/gen_t53b_wow_alpha4_hard_layer12_head4_ctx32_evi32_tgt16_skip1_every8_max1_head9_fornext.tsv
+        dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn
+        #dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b
+        out_file=${dstore_dir}/test.tsv
     elif [[ ${dataset} == 'wow_train_5k' ]]; then
         dstore_size=176143
         data_file=data/wow/train_astarget_selfprov_qa.5000.json
@@ -101,6 +104,17 @@ elif [[ ${task} == "save" ]]; then
         echo "${dataset} is not supported"
         exit
     fi
+elif [[ ${task} == "save_same_encoder_input" ]]; then
+    # === save datastore (no duplication) for memtrans exp ===
+    if [[ ${dataset} == 'wow' ]]; then
+        data_file=data/wow/val_astarget_selfprov_evidence.dedup.json
+        #dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn
+        dstore_dir=checkpoints/wow/prefix_exp/val_astarget_selfprov/t53b
+        out_file=""
+    else
+        echo "${dataset} is not supported"
+        exit
+    fi
 else
     echo "${task} is not defined"
     exit
@@ -123,6 +137,7 @@ filter_order=original
 only_use_head_idx=-1
 num_ctxs=1
 ctx_order=parallel
+evidence_encoder_input=""
 
 if [[ ${task} == "normal" ]]; then
     src_pre="Definition: Given a question, generate a descriptive answer. Question: "
@@ -172,6 +187,15 @@ elif [[ ${task} == "save" ]]; then
     evi=fixed
     evi_pre=""
     evi_suf="Evidence:"
+elif [[ ${task} == "save_same_encoder_input" ]]; then
+    stage="save"
+    retrieval_layers="list(range(24))"
+    src_pre=""
+    src_suf=""
+    evi=fixed
+    evi_pre=""
+    evi_suf="Evidence:"
+    evidence_encoder_input="Definition: Given a question, generate a descriptive answer."
 elif [[ ${task} == "retrieve+targetprefix" ]]; then
     targetprefix_len=16
     retrieval_topk=32
@@ -208,6 +232,7 @@ srun python generate.py \
     --use_evidence ${evi} \
     --evidence_prefix "${evi_pre}" \
     --evidence_suffix "${evi_suf}" \
+    --evidence_encoder_input "${evidence_encoder_input}" \
     --max_evidence_len ${evi_len} \
     --max_gen_len ${gen_len} \
     --target_as_prefix_len ${targetprefix_len} \
