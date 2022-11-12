@@ -65,15 +65,20 @@ class FusionT5Config(T5Config):
     def __init__(
         self,
         ctx_attention_loss: Dict[str, Any] = None,
-        always_attend_to_ctx_first_token: bool = True,
+        bos_attention: str = None,
         **kwargs
     ):
         super().__init__(**kwargs)
-        self.always_attend_to_ctx_first_token = always_attend_to_ctx_first_token
         self.ctx_attention_loss = ctx_attention_loss
         if ctx_attention_loss is not None:
             assert ctx_attention_loss['layer'] < self.num_decoder_layers
             assert ctx_attention_loss['head'] < self.num_heads
+        self.bos_attention = bos_attention
+        assert bos_attention in {'double', 'single', None}
+        # how tokens in the target should attend to bos (assume the first token of ctx and target is always bos)
+        # double: attend to both target bos and ctx bos
+        # single: only attend to target bos
+        # None: not necessary if ctx is not provided
 
     @staticmethod
     def parse_ctx_attention_loss(ctx_attention_loss: str = None):  # 'block:8-layer:0-head:9-loss:hard-alpha:8'
@@ -90,7 +95,7 @@ class FusionT5Attention(T5Attention):
         has_relative_attention_bias: bool = False,
         layer_index: int = -1):
         super().__init__(config, has_relative_attention_bias=has_relative_attention_bias)
-        self.always_attend_to_ctx_first_token = config.always_attend_to_ctx_first_token
+        self.bos_attention = config.bos_attention
         self.attn_specific = config.ctx_attention_loss is not None
         self.is_loss_layer = self.attn_specific and config.ctx_attention_loss['layer'] == layer_index
         if self.attn_specific:
@@ -260,62 +265,80 @@ class FusionT5Attention(T5Attention):
             scores += position_bias
 
         # compute scores over ctx
-        # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
-        ctx_scores = torch.einsum('bnqd,bnckd->bnqck', query_states, ctx_key)
-        n_ctxs, ctx_seq_length = ctx_scores.shape[-2:]
-
         ctx_all_mask = ctx_all_mask.permute(0, 2, 3, 1, 4)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
-        ctx_scores, _ = self.add_position_bias(
-            extended_seq_length=ctx_seq_length + real_seq_length, extended_key_length=ctx_seq_length + key_length, scores=ctx_scores, mask=ctx_all_mask)
         
-        two_dists = None
+        def compute_ctx_scores(_query_states):  # (batch_size, n_heads, seq_length, dim_per_head)
+            ctx_scores = torch.einsum('bnqd,bnckd->bnqck', _query_states, ctx_key)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
+            seq_length, ctx_seq_length = ctx_scores.size(2), ctx_scores.size(-1)
+            min_val_for_mask = torch.finfo(ctx_all_mask.dtype).min
+            if self.bos_attention == 'double':
+                ctx_scores = self.add_position_bias(
+                    extended_seq_length=ctx_seq_length + real_seq_length, 
+                    extended_key_length=ctx_seq_length + key_length, 
+                    scores=ctx_scores, 
+                    mask=ctx_all_mask)[0]
+            elif self.bos_attention == 'single':
+                ctx_scores = self.add_position_bias(
+                    extended_seq_length=ctx_seq_length + real_seq_length - 1,  # move ctx closer to target by skipping the bos of target  
+                    extended_key_length=ctx_seq_length + key_length, 
+                    scores=ctx_scores, 
+                    mask=ctx_all_mask)[0]
+                # mask (1) attention to bos of ctx, and (2) attention from bos of target
+                cam_shift_right = torch.cat([
+                    torch.ones_like(ctx_all_mask)[..., :1] * min_val_for_mask, 
+                    ctx_all_mask[..., :-1]], -1)
+                final_mask = cam_shift_right.ne(0) & ctx_all_mask.eq(0)  # (1) true for bos of ctx
+                if final_mask.size(2) == 1:
+                    final_mask = final_mask.repeat(1, 1, seq_length, 1, 1)
+                final_mask[:, :, 0] = True  # (2) true for bos of ctx
+                final_mask = final_mask.to(ctx_all_mask) * min_val_for_mask
+                ctx_scores += final_mask
+            else:
+                raise NotImplementedError
+            return ctx_scores
+
+        ctx_scores = compute_ctx_scores(query_states)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
+
+        attn_dists = None
         if self.attn_specific:
+            offset = 1 if self.bos_attention == 'single' else 0  # skip bos of targets in computing first_block_attention
+
             if self.is_loss_layer and (not in_generation or gen_step == self.block_size - 1):  # compute loss
+                assert self.block_size > 0, 'computing loss requires block_size > 0'
                 if in_generation and gen_step == self.block_size - 1:
-                    ctx_scores_for_loss = torch.einsum('bnqd,bnckd->bnqck', query_states_with_past, ctx_key)
-                    assert ctx_all_mask.size(2) == 1
-                    ctx_scores_for_loss, _ = self.add_position_bias(
-                        extended_seq_length=ctx_seq_length + real_seq_length, extended_key_length=ctx_seq_length + key_length, scores=ctx_scores_for_loss, mask=ctx_all_mask)
+                    ctx_scores_for_loss = compute_ctx_scores(query_states_with_past)
                 else:
                     ctx_scores_for_loss = ctx_scores
 
-                assert self.block_size > 0, 'computing ctx attention loss requires block_ctx_attention > 0'
+                block1_attn = ctx_scores_for_loss[:, self.use_head, offset:offset + self.block_size]  # (batch_size, first_block_size, n_ctxs, ctx_seq_length)
+                # since mask is autoregressive, the last position (i.e., -1) has the complete mask
+                block1_mask = mask[:, 0, -1, offset:offset + self.block_size].eq(0).to(block1_attn)  # (batch_size, first_block_size)
 
-                first_block_attn = ctx_scores_for_loss[:, self.use_head, :self.block_size]  # (batch_size, first_block_size, n_ctxs, ctx_seq_length)
-                # ues -1 since mask is autoregressive so the last position has the complete mask
-                first_block_mask = mask[:, 0, -1, :self.block_size].eq(0).to(first_block_attn)  # (batch_size, first_block_size)
+                block2_attn = ctx_scores_for_loss[:, self.use_head, offset + self.block_size:]  # (batch_size, second_block_size, n_ctxs, ctx_seq_length)
+                block2_mask = mask[:, 0, -1, offset + self.block_size:].eq(0).to(block2_attn)  # (batch_size, second_block_size)
 
-                second_block_attn = ctx_scores_for_loss[:, self.use_head, self.block_size:]  # (batch_size, second_block_size, n_ctxs, ctx_seq_length)
-                # ues -1 since mask is autoregressive so the last position has the complete mask
-                second_block_mask = mask[:, 0, -1, self.block_size:].eq(0).to(second_block_attn)  # (batch_size, second_block_size)
-
-                first_dist = (first_block_attn.max(-1).values * first_block_mask.unsqueeze(-1)).mean(1).log_softmax(-1)  # (batch_size, n_ctxs)
+                dist1 = (block1_attn.max(-1).values * block1_mask.unsqueeze(-1)).mean(1).log_softmax(-1)  # (batch_size, n_ctxs)
                 if self.loss_type == 'soft':
-                    second_dist = (second_block_attn.max(-1).values * second_block_mask.unsqueeze(-1)).mean(1).softmax(-1)  # (batch_size, n_ctxs)
+                    dist2 = (block2_attn.max(-1).values * block2_mask.unsqueeze(-1)).mean(1).softmax(-1)  # (batch_size, n_ctxs)
                 elif self.loss_type == 'hard':
-                    second_dist = torch.zeros_like(first_dist)  # (batch_size, n_ctxs)
-                    second_dist[:, 0] = 1.0
+                    dist2 = torch.zeros_like(dist1)  # (batch_size, n_ctxs)
+                    dist2[:, 0] = 1.0
                 else:
                     raise NotImplementedError
 
-                two_dists = torch.stack([first_dist, second_dist], 0)  # (2, batch_size, n_ctxs)
+                attn_dists = torch.stack([dist1, dist2], 0)  # (2, batch_size, n_ctxs)
 
             # skip the first block
-            ctm_shifted_right = torch.cat([torch.ones_like(ctx_all_mask)[..., :1] * torch.finfo(ctx_all_mask.dtype).min, ctx_all_mask[..., :-1]], -1)
-            # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
-            if self.always_attend_to_ctx_first_token:
-                block_mask = ctm_shifted_right.eq(0) & ctx_all_mask.eq(0)  # all ctx tokens are True except the first token, and "&" is necessary for right paddings
-            else:
-                block_mask = ctx_all_mask.eq(0)  # all ctx tokens are True
-            # only do mask for the first block of sequence
+            block_mask = ctx_all_mask.eq(0)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length) all ctx tokens are True
             if in_generation:  # use gen_step to decide whether to mask or not
                 assert block_mask.size(2) == 1
-                if gen_step >= self.block_size:
+                if gen_step >= offset + self.block_size:
                     block_mask[:] = False
-            else:
+            else:  # only mask the first block
                 if block_mask.size(2) == 1:
                     block_mask = block_mask.repeat(1, 1, ctx_scores.size(2), 1, 1)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
-                block_mask[:, :, self.block_size:] = False
+                assert block_mask.size(2) == ctx_scores.size(2)
+                block_mask[:, :, offset + self.block_size:] = False
 
             if debug:
                 print('block mask', block_mask[0, 0, :10, :3, :7])
@@ -341,8 +364,8 @@ class FusionT5Attention(T5Attention):
         outputs = ((attn_output, ctx_hidden_states),) + ((present_key_value_state, ctx_past_key_value),) + (position_bias,)
 
         if output_attentions:
-            if two_dists is not None:
-                cat_attn_weights = two_dists  # avoid checkpoint bug TODO: better workaround?
+            if attn_dists is not None:
+                cat_attn_weights = attn_dists  # avoid checkpoint bug TODO: better workaround?
             outputs = outputs + (cat_attn_weights,)
         return outputs
 
@@ -1192,8 +1215,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
             
             if self.attn_specific:
-                two_dists = decoder_outputs.attentions[self.loss_layer]
-                ctx_pred_dist, ctx_gold_dist = two_dists[0], two_dists[1]
+                attn_dists = decoder_outputs.attentions[self.loss_layer]
+                ctx_pred_dist, ctx_gold_dist = attn_dists[0], attn_dists[1]
                 kldiv = torch.nn.KLDivLoss(reduction='batchmean')
                 ctx_attention_loss = kldiv(ctx_pred_dist, ctx_gold_dist.detach())
                 loss = loss + self.loss_alpha * ctx_attention_loss

@@ -31,7 +31,8 @@ debug=false
 train_file=data/wow/train_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 
-output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn_bos
+output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn_singlebos
+#output_dir=checkpoints/models/t53b_wow_ctx32_bm25_sepcrossattn_singlebos
 
 init_model=google/t5-xl-lm-adapt
 depth=10
@@ -39,7 +40,7 @@ max_context_len=32
 use_context=true
 context_bos=true
 answer_bos=true
-always_attend_to_ctx_first_token=false
+bos_attention=single
 ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
 
 eval_steps=100
@@ -75,7 +76,7 @@ deepspeed train.py \
     --use_context ${use_context} \
     --context_bos ${context_bos} \
     --answer_bos ${answer_bos} \
-    --always_attend_to_ctx_first_token ${always_attend_to_ctx_first_token} \
+    --bos_attention ${bos_attention} \
     --ctx_attention_loss ${ctx_attention_loss} \
     --do_train \
     --do_eval \

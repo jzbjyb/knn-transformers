@@ -130,7 +130,7 @@ class ModelArguments:
     ctx_attn_add_bias: Optional[bool] = field(default=False)
     ctx_position_shift_right: Optional[bool] = field(default=False)
     ctx_attention_loss: Optional[str] = field(default=None)
-    always_attend_to_ctx_first_token: Optional[bool] = field(default=True)
+    bos_attention: Optional[str] = field(default=None)
 
     def __post_init__(self):
         if self.config_overrides is not None and (self.config_name is not None or self.model_name_or_path is not None):
@@ -350,7 +350,6 @@ def main():
     model_args: ModelArguments
     data_args: DataTrainingArguments
     training_args: Seq2SeqTrainingArguments
-    assert model_args.always_attend_to_ctx_first_token != data_args.answer_bos, 'inconsistency between model_args and data_args wrt to bos'
 
     # Setup logging
     logging.basicConfig(
@@ -404,10 +403,10 @@ def main():
             'ctx_position_shift_right': model_args.ctx_position_shift_right
         }
     elif 't5' in model_args.model_name_or_path:
-        config_specific_kwargs = {
-            'ctx_attention_loss': model_args.ctx_attention_loss,
-            'always_attend_to_ctx_first_token': model_args.always_attend_to_ctx_first_token,
-        }
+        config_specific_kwargs = {}
+        for key in ['ctx_attention_loss', 'bos_attention']:
+            if getattr(model_args, key) is not None:
+                config_specific_kwargs[key] = getattr(model_args, key)
     else:
         config_specific_kwargs = {}
     
