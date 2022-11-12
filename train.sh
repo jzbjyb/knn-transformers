@@ -21,6 +21,8 @@ conda activate knn
 export WANDB_PROJECT=unifiedrlm
 export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
+debug=false
+
 # random docs
 #train_file=data/wow/train_neg10_dpr.json
 #val_file=data/wow/val_neg10_dpr.json
@@ -29,17 +31,39 @@ export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 train_file=data/wow/train_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 
-output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn
-#output_dir=checkpoints/models/test
-run_name="$(basename $output_dir)"
+output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn_bos
+
+init_model=google/t5-xl-lm-adapt
 depth=10
-use_context=true
-ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
 max_context_len=32
+use_context=true
+context_bos=true
+answer_bos=true
+always_attend_to_ctx_first_token=false
+ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
+
+eval_steps=100
+max_eval_samples=1000
+
+if [[ ${debug} == "small" ]]; then
+    init_model=google/t5-small-lm-adapt
+    ctx_attention_loss="block:8-layer:0-head:0-loss:hard-alpha:4"
+    output_dir=checkpoints/models/test
+    rm -r ${output_dir}
+    eval_steps=5
+    max_eval_samples=16
+elif [[ ${debug} == "large" ]]; then
+    output_dir=checkpoints/models/test
+    rm -r ${output_dir}
+    eval_steps=5
+    max_eval_samples=16
+fi
+
+run_name="$(basename $output_dir)"
 
 deepspeed train.py \
     --deepspeed deepspeed/lr-decay-zero1.json \
-    --model_name_or_path google/t5-xl-lm-adapt \
+    --model_name_or_path ${init_model} \
     --train_file ${train_file} \
     --validation_file ${val_file} \
     --output_dir ${output_dir} \
@@ -49,6 +73,9 @@ deepspeed train.py \
     --max_context_len ${max_context_len} \
     --max_answer_len 128 \
     --use_context ${use_context} \
+    --context_bos ${context_bos} \
+    --answer_bos ${answer_bos} \
+    --always_attend_to_ctx_first_token ${always_attend_to_ctx_first_token} \
     --ctx_attention_loss ${ctx_attention_loss} \
     --do_train \
     --do_eval \
@@ -61,9 +88,9 @@ deepspeed train.py \
     --max_steps 1000 \
     --warmup_steps 100 \
     --logging_steps 10 \
-    --eval_steps 100 \
+    --eval_steps ${eval_steps} \
     --evaluation_strategy steps \
-    --max_eval_samples 1000 \
+    --max_eval_samples ${max_eval_samples} \
     --predict_with_generate \
     --save_steps 500 \
     --dataloader_num_workers 0 \

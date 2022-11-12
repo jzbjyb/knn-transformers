@@ -65,9 +65,11 @@ class FusionT5Config(T5Config):
     def __init__(
         self,
         ctx_attention_loss: Dict[str, Any] = None,
+        always_attend_to_ctx_first_token: bool = True,
         **kwargs
-    ):  
+    ):
         super().__init__(**kwargs)
+        self.always_attend_to_ctx_first_token = always_attend_to_ctx_first_token
         self.ctx_attention_loss = ctx_attention_loss
         if ctx_attention_loss is not None:
             assert ctx_attention_loss['layer'] < self.num_decoder_layers
@@ -88,8 +90,9 @@ class FusionT5Attention(T5Attention):
         has_relative_attention_bias: bool = False,
         layer_index: int = -1):
         super().__init__(config, has_relative_attention_bias=has_relative_attention_bias)
+        self.always_attend_to_ctx_first_token = config.always_attend_to_ctx_first_token
         self.attn_specific = config.ctx_attention_loss is not None
-        self.compute_loss = self.attn_specific and config.ctx_attention_loss['layer'] == layer_index
+        self.is_loss_layer = self.attn_specific and config.ctx_attention_loss['layer'] == layer_index
         if self.attn_specific:
             self.block_size = config.ctx_attention_loss['block']
             self.use_head = config.ctx_attention_loss['head']
@@ -134,7 +137,7 @@ class FusionT5Attention(T5Attention):
         mask=None,  # (batch_size, n_heads, seq_length, key_length)
         key_value_states=None,  # (batch_size, encoder_seq_length, dim)
         position_bias=None,  # (batch_size, n_heads, seq_length, key_length)
-        past_key_value=None,  # (batch_size, n_heads, q_len - 1, dim_per_head)
+        past_key_value=None,  # (batch_size, n_heads, q_len - 1, dim_per_head) * 3 corresponding to query, key, value
         ctx_hidden_states: torch.Tensor = None,  # (batch_size, n_ctxs, ctx_seq_length, dim)
         ctx_past_key_value: Tuple[torch.Tensor, torch.Tensor] = None,  # (batch_size, n_ctxs, n_heads, ctx_seq_length, dim_per_head) * 2
         ctx_self_mask: torch.Tensor = None,  # (batch_size, n_ctxs, n_heads, ctx_seq_length, ctx_seq_length) autoregressive mask
@@ -143,11 +146,16 @@ class FusionT5Attention(T5Attention):
         query_length=None,
         use_cache=False,
         output_attentions=False,
+        debug=False,
     ):
         """
         Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
         """
-        in_generation = ctx_past_key_value is not None or past_key_value is not None
+        assert (past_key_value is None) == (ctx_past_key_value is None), 'both past_key_value and ctx_past_key_value should be non-None in generation'
+        assert query_length is None and key_value_states is None, f'query_length and key_value_states are only used in cross-attention which {self.__class__} do not handle cross-attention'
+        in_generation = not self.training and use_cache and hidden_states.size(1) == 1  # do not set use_cache=True for loss evaluation # TODO: disable use_cache for loss evaluation
+        if in_generation:
+            gen_step = 0 if past_key_value is None else past_key_value[0].size(2)  # zero-based
 
         if ctx_hidden_states is None and ctx_past_key_value is None:  # no ctx, run original attn
             attention_output = super().forward(
@@ -155,7 +163,7 @@ class FusionT5Attention(T5Attention):
                 mask=mask,
                 key_value_states=key_value_states,
                 position_bias=position_bias,
-                past_key_value=past_key_value,
+                past_key_value=past_key_value[-2:] if past_key_value is not None else None,
                 layer_head_mask=layer_head_mask,
                 query_length=query_length,
                 use_cache=use_cache,
@@ -193,8 +201,8 @@ class FusionT5Attention(T5Attention):
 
         if past_key_value is not None:
             assert (
-                len(past_key_value) == 2
-            ), f"past_key_value should have 2 past states: keys and values. Got { len(past_key_value)} past states"
+                len(past_key_value) == 3
+            ), f"past_key_value should have 3 past states: queries, keys, and values. Got { len(past_key_value)} past states"
             real_seq_length += past_key_value[0].shape[2] if query_length is None else query_length
 
         key_length = real_seq_length if key_value_states is None else key_value_states.shape[1]
@@ -230,13 +238,14 @@ class FusionT5Attention(T5Attention):
 
         # get query states
         query_states = shape(self.q(hidden_states))  # (batch_size, n_heads, seq_length, dim_per_head)
+        query_states_with_past = torch.cat([past_key_value[0], query_states], dim=2) if past_key_value is not None else query_states  # (batch_size, n_heads, key_length, dim_per_head)
 
         # get key/value states
         key_states = project(
-            hidden_states, self.k, key_value_states, past_key_value[0] if past_key_value is not None else None
+            hidden_states, self.k, key_value_states, past_key_value[1] if past_key_value is not None else None
         )
         value_states = project(
-            hidden_states, self.v, key_value_states, past_key_value[1] if past_key_value is not None else None
+            hidden_states, self.v, key_value_states, past_key_value[2] if past_key_value is not None else None
         )
 
         # compute scores
@@ -260,15 +269,23 @@ class FusionT5Attention(T5Attention):
             extended_seq_length=ctx_seq_length + real_seq_length, extended_key_length=ctx_seq_length + key_length, scores=ctx_scores, mask=ctx_all_mask)
         
         two_dists = None
-        if self.attn_specific and not in_generation:  # TODO: implement for inference
-            if self.compute_loss:  # compute loss
+        if self.attn_specific:
+            if self.is_loss_layer and (not in_generation or gen_step == self.block_size - 1):  # compute loss
+                if in_generation and gen_step == self.block_size - 1:
+                    ctx_scores_for_loss = torch.einsum('bnqd,bnckd->bnqck', query_states_with_past, ctx_key)
+                    assert ctx_all_mask.size(2) == 1
+                    ctx_scores_for_loss, _ = self.add_position_bias(
+                        extended_seq_length=ctx_seq_length + real_seq_length, extended_key_length=ctx_seq_length + key_length, scores=ctx_scores_for_loss, mask=ctx_all_mask)
+                else:
+                    ctx_scores_for_loss = ctx_scores
+
                 assert self.block_size > 0, 'computing ctx attention loss requires block_ctx_attention > 0'
 
-                first_block_attn = ctx_scores[:, self.use_head, :self.block_size]  # (batch_size, first_block_size, n_ctxs, ctx_seq_length)
+                first_block_attn = ctx_scores_for_loss[:, self.use_head, :self.block_size]  # (batch_size, first_block_size, n_ctxs, ctx_seq_length)
                 # ues -1 since mask is autoregressive so the last position has the complete mask
                 first_block_mask = mask[:, 0, -1, :self.block_size].eq(0).to(first_block_attn)  # (batch_size, first_block_size)
 
-                second_block_attn = ctx_scores[:, self.use_head, self.block_size:]  # (batch_size, second_block_size, n_ctxs, ctx_seq_length)
+                second_block_attn = ctx_scores_for_loss[:, self.use_head, self.block_size:]  # (batch_size, second_block_size, n_ctxs, ctx_seq_length)
                 # ues -1 since mask is autoregressive so the last position has the complete mask
                 second_block_mask = mask[:, 0, -1, self.block_size:].eq(0).to(second_block_attn)  # (batch_size, second_block_size)
 
@@ -286,11 +303,24 @@ class FusionT5Attention(T5Attention):
             # skip the first block
             ctm_shifted_right = torch.cat([torch.ones_like(ctx_all_mask)[..., :1] * torch.finfo(ctx_all_mask.dtype).min, ctx_all_mask[..., :-1]], -1)
             # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
-            block_mask = ctm_shifted_right.eq(0) & ctx_all_mask.eq(0)  # mask all ctx tokens except the first token
+            if self.always_attend_to_ctx_first_token:
+                block_mask = ctm_shifted_right.eq(0) & ctx_all_mask.eq(0)  # all ctx tokens are True except the first token, and "&" is necessary for right paddings
+            else:
+                block_mask = ctx_all_mask.eq(0)  # all ctx tokens are True
             # only do mask for the first block of sequence
-            if block_mask.size(2) == 1:
-                block_mask = block_mask.repeat(1, 1, ctx_scores.size(2), 1, 1)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
-            block_mask[:, :, self.block_size:] = False
+            if in_generation:  # use gen_step to decide whether to mask or not
+                assert block_mask.size(2) == 1
+                if gen_step >= self.block_size:
+                    block_mask[:] = False
+            else:
+                if block_mask.size(2) == 1:
+                    block_mask = block_mask.repeat(1, 1, ctx_scores.size(2), 1, 1)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
+                block_mask[:, :, self.block_size:] = False
+
+            if debug:
+                print('block mask', block_mask[0, 0, :10, :3, :7])
+                input()
+
             block_mask = block_mask.to(ctx_all_mask) * torch.finfo(ctx_all_mask.dtype).min
             ctx_scores += block_mask
 
@@ -306,7 +336,7 @@ class FusionT5Attention(T5Attention):
         attn_output = unshape(torch.matmul(cat_attn_weights, cat_value_states))  # (batch_size, seq_length, dim)
         attn_output = self.o(attn_output)
 
-        present_key_value_state = (key_states, value_states) if (self.is_decoder and use_cache) else None
+        present_key_value_state = (query_states_with_past, key_states, value_states) if (self.is_decoder and use_cache) else None
         ctx_past_key_value = ctx_past_key_value if (self.is_decoder and use_cache) else None
         outputs = ((attn_output, ctx_hidden_states),) + ((present_key_value_state, ctx_past_key_value),) + (position_bias,)
 
@@ -495,17 +525,17 @@ class FusionT5Block(T5Block):
         if past_key_value is not None:
             if not self.is_decoder:
                 logger.warning("`past_key_values` is passed to the encoder. Please make sure this is intended.")
-            expected_num_past_key_values = 2 if encoder_hidden_states is None else 4
+            expected_num_past_key_values = 2 if encoder_hidden_states is None else 5
 
             if len(past_key_value) != expected_num_past_key_values:
                 raise ValueError(
                     f"There should be {expected_num_past_key_values} past states. "
-                    f"{'2 (past / key) for cross attention. ' if expected_num_past_key_values == 4 else ''}"
+                    f"{'2 (past / key) for cross attention. ' if expected_num_past_key_values == 5 else ''}"
                     f"Got {len(past_key_value)} past key / value states"
                 )
 
-            self_attn_past_key_value = past_key_value[:2]
-            cross_attn_past_key_value = past_key_value[2:]
+            self_attn_past_key_value = past_key_value[:3]
+            cross_attn_past_key_value = past_key_value[3:]
         else:
             self_attn_past_key_value, cross_attn_past_key_value = None, None
 

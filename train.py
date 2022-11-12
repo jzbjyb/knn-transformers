@@ -130,12 +130,14 @@ class ModelArguments:
     ctx_attn_add_bias: Optional[bool] = field(default=False)
     ctx_position_shift_right: Optional[bool] = field(default=False)
     ctx_attention_loss: Optional[str] = field(default=None)
+    always_attend_to_ctx_first_token: Optional[bool] = field(default=True)
 
     def __post_init__(self):
         if self.config_overrides is not None and (self.config_name is not None or self.model_name_or_path is not None):
             raise ValueError(
                 "--config_overrides can't be used in combination with --config_name or --model_name_or_path"
             )
+        self.ctx_attention_loss = FusionT5Config.parse_ctx_attention_loss(self.ctx_attention_loss)
 
 
 @dataclass
@@ -176,6 +178,8 @@ class DataTrainingArguments:
     )
 
     use_context: Optional[bool] = field(default=True, metadata={"help": "Whether to use context in training"})
+    context_bos: Optional[bool] = field(default=True, metadata={"help": "Whether to prepend bos to contexts"})
+    answer_bos: Optional[bool] = field(default=False, metadata={"help": "Whether to prepend bos to answers"})
     max_question_len: Optional[int] = field(default=128)
     max_context_len: Optional[int] = field(default=128)
     max_answer_len: Optional[int] = field(default=128)
@@ -198,12 +202,20 @@ class DataTrainingArguments:
 
 
 @dataclass
+class TrainingArgs(Seq2SeqTrainingArguments):
+    extract_attention: bool = field(default=False)
+    do_eval_rerank: bool = field(default=False)
+
+
+@dataclass
 class DataCollatorForFusion:
 
     model: transformers.AutoModelForSeq2SeqLM
     tokenizer: transformers.PreTrainedTokenizer
     pad_to_multiple_of: Optional[int] = None
     use_context: bool = True
+    context_bos: bool = True  # prepend bos to contexts
+    answer_bos: bool = False  # prepend bos to answers
     encoder_input_for_context: str = None  # the input to encoder that contexts attend to (through cross-attention)
     max_question_len: int = None
     max_context_len: int = None
@@ -216,16 +228,16 @@ class DataCollatorForFusion:
 
     def train(self):
         self._train = True
-    
+
     def get_real_decoder_start_token_id(self):
-        if self.use_context:  # use the first token of answer prefix to start generation
+        if not self.answer_bos:  # use the first token of the answer prefix to start generation if bos is not prepended to the answer
             return self.tokenizer.encode(self.answer_prefix)[0]
         return self.model.config.decoder_start_token_id
 
     def __call__(
         self, 
         examples: List[Dict], 
-        debug: True = False):
+        debug: bool = False):
         decoder_start_token = self.tokenizer.convert_ids_to_tokens([self.model.config.decoder_start_token_id])[0]
 
         # questions
@@ -257,7 +269,7 @@ class DataCollatorForFusion:
         # put ctx on the right to be close to the answer
         self.tokenizer.padding_side = 'left'
         # add decoder_start_token to ctx
-        dst = f'{decoder_start_token} ' if self.use_context else ''
+        dst = f'{decoder_start_token} ' if self.context_bos else ''
         ctxs = self.tokenizer(
             [dst + ctx for e in examples for ctx in e['ctxs']],
             truncation=True,
@@ -270,7 +282,7 @@ class DataCollatorForFusion:
         decoder_ctx_attention_mask = ctxs.attention_mask.view(bs, n_ctxs, -1)  # (batch_size, n_ctxs, ctx_seq_length)
         
         # answers
-        dst = f'{decoder_start_token} ' if not self.use_context else ''
+        dst = f'{decoder_start_token} ' if self.answer_bos else ''
         answers = self.tokenizer(
             [dst + random.choice(e['answers']) for e in examples],
             truncation=True,
@@ -303,11 +315,12 @@ class DataCollatorForFusion:
         
         if debug:
             print(batch)
-            print(decoder_ctx_input_ids[0, 0])
-            print(decoder_ctx_attention_mask[0, 0])
+            print(decoder_ctx_input_ids[0, :3])
+            print(decoder_ctx_attention_mask[0, :3])
             input()
 
         return batch
+
 
 def _load_data_file(path: str, max_num_samples: int = 0):
     if path.endswith('json'):
@@ -320,10 +333,6 @@ def _load_data_file(path: str, max_num_samples: int = 0):
         data = data[:max_num_samples]
     return data
 
-@dataclass
-class TrainingArgs(Seq2SeqTrainingArguments):
-    extract_attention: bool = field(default=False)
-    do_eval_rerank: bool = field(default=False)
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
@@ -341,6 +350,7 @@ def main():
     model_args: ModelArguments
     data_args: DataTrainingArguments
     training_args: Seq2SeqTrainingArguments
+    assert model_args.always_attend_to_ctx_first_token != data_args.answer_bos, 'inconsistency between model_args and data_args wrt to bos'
 
     # Setup logging
     logging.basicConfig(
@@ -394,7 +404,10 @@ def main():
             'ctx_position_shift_right': model_args.ctx_position_shift_right
         }
     elif 't5' in model_args.model_name_or_path:
-        config_specific_kwargs = {'ctx_attention_loss': FusionT5Config.parse_ctx_attention_loss(model_args.ctx_attention_loss)}
+        config_specific_kwargs = {
+            'ctx_attention_loss': model_args.ctx_attention_loss,
+            'always_attend_to_ctx_first_token': model_args.always_attend_to_ctx_first_token,
+        }
     else:
         config_specific_kwargs = {}
     
@@ -426,6 +439,7 @@ def main():
         "use_fast": model_args.use_fast_tokenizer,
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
+        "use_cache": False,
     }
     if model_args.tokenizer_name:
         tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
@@ -536,6 +550,8 @@ def main():
         max_answer_len=data_args.max_answer_len,
         answer_prefix=data_args.answer_prefix,
         use_context=data_args.use_context,
+        context_bos=data_args.context_bos,
+        answer_bos=data_args.answer_bos,
         encoder_input_for_context=data_args.encoder_input_for_context)
 
     # Initialize our Trainer
