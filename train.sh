@@ -53,11 +53,17 @@ if [[ ${debug} == "small" ]]; then
     rm -r ${output_dir}
     eval_steps=5
     max_eval_samples=16
+    extra="--report_to none"
 elif [[ ${debug} == "large" ]]; then
     output_dir=checkpoints/models/test
     rm -r ${output_dir}
     eval_steps=5
     max_eval_samples=16
+    extra="--report_to none"
+elif [[ ${debug} == "false" ]]; then
+    extra="--report_to wandb"
+else
+    exit
 fi
 
 run_name="$(basename $output_dir)"
@@ -96,4 +102,4 @@ deepspeed train.py \
     --save_steps 500 \
     --dataloader_num_workers 0 \
     --run_name ${run_name} \
-    --report_to 'wandb'
+    ${extra}

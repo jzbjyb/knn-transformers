@@ -21,19 +21,18 @@ conda activate knn
 export WANDB_PROJECT=unifiedrlm
 export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
-setting=rerank
+debug=false
+
+setting=generate
 data=bm25
+model=$1  # model to test
+need_model_args=$2  # specify model args or not
 
-
-# ------------- model -------------
-# original
-#model=google/t5-xl-lm-adapt
-#model=google/t5-small-lm-adapt
-
-# finetuned
-model=checkpoints/models/t53b_wow_ctx32_bm25_sepcrossattn_singlebos
-need_model_args=true
-
+# original models
+# google/t5-xl-lm-adapt
+# google/t5-small-lm-adapt
+# finetuned models
+# checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn_singlebos
 
 # ------------- data -------------
 train_file=data/wow/train_neg100_dpr.json
@@ -68,7 +67,8 @@ if [[ ${setting} == "rerank" ]]; then
     setting_extra="--do_eval_rerank"
 elif [[ ${setting} == "generate" ]]; then
     max_answer_len=128
-    setting_extra=""
+    ctx_topk=1
+    setting_extra="--ctx_topk ${ctx_topk}"
 else
     exit
 fi
@@ -76,13 +76,18 @@ fi
 if [[ ${need_model_args} == "true" ]]; then  # use additional model args for public pretrained models
     bos_attention=single
     ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
-    #ctx_attention_loss="block:8-layer:0-head:9-loss:hard-alpha:4"
-    #ctx_attention_loss="block:8-layer:0-head:0-loss:hard-alpha:4"
     model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
 elif [[ ${need_model_args} == "false" ]]; then
     model_args=""
 else
     exit
+fi
+
+if [[ ${debug} == "small" ]]; then
+    model=google/t5-small-lm-adapt
+    bos_attention=single
+    ctx_attention_loss="block:8-layer:2-head:0-loss:hard-alpha:4"
+    model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
 fi
 
 deepspeed train.py \
@@ -103,4 +108,5 @@ deepspeed train.py \
     --max_eval_samples 1000 \
     --predict_with_generate \
     --dataloader_num_workers 0 \
+    --report_to none \
     ${model_args} ${setting_extra}

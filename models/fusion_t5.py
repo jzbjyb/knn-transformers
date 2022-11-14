@@ -66,6 +66,7 @@ class FusionT5Config(T5Config):
         self,
         ctx_attention_loss: Dict[str, Any] = None,
         bos_attention: str = None,
+        ctx_topk: int = 0,  # num of ctxs used to compute loss or generate outputs
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -79,6 +80,7 @@ class FusionT5Config(T5Config):
         # double: attend to both target bos and ctx bos
         # single: only attend to target bos
         # None: not necessary if ctx is not provided
+        self.ctx_topk = ctx_topk
 
     @staticmethod
     def parse_ctx_attention_loss(ctx_attention_loss: str = None):  # 'block:8-layer:0-head:9-loss:hard-alpha:8'
@@ -96,6 +98,7 @@ class FusionT5Attention(T5Attention):
         layer_index: int = -1):
         super().__init__(config, has_relative_attention_bias=has_relative_attention_bias)
         self.bos_attention = config.bos_attention
+        self.ctx_topk = config.ctx_topk
         self.attn_specific = config.ctx_attention_loss is not None
         self.is_loss_layer = self.attn_specific and config.ctx_attention_loss['layer'] == layer_index
         if self.attn_specific:
@@ -144,7 +147,7 @@ class FusionT5Attention(T5Attention):
         position_bias=None,  # (batch_size, n_heads, seq_length, key_length)
         past_key_value=None,  # (batch_size, n_heads, q_len - 1, dim_per_head) * 3 corresponding to query, key, value
         ctx_hidden_states: torch.Tensor = None,  # (batch_size, n_ctxs, ctx_seq_length, dim)
-        ctx_past_key_value: Tuple[torch.Tensor, torch.Tensor] = None,  # (batch_size, n_ctxs, n_heads, ctx_seq_length, dim_per_head) * 2
+        ctx_past_key_value: Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] = None,  # (batch_size, n_ctxs, n_heads, ctx_seq_length, dim_per_head) * 2
         ctx_self_mask: torch.Tensor = None,  # (batch_size, n_ctxs, n_heads, ctx_seq_length, ctx_seq_length) autoregressive mask
         ctx_all_mask: torch.Tensor = None,  # (batch_size, n_ctxs, n_heads, seq_length, ctx_seq_length) full mask
         layer_head_mask=None,
@@ -196,7 +199,17 @@ class FusionT5Attention(T5Attention):
             ctx_value: torch.Tensor = ctx_value.view(batch_size, n_ctxs, *ctx_value.shape[1:])
             ctx_past_key_value = (ctx_key, ctx_value)
         else:  # cache from previous steps
-            ctx_key, ctx_value = ctx_past_key_value
+            if len(ctx_past_key_value) == 3:  # select a subset of ctxs
+                ctx_key, ctx_value, ctx_indices = ctx_past_key_value
+                n_ctxs, sub_n_ctxs = ctx_key.size(1), ctx_indices.size(1)
+                ctx_mask = torch.zeros(batch_size, n_ctxs).bool().to(ctx_key.device)  # (batch_size, n_ctxs)
+                ctx_mask = ctx_mask.scatter_(-1, ctx_indices, True)[:, :, None, None, None]  # (batch_size, n_ctxs, 1, 1, 1)
+                ctx_key = torch.masked_select(ctx_key, ctx_mask).view(batch_size, sub_n_ctxs, *ctx_key.shape[2:])
+                ctx_value = torch.masked_select(ctx_value, ctx_mask).view(batch_size, sub_n_ctxs, *ctx_value.shape[2:])
+                ctx_self_mask = torch.masked_select(ctx_self_mask, ctx_mask).view(batch_size, sub_n_ctxs, *ctx_self_mask.shape[2:])
+                ctx_all_mask = torch.masked_select(ctx_all_mask, ctx_mask).view(batch_size, sub_n_ctxs, *ctx_all_mask.shape[2:])
+            else:
+                ctx_key, ctx_value = ctx_past_key_value
 
         ctx_key = ctx_key.transpose(1, 2).contiguous()  # (batch_size, n_heads, n_ctxs, ctx_seq_length, dim_per_head)
         ctx_value = ctx_value.transpose(1, 2).contiguous()  # (batch_size, n_heads, n_ctxs, ctx_seq_length, dim_per_head)
@@ -328,6 +341,14 @@ class FusionT5Attention(T5Attention):
                     raise NotImplementedError
 
                 attn_dists = torch.stack([dist1, dist2], 0)  # (2, batch_size, n_ctxs)
+
+                if self.ctx_topk:  # choose topk ctxs with the highest scores
+                    if self.ctx_topk == -1:  # special case: use the first one which is probably the positive ctx
+                        ctx_indices = torch.zeros(batch_size, 1).long().to(ctx_scores_for_loss.device)
+                    else:
+                        ctx_indices = torch.topk(dist1, min(self.ctx_topk, dist1.size(-1)), dim=-1).indices
+                    ctx_past_key_value = ctx_past_key_value + (ctx_indices,)
+                    assert len(ctx_past_key_value) == 3
 
             # skip the first block
             block_mask = ctx_all_mask.eq(0)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length) all ctx tokens are True
@@ -663,6 +684,9 @@ class FusionT5Decoder(T5Stack):
         rab = self.block[0].layer[0].SelfAttention.relative_attention_bias
         for block in self.block:  # copy relative_attention_bias to all layers to enable on-the-fly computation of position_bias 
             block.layer[0].SelfAttention.relative_attention_bias = rab
+        self.attn_specific = config.ctx_attention_loss is not None
+        if self.attn_specific:
+            self.loss_layer = config.ctx_attention_loss['layer']
         # Initialize weights and apply final processing
         # TODO: any issue when executed twice?
         self.post_init()
@@ -932,6 +956,17 @@ class FusionT5Decoder(T5Stack):
         # Add last layer
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
+
+        # If ctx_past_key_value contains indices, broadcast in to all layers
+        def broadcast_ctx_indices(present_key_value_states):
+            if not use_cache:
+                return present_key_value_states
+            ctx_pkv = present_key_value_states[self.loss_layer][1]
+            if len(ctx_pkv) != 3:
+                return present_key_value_states
+            indices = ctx_pkv[2]
+            return tuple((pkv, ctx_pkv + ((indices,) if len(ctx_pkv) != 3 else ())) for pkv, ctx_pkv in present_key_value_states)
+        present_key_value_states = broadcast_ctx_indices(present_key_value_states)
 
         if not return_dict:
             return tuple(

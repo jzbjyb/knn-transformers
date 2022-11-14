@@ -131,6 +131,7 @@ class ModelArguments:
     ctx_position_shift_right: Optional[bool] = field(default=False)
     ctx_attention_loss: Optional[str] = field(default=None)
     bos_attention: Optional[str] = field(default=None)
+    ctx_topk: Optional[int] = field(default=0)
 
     def __post_init__(self):
         if self.config_overrides is not None and (self.config_name is not None or self.model_name_or_path is not None):
@@ -404,7 +405,7 @@ def main():
         }
     elif 't5' in model_args.model_name_or_path:
         config_specific_kwargs = {}
-        for key in ['ctx_attention_loss', 'bos_attention']:
+        for key in ['ctx_attention_loss', 'bos_attention', 'ctx_topk']:
             if getattr(model_args, key) is not None:
                 config_specific_kwargs[key] = getattr(model_args, key)
     else:
@@ -645,6 +646,7 @@ def main():
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
         metrics = trainer.evaluate(**gen_kwargs, metric_key_prefix='eval')
+        print(f'#examples {len(validation_dataset)}, metric: {metrics}')
 
     if training_args.do_predict:
         logger.info("*** Predict ***")
