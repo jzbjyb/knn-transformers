@@ -21,26 +21,8 @@ conda activate knn
 export WANDB_PROJECT=unifiedrlm
 export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
-train_file=data/wow/train_neg100_dpr.json
-
-# ------------- data -------------
-# random docs
-#val_file=data/wow/train_neg100_dpr.json
-#val_file=data/wow/val_neg100_dpr.json
-
-# bm25 docs
-#val_file=data/wow/train_astarget_selfprov_evidence.5000.json.beir_ans.fid/dev.json
-#val_file=data/wow/val_astarget_selfprov_evidence.json.beir_ans.fid/dev.json
-
-# bm25 docs (dedup)
-val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
-
-# all docs (full ranking)
-#val_file=data/wow/val_all_dpr.json
-
-
-# ------------- output -------------
-output_dir=test
+setting=rerank
+data=bm25
 
 
 # ------------- model -------------
@@ -48,44 +30,77 @@ output_dir=test
 #model=google/t5-xl-lm-adapt
 #model=google/t5-small-lm-adapt
 
-# no retrieval loss
-#model=checkpoints/models/t53b_wow
-#model=checkpoints/models/t53b_wow_nocontext
+# finetuned
+model=checkpoints/models/t53b_wow_ctx32_bm25_sepcrossattn_singlebos
+need_model_args=true
 
-# random
-#model=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32
-#model=checkpoints/models/t53b_wow_alpha4_hard
 
-# bm25
-model=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn
+# ------------- data -------------
+train_file=data/wow/train_neg100_dpr.json
+if [[ ${data} == "bm25" ]]; then
+    # random docs
+    #val_file=data/wow/train_neg100_dpr.json
+    #val_file=data/wow/val_neg100_dpr.json
+    # bm25 docs
+    #val_file=data/wow/train_astarget_selfprov_evidence.5000.json.beir_ans.fid/dev.json
+    #val_file=data/wow/val_astarget_selfprov_evidence.json.beir_ans.fid/dev.json
+    # bm25 docs (dedup)
+    val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
+    depth=100
+elif [[ ${data} == "random" ]]; then
+    # all docs (full ranking)
+    val_file=data/wow/val_all_dpr.json
+    depth=500
+else
+    exit
+fi
 
 
 # ------------- hyperparameters -------------
-
-depth=100
+max_question_len=128
 max_context_len=32
-max_answer_len=12
 use_context=true
+context_bos=true
+answer_bos=true
 
-ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
-#ctx_attention_loss="block:8-layer:0-head:9-loss:hard-alpha:4"
-#ctx_attention_loss="block:8-layer:0-head:0-loss:hard-alpha:4"
+if [[ ${setting} == "rerank" ]]; then
+    max_answer_len=12
+    setting_extra="--do_eval_rerank"
+elif [[ ${setting} == "generate" ]]; then
+    max_answer_len=128
+    setting_extra=""
+else
+    exit
+fi
+
+if [[ ${need_model_args} == "true" ]]; then  # use additional model args for public pretrained models
+    bos_attention=single
+    ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
+    #ctx_attention_loss="block:8-layer:0-head:9-loss:hard-alpha:4"
+    #ctx_attention_loss="block:8-layer:0-head:0-loss:hard-alpha:4"
+    model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
+elif [[ ${need_model_args} == "false" ]]; then
+    model_args=""
+else
+    exit
+fi
 
 deepspeed train.py \
     --model_name_or_path ${model} \
     --train_file ${train_file} \
     --validation_file ${val_file} \
-    --output_dir ${output_dir} \
+    --output_dir test \
     --remove_unused_columns false \
     --depth ${depth} \
-    --max_question_len 128 \
+    --max_question_len ${max_question_len} \
     --max_context_len ${max_context_len} \
     --max_answer_len ${max_answer_len} \
     --use_context ${use_context} \
-    --ctx_attention_loss ${ctx_attention_loss} \
+    --context_bos ${context_bos} \
+    --answer_bos ${answer_bos} \
     --do_eval \
-    --do_eval_rerank \
     --per_device_eval_batch_size 1 \
     --max_eval_samples 1000 \
     --predict_with_generate \
-    --dataloader_num_workers 0
+    --dataloader_num_workers 0 \
+    ${model_args} ${setting_extra}

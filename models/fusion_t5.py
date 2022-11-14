@@ -279,7 +279,7 @@ class FusionT5Attention(T5Attention):
                     mask=ctx_all_mask)[0]
             elif self.bos_attention == 'single':
                 ctx_scores = self.add_position_bias(
-                    extended_seq_length=ctx_seq_length + real_seq_length - 1,  # move ctx closer to target by skipping the bos of target  
+                    extended_seq_length=ctx_seq_length + real_seq_length,  # why move ctx closer to target by skipping the bos of target (-1) does not work?
                     extended_key_length=ctx_seq_length + key_length, 
                     scores=ctx_scores, 
                     mask=ctx_all_mask)[0]
@@ -290,7 +290,8 @@ class FusionT5Attention(T5Attention):
                 final_mask = cam_shift_right.ne(0) & ctx_all_mask.eq(0)  # (1) true for bos of ctx
                 if final_mask.size(2) == 1:
                     final_mask = final_mask.repeat(1, 1, seq_length, 1, 1)
-                final_mask[:, :, 0] = True  # (2) true for bos of ctx
+                if not in_generation or gen_step == 0:
+                    final_mask[:, :, 0] = True  # (2) true for bos of ctx
                 final_mask = final_mask.to(ctx_all_mask) * min_val_for_mask
                 ctx_scores += final_mask
             else:
@@ -303,9 +304,9 @@ class FusionT5Attention(T5Attention):
         if self.attn_specific:
             offset = 1 if self.bos_attention == 'single' else 0  # skip bos of targets in computing first_block_attention
 
-            if self.is_loss_layer and (not in_generation or gen_step == self.block_size - 1):  # compute loss
+            if self.is_loss_layer and (not in_generation or gen_step == offset + self.block_size - 1):  # compute loss
                 assert self.block_size > 0, 'computing loss requires block_size > 0'
-                if in_generation and gen_step == self.block_size - 1:
+                if in_generation and gen_step == offset + self.block_size - 1:
                     ctx_scores_for_loss = compute_ctx_scores(query_states_with_past)
                 else:
                     ctx_scores_for_loss = ctx_scores
@@ -647,11 +648,11 @@ class FusionT5PreTrainedModel(T5PreTrainedModel):
     _no_split_modules = ["T5Block", "FusionT5Block"]
 
     def _set_gradient_checkpointing(self, module, value=False):
-        if isinstance(module, (T5Attention, T5Stack, FusionT5Attention, FusionT5Stack)):
+        if isinstance(module, (T5Attention, T5Stack, FusionT5Attention, FusionT5Encoder, FusionT5Decoder)):
             module.gradient_checkpointing = value
 
 
-class FusionT5Stack(T5Stack):
+class FusionT5Decoder(T5Stack):
     def __init__(self, config, embed_tokens=None):
         super().__init__(config, embed_tokens=embed_tokens)
         self.block = nn.ModuleList(
@@ -954,6 +955,67 @@ class FusionT5Stack(T5Stack):
 
 
 @dataclass
+class BaseModelOutputWithPastAndCrossAttentionsWithTwoEncoder(BaseModelOutputWithPastAndCrossAttentions):
+    last_hidden_state_for_ctx: Optional[torch.FloatTensor] = None
+
+
+class FusionT5Encoder(T5Stack):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def forward(
+        self,
+        input_ids=None,
+        attention_mask=None,
+        input_ids_for_ctx: Optional[torch.LongTensor] = None,  # (batch_size, n_ctxs, seq_length_for_ctx)
+        attention_mask_for_ctx: Optional[torch.FloatTensor] = None,  # (batch_size, n_ctxs, seq_length_for_ctx)
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
+        inputs_embeds=None,
+        head_mask=None,
+        cross_attn_head_mask=None,
+        past_key_values=None,
+        use_cache=None,
+        output_attentions=None,
+        output_hidden_states=None,
+        return_dict=None,
+    ):
+        outputs = super().forward(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict)
+
+        hidden_states_for_ctx = None
+        if input_ids_for_ctx is not None:  # encode the input for ctx
+            bs, n_ctxs = input_ids_for_ctx.shape[:2]
+            hidden_states_for_ctx = super().forward(
+                input_ids=input_ids_for_ctx.flatten(0, 1),  # (batch_size * n_ctxs, seq_length_for_ctx)
+                attention_mask=attention_mask_for_ctx.flatten(0, 1),  # (batch_size * n_ctxs, seq_length_for_ctx)
+                inputs_embeds=None,
+                head_mask=head_mask,
+                output_attentions=None,
+                output_hidden_states=None,
+                return_dict=return_dict,
+            )[0]  # (batch_size * n_ctxs, seq_length_for_ctx, dim)
+            hidden_states_for_ctx = hidden_states_for_ctx.view(bs, n_ctxs, *hidden_states_for_ctx.shape[1:])
+        
+        if not return_dict:
+            outputs = outputs[:1] + (hidden_states_for_ctx,) + outputs[1:]
+            return outputs
+        return BaseModelOutputWithPastAndCrossAttentionsWithTwoEncoder(
+            last_hidden_state=outputs.last_hidden_state,
+            last_hidden_state_for_ctx=hidden_states_for_ctx,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            cross_attentions=outputs.cross_attentions)
+
+
+@dataclass
 class FusionSeq2SeqLMOutput(Seq2SeqLMOutput):
     ctx_attention_loss: Optional[torch.FloatTensor] = None
     rerank_accuracy: Optional[torch.FloatTensor] = None
@@ -982,13 +1044,13 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         encoder_config.is_decoder = False
         encoder_config.use_cache = False
         encoder_config.is_encoder_decoder = False
-        self.encoder = T5Stack(encoder_config, self.shared)
+        self.encoder = FusionT5Encoder(encoder_config, self.shared)
 
         decoder_config = copy.deepcopy(config)
         decoder_config.is_decoder = True
         decoder_config.is_encoder_decoder = False
         decoder_config.num_layers = config.num_decoder_layers
-        self.decoder = FusionT5Stack(decoder_config, self.shared)
+        self.decoder = FusionT5Decoder(decoder_config, self.shared)
 
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.attn_specific = config.ctx_attention_loss is not None
@@ -1118,34 +1180,24 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             encoder_outputs = self.encoder(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
+                input_ids_for_ctx=input_ids_for_ctx,
+                attention_mask_for_ctx=attention_mask_for_ctx,
                 inputs_embeds=inputs_embeds,
                 head_mask=head_mask,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-        elif return_dict and not isinstance(encoder_outputs, BaseModelOutput):
-            encoder_outputs = BaseModelOutput(
+        elif return_dict and not isinstance(encoder_outputs, BaseModelOutputWithPastAndCrossAttentionsWithTwoEncoder):
+            encoder_outputs = BaseModelOutputWithPastAndCrossAttentionsWithTwoEncoder(
                 last_hidden_state=encoder_outputs[0],
-                hidden_states=encoder_outputs[1] if len(encoder_outputs) > 1 else None,
-                attentions=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
+                last_hidden_state_for_ctx=encoder_outputs[1],
+                hidden_states=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
+                attentions=encoder_outputs[3] if len(encoder_outputs) > 3 else None,
             )
 
         hidden_states = encoder_outputs[0]
-
-        hidden_states_for_ctx = None
-        if input_ids_for_ctx is not None:  # encode the input for ctx
-            bs, n_ctxs = input_ids_for_ctx.shape[:2]
-            hidden_states_for_ctx = self.encoder(
-                input_ids=input_ids_for_ctx.flatten(0, 1),  # (batch_size * n_ctxs, seq_length_for_ctx)
-                attention_mask=attention_mask_for_ctx.flatten(0, 1),  # (batch_size * n_ctxs, seq_length_for_ctx)
-                inputs_embeds=None,
-                head_mask=head_mask,
-                output_attentions=None,
-                output_hidden_states=None,
-                return_dict=return_dict,
-            )[0]  # (batch_size * n_ctxs, seq_length_for_ctx, dim)
-            hidden_states_for_ctx = hidden_states_for_ctx.view(bs, n_ctxs, *hidden_states_for_ctx.shape[1:])
+        hidden_states_for_ctx = encoder_outputs[1]
 
         if self.model_parallel:
             torch.cuda.set_device(self.decoder.first_device)
@@ -1237,8 +1289,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             encoder_attentions=encoder_outputs.attentions,
             ctx_pred_dist=ctx_pred_dist,
             ctx_gold_dist=ctx_gold_dist,
-            ctx_attention_loss=ctx_attention_loss,
-        )
+            ctx_attention_loss=ctx_attention_loss)
 
     def prepare_inputs_for_generation(
         self,

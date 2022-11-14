@@ -168,8 +168,9 @@ class QuestionAnsweringSeq2SeqTrainer(Seq2SeqTrainer):
         gen_kwargs["synced_gpus"] = (
             gen_kwargs["synced_gpus"] if gen_kwargs.get("synced_gpus") is not None else default_synced_gpus
         )
-        gen_kwargs['decoder_start_token_id'] = self.data_collator.get_real_decoder_start_token_id()
-        
+        if gen_kwargs.get('decoder_start_token_id') is None:
+            gen_kwargs['decoder_start_token_id'] = self.data_collator.get_real_decoder_start_token_id()
+    
         generation_inputs = dict(inputs)
         for key in ['labels', 'decoder_input_ids', 'decoder_attention_mask']:
             if key in generation_inputs:

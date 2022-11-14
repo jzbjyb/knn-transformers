@@ -309,7 +309,7 @@ class DataCollatorForFusion:
         if self.use_context:
             batch['decoder_ctx_input_ids'] = decoder_ctx_input_ids
             batch['decoder_ctx_attention_mask'] = decoder_ctx_attention_mask
-        if self.encoder_input_for_context and self._train:  # TODO: add inference support
+        if self.encoder_input_for_context:
             batch['input_ids_for_ctx'] = input_ids_for_ctx
             batch['attention_mask_for_ctx'] = attention_mask_for_ctx
         
@@ -552,6 +552,10 @@ def main():
         context_bos=data_args.context_bos,
         answer_bos=data_args.answer_bos,
         encoder_input_for_context=data_args.encoder_input_for_context)
+    gen_kwargs = {
+        'max_length': data_args.max_answer_len, 
+        'num_beams': 1, 
+        'decoder_start_token_id': collator.get_real_decoder_start_token_id()}
 
     # Initialize our Trainer
     trainer = QuestionAnsweringSeq2SeqTrainer(
@@ -612,27 +616,35 @@ def main():
         for step, batch in tqdm(enumerate(dataloader)):
             batch = trainer._prepare_inputs(batch)
             with torch.no_grad():
-                outputs = model(**batch)
-            # gather
-            ctx_pred_dist = outputs.ctx_pred_dist
-            ctx_pred_dist = trainer._pad_across_processes(ctx_pred_dist)
-            ctx_pred_dist = trainer._nested_gather(ctx_pred_dist)
+                if training_args.do_eval_rerank:
+                    eval_outputs = model(**batch)
+                if False:  # TODO: fine-grained generation?
+                    gen_batch = dict(batch)
+                    for key in ['labels', 'decoder_input_ids', 'decoder_attention_mask']:
+                        if key in gen_batch:
+                            del gen_batch[key]
+                    gen_outputs = model.generate(**gen_batch, **gen_kwargs)
             
-            ranks = torch.sort(ctx_pred_dist, descending=True, dim=-1).indices
-            top1_accs = ranks[:, 0].eq(0).float()
-            accuracies.append(top1_accs)
+            if training_args.do_eval_rerank:
+                # gather
+                ctx_pred_dist = eval_outputs.ctx_pred_dist
+                ctx_pred_dist = trainer._pad_across_processes(ctx_pred_dist)
+                ctx_pred_dist = trainer._nested_gather(ctx_pred_dist)
+                # rank
+                ranks = torch.sort(ctx_pred_dist, descending=True, dim=-1).indices
+                top1_accs = ranks[:, 0].eq(0).float()
+                accuracies.append(top1_accs)
 
         if trainer.is_world_process_zero():
-            acc = torch.cat(accuracies).mean()
-            print(f'#examples {len(accuracies)}, accuracy: {acc}')
+            if training_args.do_eval_rerank:
+                acc = torch.cat(accuracies).mean()
+                print(f'#examples {len(accuracies)}, accuracy: {acc}')
+
         exit()
 
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
-        metrics = trainer.evaluate(
-            max_length=data_args.max_answer_len, 
-            num_beams=1,
-            metric_key_prefix='eval')
+        metrics = trainer.evaluate(**gen_kwargs, metric_key_prefix='eval')
 
     if training_args.do_predict:
         logger.info("*** Predict ***")
