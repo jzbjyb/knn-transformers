@@ -184,6 +184,7 @@ class DataTrainingArguments:
     max_question_len: Optional[int] = field(default=128)
     max_context_len: Optional[int] = field(default=128)
     max_answer_len: Optional[int] = field(default=128)
+    generation_prefix_len: Optional[int] = field(default=0)
     question_prefix: Optional[str] = field(default='Definition: Given a question, generate a descriptive answer. Question: ')
     context_prefix: Optional[str] = field(default='Evidence: ')
     answer_prefix: Optional[str] = field(default='Answer: ')
@@ -205,7 +206,7 @@ class DataTrainingArguments:
 @dataclass
 class TrainingArgs(Seq2SeqTrainingArguments):
     extract_attention: bool = field(default=False)
-    do_eval_rerank: bool = field(default=False)
+    do_eval_rerank: str = field(default=None)
 
 
 @dataclass
@@ -229,11 +230,25 @@ class DataCollatorForFusion:
 
     def train(self):
         self._train = True
+    
+    @property
+    def all_tokens(self):
+        if hasattr(self, '_all_tokens'):
+            return self._all_tokens
+        self._all_tokens = list(self.tokenizer.get_vocab().values())
 
     def get_real_decoder_start_token_id(self):
         if not self.answer_bos:  # use the first token of the answer prefix to start generation if bos is not prepended to the answer
             return self.tokenizer.encode(self.answer_prefix)[0]
         return self.model.config.decoder_start_token_id
+    
+    def get_labels_from_decoder_input_ids(self, decoder_input_ids):
+        assert self.tokenizer.pad_token_id == 0
+        # remove the first token of answers (treated as generation trigger token) to make it labels
+        labels = torch.zeros_like(decoder_input_ids)
+        labels[..., :-1] = decoder_input_ids[..., 1:].clone()
+        labels.masked_fill_(labels == 0, -100)
+        return labels
 
     def __call__(
         self, 
@@ -294,11 +309,7 @@ class DataCollatorForFusion:
         decoder_input_ids = answers.input_ids  # (batch_size, seq_length)
         decoder_attention_mask = answers.attention_mask  # (batch_size, seq_length)
         # convert answers to labels
-        assert self.tokenizer.pad_token_id == 0
-        # remove the first token of answers (treated as generation trigger token) to make it labels
-        labels = torch.zeros_like(decoder_input_ids)
-        labels[..., :-1] = decoder_input_ids[..., 1:].clone()
-        labels.masked_fill_(labels == 0, -100)
+        labels = self.get_labels_from_decoder_input_ids(decoder_input_ids)
 
         batch = {
             'input_ids': input_ids,
@@ -310,9 +321,9 @@ class DataCollatorForFusion:
         if self.use_context:
             batch['decoder_ctx_input_ids'] = decoder_ctx_input_ids
             batch['decoder_ctx_attention_mask'] = decoder_ctx_attention_mask
-        if self.encoder_input_for_context:
-            batch['input_ids_for_ctx'] = input_ids_for_ctx
-            batch['attention_mask_for_ctx'] = attention_mask_for_ctx
+            if self.encoder_input_for_context:
+                batch['input_ids_for_ctx'] = input_ids_for_ctx
+                batch['attention_mask_for_ctx'] = attention_mask_for_ctx
         
         if debug:
             print(batch)
@@ -556,7 +567,9 @@ def main():
     gen_kwargs = {
         'max_length': data_args.max_answer_len, 
         'num_beams': 1, 
-        'decoder_start_token_id': collator.get_real_decoder_start_token_id()}
+        'decoder_start_token_id': collator.get_real_decoder_start_token_id(),
+        'prefix_len': data_args.generation_prefix_len,
+    }
 
     # Initialize our Trainer
     trainer = QuestionAnsweringSeq2SeqTrainer(
@@ -617,16 +630,31 @@ def main():
         for step, batch in tqdm(enumerate(dataloader)):
             batch = trainer._prepare_inputs(batch)
             with torch.no_grad():
-                if training_args.do_eval_rerank:
-                    eval_outputs = model(**batch)
-                if False:  # TODO: fine-grained generation?
+                if 'generate' in training_args.do_eval_rerank:
                     gen_batch = dict(batch)
-                    for key in ['labels', 'decoder_input_ids', 'decoder_attention_mask']:
+                    for key in ['labels', 'decoder_input_ids', 'decoder_attention_mask']:  # remove model inputs irrelevant to generation
                         if key in gen_batch:
                             del gen_batch[key]
-                    gen_outputs = model.generate(**gen_batch, **gen_kwargs)
-            
-            if training_args.do_eval_rerank:
+                    # prepare prefix function
+                    _gen_kwargs = dict(gen_kwargs)
+                    prefix_allowed_tokens_fn = None
+                    if 'prefix_len' in _gen_kwargs and _gen_kwargs['prefix_len']:
+                        prefix_ids = batch['labels'][:, :_gen_kwargs['prefix_len']]
+                        def prefix_allowed_tokens_fn(batch_id: int, gen_ids: torch.Tensor) -> List[int]:
+                            if gen_ids.shape[-1] > len(prefix_ids[batch_id]):
+                                return collator.all_tokens
+                            return prefix_ids[batch_id][gen_ids.shape[-1] - 1]
+                    if 'prefix_len' in _gen_kwargs:
+                        del _gen_kwargs['prefix_len']
+                    # generate and use generated outputs to overwrite inputs
+                    gen_outputs = model.generate(**gen_batch, **_gen_kwargs, prefix_allowed_tokens_fn=prefix_allowed_tokens_fn)
+                    batch['decoder_input_ids'] = gen_outputs
+                    batch['decoder_attention_mask'] = torch.ones_like(gen_outputs)        
+                    batch['labels'] = collator.get_labels_from_decoder_input_ids(gen_outputs)
+                if 'rerank' in training_args.do_eval_rerank:
+                    eval_outputs = model(**batch)
+
+            def rerank_acc(eval_outputs):
                 # gather
                 ctx_pred_dist = eval_outputs.ctx_pred_dist
                 ctx_pred_dist = trainer._pad_across_processes(ctx_pred_dist)
@@ -634,7 +662,10 @@ def main():
                 # rank
                 ranks = torch.sort(ctx_pred_dist, descending=True, dim=-1).indices
                 top1_accs = ranks[:, 0].eq(0).float()
-                accuracies.append(top1_accs)
+                return top1_accs
+
+            if training_args.do_eval_rerank:
+                accuracies.append(rerank_acc(eval_outputs))
 
         if trainer.is_world_process_zero():
             if training_args.do_eval_rerank:

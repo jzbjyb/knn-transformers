@@ -28,10 +28,10 @@ data=bm25
 model=$1  # model to test
 need_model_args=$2  # specify model args or not
 
-# original models
+# -- original models --
 # google/t5-xl-lm-adapt
 # google/t5-small-lm-adapt
-# finetuned models
+# -- finetuned models --
 # checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn_singlebos
 
 # ------------- data -------------
@@ -58,14 +58,20 @@ fi
 # ------------- hyperparameters -------------
 max_question_len=128
 max_context_len=32
+generation_prefix_len=0
 use_context=true
 context_bos=true
 answer_bos=true
 
 if [[ ${setting} == "rerank" ]]; then
     max_answer_len=12
-    setting_extra="--do_eval_rerank"
+    setting_extra="--do_eval_rerank rerank"
+elif [[ ${setting} == "generate_rerank" ]]; then
+    generation_prefix_len=4
+    max_answer_len=12
+    setting_extra="--do_eval_rerank generate_rerank"
 elif [[ ${setting} == "generate" ]]; then
+    generation_prefix_len=8
     max_answer_len=128
     ctx_topk=1
     setting_extra="--ctx_topk ${ctx_topk}"
@@ -100,6 +106,7 @@ deepspeed train.py \
     --max_question_len ${max_question_len} \
     --max_context_len ${max_context_len} \
     --max_answer_len ${max_answer_len} \
+    --generation_prefix_len ${generation_prefix_len} \
     --use_context ${use_context} \
     --context_bos ${context_bos} \
     --answer_bos ${answer_bos} \
@@ -107,6 +114,6 @@ deepspeed train.py \
     --per_device_eval_batch_size 1 \
     --max_eval_samples 1000 \
     --predict_with_generate \
-    --dataloader_num_workers 0 \
+    --dataloader_num_workers 4 \
     --report_to none \
     ${model_args} ${setting_extra}

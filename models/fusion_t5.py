@@ -159,11 +159,7 @@ class FusionT5Attention(T5Attention):
         """
         Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
         """
-        assert (past_key_value is None) == (ctx_past_key_value is None), 'both past_key_value and ctx_past_key_value should be non-None in generation'
         assert query_length is None and key_value_states is None, f'query_length and key_value_states are only used in cross-attention which {self.__class__} do not handle cross-attention'
-        in_generation = not self.training and use_cache and hidden_states.size(1) == 1  # do not set use_cache=True for loss evaluation # TODO: disable use_cache for loss evaluation
-        if in_generation:
-            gen_step = 0 if past_key_value is None else past_key_value[0].size(2)  # zero-based
 
         if ctx_hidden_states is None and ctx_past_key_value is None:  # no ctx, run original attn
             attention_output = super().forward(
@@ -176,9 +172,13 @@ class FusionT5Attention(T5Attention):
                 query_length=query_length,
                 use_cache=use_cache,
                 output_attentions=output_attentions)
-            attention_output = ((attention_output[0], None), (attention_output[1], None)) + attention_output[2:]
+            attention_output = ((attention_output[0], None), ((None,) + attention_output[1], None)) + attention_output[2:]
             return attention_output
         
+        assert (past_key_value is None) == (ctx_past_key_value is None), 'both past_key_value and ctx_past_key_value should be non-None in generation'
+        in_generation = not self.training and use_cache and hidden_states.size(1) == 1  # do not set use_cache=True for loss evaluation # TODO: disable use_cache for loss evaluation
+        if in_generation:
+            gen_step = 0 if past_key_value is None else past_key_value[-1].size(2)  # zero-based
         batch_size = hidden_states.size(0)
 
         if ctx_past_key_value is None:  # encode ctxs
@@ -345,6 +345,8 @@ class FusionT5Attention(T5Attention):
                 if self.ctx_topk:  # choose topk ctxs with the highest scores
                     if self.ctx_topk == -1:  # special case: use the first one which is probably the positive ctx
                         ctx_indices = torch.zeros(batch_size, 1).long().to(ctx_scores_for_loss.device)
+                    elif self.ctx_topk == -2:  # special case: use a random ctx
+                        ctx_indices = torch.randint(0, dist1.size(-1), (batch_size, 1)).to(ctx_scores_for_loss.device)
                     else:
                         ctx_indices = torch.topk(dist1, min(self.ctx_topk, dist1.size(-1)), dim=-1).indices
                     ctx_past_key_value = ctx_past_key_value + (ctx_indices,)
@@ -614,7 +616,7 @@ class FusionT5Block(T5Block):
         if do_cross_attention:
             # the actual query length is unknown for cross attention if using past key value states
             # TODO: is it a bug to use present_key_value_state instead of self_attn_past_key_value to get query_length?
-            query_length = None if present_key_value_state is None else present_key_value_state[0].shape[2]
+            query_length = None if present_key_value_state is None else present_key_value_state[-1].shape[2]
             cross_attention_outputs = self.layer[1](
                 hidden_states,
                 key_value_states=encoder_hidden_states,
@@ -764,7 +766,8 @@ class FusionT5Decoder(T5Stack):
             ctx_inputs_embeds = self.embed_tokens(ctx_input_ids)
 
         # required mask seq length can be calculated via length of past
-        mask_seq_length = past_key_values[0][0][0].shape[2] + seq_length if past_key_values is not None else seq_length
+        # 1 refers to key of (query-key-value) triplets
+        mask_seq_length = past_key_values[0][0][1].shape[2] + seq_length if past_key_values is not None else seq_length
 
         if use_cache is True:
             assert self.is_decoder, f"`use_cache` can only be set to `True` if {self} is used as a decoder"
@@ -962,7 +965,7 @@ class FusionT5Decoder(T5Stack):
             if not use_cache:
                 return present_key_value_states
             ctx_pkv = present_key_value_states[self.loss_layer][1]
-            if len(ctx_pkv) != 3:
+            if ctx_pkv is None or len(ctx_pkv) != 3:
                 return present_key_value_states
             indices = ctx_pkv[2]
             return tuple((pkv, ctx_pkv + ((indices,) if len(ctx_pkv) != 3 else ())) for pkv, ctx_pkv in present_key_value_states)
@@ -1232,7 +1235,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             )
 
         hidden_states = encoder_outputs[0]
-        hidden_states_for_ctx = encoder_outputs[1]
+        hidden_states_for_ctx = encoder_outputs[1] if len(encoder_outputs) > 1 else None
 
         if self.model_parallel:
             torch.cuda.set_device(self.decoder.first_device)
@@ -1301,7 +1304,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
             # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
             
-            if self.attn_specific:
+            if decoder_ctx_input_ids is not None and self.attn_specific:
                 attn_dists = decoder_outputs.attentions[self.loss_layer]
                 ctx_pred_dist, ctx_gold_dist = attn_dists[0], attn_dists[1]
                 kldiv = torch.nn.KLDivLoss(reduction='batchmean')

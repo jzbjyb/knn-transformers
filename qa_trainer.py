@@ -175,8 +175,19 @@ class QuestionAnsweringSeq2SeqTrainer(Seq2SeqTrainer):
         for key in ['labels', 'decoder_input_ids', 'decoder_attention_mask']:
             if key in generation_inputs:
                 del generation_inputs[key]
-        
-        generated_tokens = self.model.generate(**generation_inputs, **gen_kwargs)
+
+        # add prefix function
+        prefix_allowed_tokens_fn = None
+        if 'prefix_len' in gen_kwargs and gen_kwargs['prefix_len']:
+            prefix_ids = inputs['labels'][:, :gen_kwargs['prefix_len']]
+            def prefix_allowed_tokens_fn(batch_id: int, gen_ids: torch.Tensor) -> List[int]:
+                if gen_ids.shape[-1] > len(prefix_ids[batch_id]):
+                    return self.data_collator.all_tokens
+                return prefix_ids[batch_id][gen_ids.shape[-1] - 1]
+        if 'prefix_len' in gen_kwargs:
+            del gen_kwargs['prefix_len']
+
+        generated_tokens = self.model.generate(**generation_inputs, **gen_kwargs, prefix_allowed_tokens_fn=prefix_allowed_tokens_fn)
 
         # in case the batch is shorter than max length, the output should be padded
         if gen_kwargs.get("max_length") is not None and generated_tokens.shape[-1] < gen_kwargs["max_length"]:
