@@ -31,8 +31,8 @@ debug=false
 train_file=data/wow/train_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 
-output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn_singlebos
-#output_dir=checkpoints/models/t53b_wow_ctx32_bm25_sepcrossattn_singlebos
+#output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn_singlebos
+output_dir=checkpoints/models/t53b_wow_ctx32_bm25_sepcrossattn_singlebos_onlyblock8
 
 init_model=google/t5-xl-lm-adapt
 depth=10
@@ -41,14 +41,14 @@ use_context=true
 context_bos=true
 answer_bos=true
 bos_attention=single
-ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
+ctx_attention_loss="block:8_layer:-1_head:0_loss:hard_alpha:4"
 
 eval_steps=100
 max_eval_samples=1000
 
 if [[ ${debug} == "small" ]]; then
     init_model=google/t5-small-lm-adapt
-    ctx_attention_loss="block:8-layer:0-head:0-loss:hard-alpha:4"
+    ctx_attention_loss="block:8_layer:-1_head:0_loss:hard_alpha:4"
     output_dir=checkpoints/models/test
     rm -r ${output_dir}
     eval_steps=5

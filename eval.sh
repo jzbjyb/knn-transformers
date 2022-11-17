@@ -62,6 +62,7 @@ generation_prefix_len=0
 use_context=true
 context_bos=true
 answer_bos=true
+max_eval_samples=1000
 
 if [[ ${setting} == "rerank" ]]; then
     max_answer_len=12
@@ -81,7 +82,7 @@ fi
 
 if [[ ${need_model_args} == "true" ]]; then  # use additional model args for public pretrained models
     bos_attention=single
-    ctx_attention_loss="block:8-layer:12-head:4-loss:hard-alpha:4"
+    ctx_attention_loss="block:8_layer:12_head:4_loss:hard_alpha:4"
     model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
 elif [[ ${need_model_args} == "false" ]]; then
     model_args=""
@@ -92,8 +93,9 @@ fi
 if [[ ${debug} == "small" ]]; then
     model=google/t5-small-lm-adapt
     bos_attention=single
-    ctx_attention_loss="block:8-layer:2-head:0-loss:hard-alpha:4"
+    ctx_attention_loss="block:8_layer:0_head:0_loss:hard_alpha:4"
     model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
+    max_eval_samples=4
 fi
 
 deepspeed train.py \
@@ -112,7 +114,7 @@ deepspeed train.py \
     --answer_bos ${answer_bos} \
     --do_eval \
     --per_device_eval_batch_size 1 \
-    --max_eval_samples 1000 \
+    --max_eval_samples ${max_eval_samples} \
     --predict_with_generate \
     --dataloader_num_workers 4 \
     --report_to none \

@@ -530,19 +530,40 @@ def main():
             return formatted
         def compute_metrics(output):
             predictions=output.predictions
-            references=[example['answers'][0] for example in output.label_ids]  # TODO: use all answers in metric
+            references=output.label_ids  # TODO: use all answers in metric
             metric_func = evaluate.load('rouge')
             metrics = metric_func.compute(predictions=predictions, references=references)
             return metrics
-        def post_processing_function(references, features, outputs, stage='eval', debug=False):
-            decoded_preds = tokenizer.batch_decode(outputs.predictions, skip_special_tokens=True)
-            formatted_predictions = [x.strip().lstrip(data_args.answer_prefix).strip() for x in decoded_preds]
+        def post_processing_function(
+            references, 
+            features, 
+            outputs, 
+            stage: str = 'eval',
+            debug: bool = False,
+            remove_decoding_prefix: bool = True):
+            decode_ids = outputs.predictions
+            gold_ids = outputs.label_ids
+            assert tokenizer.pad_token_id == 0
+            gold_ids[gold_ids == -100] = 0
+            skip_prefix = remove_decoding_prefix and data_args.generation_prefix_len > 0
+            if skip_prefix:
+                decode_ids = decode_ids[:, 1 + data_args.generation_prefix_len:]  # skip bos + prefix
+                gold_ids = gold_ids[:, data_args.generation_prefix_len:]  # skip prefix
+            decoded_preds = tokenizer.batch_decode(decode_ids, skip_special_tokens=True)
+            gold_preds = tokenizer.batch_decode(gold_ids, skip_special_tokens=True)
+            if skip_prefix:
+                decoded_preds = [x.strip() for x in decoded_preds]
+                gold_preds = [x.strip() for x in gold_preds]
+            else:
+                decoded_preds = [x.strip().lstrip(data_args.answer_prefix).strip() for x in decoded_preds]
+                gold_preds = [x.strip().lstrip(data_args.answer_prefix).strip() for x in gold_preds]
             if debug:
                 print(outputs.predictions[:2])
                 print(decoded_preds[:2])
-                print([example['answers'][0] for example in references[:2]])
+                print(outputs.label_ids[:2])
+                print(gold_preds[:2])
                 input()
-            return EvalPrediction(predictions=formatted_predictions, label_ids=references)
+            return EvalPrediction(predictions=decoded_preds, label_ids=gold_preds)
     else:
         raise ValueError
 
@@ -677,7 +698,9 @@ def main():
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
         metrics = trainer.evaluate(**gen_kwargs, metric_key_prefix='eval')
-        print(f'#examples {len(validation_dataset)}, metric: {metrics}')
+        print(f'#examples {len(validation_dataset)}, metric:')
+        print('\t'.join(metrics.keys()))
+        print('\t'.join(map(str, metrics.values())))
 
     if training_args.do_predict:
         logger.info("*** Predict ***")

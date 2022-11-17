@@ -86,7 +86,7 @@ class FusionT5Config(T5Config):
     def parse_ctx_attention_loss(ctx_attention_loss: str = None):  # 'block:8-layer:0-head:9-loss:hard-alpha:8'
         if ctx_attention_loss is None:
             return None
-        parsed = dict(tuple(field.split(':')) for field in ctx_attention_loss.strip().split('-'))
+        parsed = dict(tuple(field.split(':')) for field in ctx_attention_loss.strip().split('_'))
         parsed = {k: (int(v) if k not in {'loss'} else v) for k, v in parsed.items()}
         return parsed
 
@@ -689,6 +689,7 @@ class FusionT5Decoder(T5Stack):
         self.attn_specific = config.ctx_attention_loss is not None
         if self.attn_specific:
             self.loss_layer = config.ctx_attention_loss['layer']
+            self.has_loss = self.loss_layer >= 0
         # Initialize weights and apply final processing
         # TODO: any issue when executed twice?
         self.post_init()
@@ -964,6 +965,8 @@ class FusionT5Decoder(T5Stack):
         def broadcast_ctx_indices(present_key_value_states):
             if not use_cache:
                 return present_key_value_states
+            if not self.attn_specific or not self.has_loss:
+                return present_key_value_states
             ctx_pkv = present_key_value_states[self.loss_layer][1]
             if ctx_pkv is None or len(ctx_pkv) != 3:
                 return present_key_value_states
@@ -1095,6 +1098,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         if self.attn_specific:
             self.loss_alpha = config.ctx_attention_loss['alpha']
             self.loss_layer = config.ctx_attention_loss['layer']
+            self.has_loss = self.loss_layer >= 0
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1304,7 +1308,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
             # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
             
-            if decoder_ctx_input_ids is not None and self.attn_specific:
+            if decoder_ctx_input_ids is not None and self.attn_specific and self.has_loss:
                 attn_dists = decoder_outputs.attentions[self.loss_layer]
                 ctx_pred_dist, ctx_gold_dist = attn_dists[0], attn_dists[1]
                 kldiv = torch.nn.KLDivLoss(reduction='batchmean')
