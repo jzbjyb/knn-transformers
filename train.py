@@ -677,12 +677,12 @@ def main():
 
             def rerank_acc(eval_outputs):
                 # gather
-                ctx_pred_dist = eval_outputs.ctx_pred_dist
-                ctx_pred_dist = trainer._pad_across_processes(ctx_pred_dist)
-                ctx_pred_dist = trainer._nested_gather(ctx_pred_dist)
+                ctx_pred_scores = eval_outputs.ctx_pred_scores
+                ctx_pred_scores = trainer._pad_across_processes(ctx_pred_scores, pad_index=-1e10)  # (batch_size, n_ctx, n_used_layers, n_used_heads)
+                ctx_pred_scores = trainer._nested_gather(ctx_pred_scores)  # (gathered_batch_size, n_ctx, n_used_layers, n_used_heads)
                 # rank
-                ranks = torch.sort(ctx_pred_dist, descending=True, dim=-1).indices
-                top1_accs = ranks[:, 0].eq(0).float()
+                ranks = torch.sort(ctx_pred_scores, descending=True, dim=1).indices  # (gathered_batch_size, n_ctx, n_used_layers, n_used_heads)
+                top1_accs = ranks[:, 0, ...].eq(0).float()  # (gathered_batch_size, n_used_layers, n_used_heads)
                 return top1_accs
 
             if training_args.do_eval_rerank:
@@ -690,7 +690,8 @@ def main():
 
         if trainer.is_world_process_zero():
             if training_args.do_eval_rerank:
-                acc = torch.cat(accuracies).mean()
+                accuracies = torch.cat(accuracies, 0)  # (num_examples, n_used_layers, n_used_heads)
+                acc = accuracies.mean(0)  # (n_used_layers, n_used_heads)
                 print(f'#examples {len(accuracies)}, accuracy: {acc}')
 
         exit()

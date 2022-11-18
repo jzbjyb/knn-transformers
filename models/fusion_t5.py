@@ -18,6 +18,7 @@
 import copy
 import warnings
 from typing import Optional, Tuple, Union, List, Dict, Any
+from operator import itemgetter
 
 import torch
 from torch import nn
@@ -72,8 +73,10 @@ class FusionT5Config(T5Config):
         super().__init__(**kwargs)
         self.ctx_attention_loss = ctx_attention_loss
         if ctx_attention_loss is not None:
-            assert ctx_attention_loss['layer'] < self.num_decoder_layers
-            assert ctx_attention_loss['head'] < self.num_heads
+            for layer, heads in ctx_attention_loss['layer2heads'].items():
+                assert layer < self.num_decoder_layers
+                for head in heads:
+                    assert head < self.num_heads
         self.bos_attention = bos_attention
         assert bos_attention in {'double', 'single', None}
         # how tokens in the target should attend to bos (assume the first token of ctx and target is always bos)
@@ -83,11 +86,14 @@ class FusionT5Config(T5Config):
         self.ctx_topk = ctx_topk
 
     @staticmethod
-    def parse_ctx_attention_loss(ctx_attention_loss: str = None):  # 'block:8-layer:0-head:9-loss:hard-alpha:8'
+    def parse_ctx_attention_loss(ctx_attention_loss: str = None):  # 'block:8_layer2heads:0,9|12,4_loss:hard_alpha:8'
         if ctx_attention_loss is None:
             return None
         parsed = dict(tuple(field.split(':')) for field in ctx_attention_loss.strip().split('_'))
-        parsed = {k: (int(v) if k not in {'loss'} else v) for k, v in parsed.items()}
+        parsed['layer2heads'] = [tuple(lh.split(',')) for lh in parsed['layer2heads'].split('|') if lh.strip()]
+        parsed['layer2heads'] = {int(lh[0]): eval(lh[1]) for lh in parsed['layer2heads']}
+        parsed['block'] = int(parsed['block'])
+        parsed['alpha'] = float(parsed['alpha'])
         return parsed
 
 class FusionT5Attention(T5Attention):
@@ -98,13 +104,13 @@ class FusionT5Attention(T5Attention):
         layer_index: int = -1):
         super().__init__(config, has_relative_attention_bias=has_relative_attention_bias)
         self.bos_attention = config.bos_attention
-        self.ctx_topk = config.ctx_topk
         self.attn_specific = config.ctx_attention_loss is not None
-        self.is_loss_layer = self.attn_specific and config.ctx_attention_loss['layer'] == layer_index
         if self.attn_specific:
             self.block_size = config.ctx_attention_loss['block']
-            self.use_head = config.ctx_attention_loss['head']
-            self.loss_type = config.ctx_attention_loss['loss']
+            layer2heads = config.ctx_attention_loss['layer2heads']
+            self.is_loss_layer = layer_index in layer2heads
+            if self.is_loss_layer:
+                self.use_heads = layer2heads[layer_index]
 
     def add_position_bias(
         self, 
@@ -177,8 +183,7 @@ class FusionT5Attention(T5Attention):
         
         assert (past_key_value is None) == (ctx_past_key_value is None), 'both past_key_value and ctx_past_key_value should be non-None in generation'
         in_generation = not self.training and use_cache and hidden_states.size(1) == 1  # do not set use_cache=True for loss evaluation # TODO: disable use_cache for loss evaluation
-        if in_generation:
-            gen_step = 0 if past_key_value is None else past_key_value[-1].size(2)  # zero-based
+        gen_step = (0 if past_key_value is None else past_key_value[-1].size(2)) if in_generation else -1  # zero-based
         batch_size = hidden_states.size(0)
 
         if ctx_past_key_value is None:  # encode ctxs
@@ -313,7 +318,7 @@ class FusionT5Attention(T5Attention):
 
         ctx_scores = compute_ctx_scores(query_states)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
 
-        attn_dists = None
+        ctx_attn_scores = None
         if self.attn_specific:
             offset = 1 if self.bos_attention == 'single' else 0  # skip bos of targets in computing first_block_attention
 
@@ -324,33 +329,18 @@ class FusionT5Attention(T5Attention):
                 else:
                     ctx_scores_for_loss = ctx_scores
 
-                block1_attn = ctx_scores_for_loss[:, self.use_head, offset:offset + self.block_size]  # (batch_size, first_block_size, n_ctxs, ctx_seq_length)
-                # since mask is autoregressive, the last position (i.e., -1) has the complete mask
+                block1_attn = ctx_scores_for_loss[:, self.use_heads, offset:offset + self.block_size]  # (batch_size, n_used_heads, first_block_size, n_ctxs, ctx_seq_length)
+                # since mask is autoregressive, the last position (i.e., -1) has the complete mask TODO: assume different heads use the same mask
                 block1_mask = mask[:, 0, -1, offset:offset + self.block_size].eq(0).to(block1_attn)  # (batch_size, first_block_size)
 
-                block2_attn = ctx_scores_for_loss[:, self.use_head, offset + self.block_size:]  # (batch_size, second_block_size, n_ctxs, ctx_seq_length)
+                block2_attn = ctx_scores_for_loss[:, self.use_heads, offset + self.block_size:]  # (batch_size, n_used_heads, second_block_size, n_ctxs, ctx_seq_length)
                 block2_mask = mask[:, 0, -1, offset + self.block_size:].eq(0).to(block2_attn)  # (batch_size, second_block_size)
 
-                dist1 = (block1_attn.max(-1).values * block1_mask.unsqueeze(-1)).mean(1).log_softmax(-1)  # (batch_size, n_ctxs)
-                if self.loss_type == 'soft':
-                    dist2 = (block2_attn.max(-1).values * block2_mask.unsqueeze(-1)).mean(1).softmax(-1)  # (batch_size, n_ctxs)
-                elif self.loss_type == 'hard':
-                    dist2 = torch.zeros_like(dist1)  # (batch_size, n_ctxs)
-                    dist2[:, 0] = 1.0
-                else:
-                    raise NotImplementedError
-
-                attn_dists = torch.stack([dist1, dist2], 0)  # (2, batch_size, n_ctxs)
-
-                if self.ctx_topk:  # choose topk ctxs with the highest scores
-                    if self.ctx_topk == -1:  # special case: use the first one which is probably the positive ctx
-                        ctx_indices = torch.zeros(batch_size, 1).long().to(ctx_scores_for_loss.device)
-                    elif self.ctx_topk == -2:  # special case: use a random ctx
-                        ctx_indices = torch.randint(0, dist1.size(-1), (batch_size, 1)).to(ctx_scores_for_loss.device)
-                    else:
-                        ctx_indices = torch.topk(dist1, min(self.ctx_topk, dist1.size(-1)), dim=-1).indices
-                    ctx_past_key_value = ctx_past_key_value + (ctx_indices,)
-                    assert len(ctx_past_key_value) == 3
+                attn1 = (block1_attn.max(-1).values * block1_mask.unsqueeze(1).unsqueeze(-1))  # (batch_size, n_used_heads, first_block_size, n_ctxs)
+                attn2 = (block2_attn.max(-1).values * block2_mask.unsqueeze(1).unsqueeze(-1))  # (batch_size, n_used_heads, second_block_size, n_ctxs)
+                ctx_attn_scores = torch.cat([
+                    attn1.permute(0, 3, 1, 2).contiguous(), 
+                    attn2.permute(0, 3, 1, 2).contiguous()], -1)  # (batch_size, n_ctxs, n_used_heads, first_block_size + second_block_size)
 
             # skip the first block
             block_mask = ctx_all_mask.eq(0)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length) all ctx tokens are True
@@ -388,8 +378,8 @@ class FusionT5Attention(T5Attention):
         outputs = ((attn_output, ctx_hidden_states),) + ((present_key_value_state, ctx_past_key_value),) + (position_bias,)
 
         if output_attentions:
-            if attn_dists is not None:
-                cat_attn_weights = attn_dists  # avoid checkpoint bug TODO: better workaround?
+            if ctx_attn_scores is not None:
+                cat_attn_weights = ctx_attn_scores  # avoid checkpoint bug TODO: better workaround?
             outputs = outputs + (cat_attn_weights,)
         return outputs
 
@@ -686,14 +676,10 @@ class FusionT5Decoder(T5Stack):
         rab = self.block[0].layer[0].SelfAttention.relative_attention_bias
         for block in self.block:  # copy relative_attention_bias to all layers to enable on-the-fly computation of position_bias 
             block.layer[0].SelfAttention.relative_attention_bias = rab
-        self.attn_specific = config.ctx_attention_loss is not None
-        if self.attn_specific:
-            self.loss_layer = config.ctx_attention_loss['layer']
-            self.has_loss = self.loss_layer >= 0
         # Initialize weights and apply final processing
         # TODO: any issue when executed twice?
         self.post_init()
-    
+
     def _copy_relative_attention_bias(self):
         if hasattr(self, '_copied') and self._copied:
             return
@@ -961,19 +947,6 @@ class FusionT5Decoder(T5Stack):
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
-        # If ctx_past_key_value contains indices, broadcast in to all layers
-        def broadcast_ctx_indices(present_key_value_states):
-            if not use_cache:
-                return present_key_value_states
-            if not self.attn_specific or not self.has_loss:
-                return present_key_value_states
-            ctx_pkv = present_key_value_states[self.loss_layer][1]
-            if ctx_pkv is None or len(ctx_pkv) != 3:
-                return present_key_value_states
-            indices = ctx_pkv[2]
-            return tuple((pkv, ctx_pkv + ((indices,) if len(ctx_pkv) != 3 else ())) for pkv, ctx_pkv in present_key_value_states)
-        present_key_value_states = broadcast_ctx_indices(present_key_value_states)
-
         if not return_dict:
             return tuple(
                 v
@@ -1060,8 +1033,8 @@ class FusionT5Encoder(T5Stack):
 class FusionSeq2SeqLMOutput(Seq2SeqLMOutput):
     ctx_attention_loss: Optional[torch.FloatTensor] = None
     rerank_accuracy: Optional[torch.FloatTensor] = None
-    ctx_pred_dist: Optional[torch.FloatTensor] = None
-    ctx_gold_dist: Optional[torch.FloatTensor] = None
+    ctx_pred_scores: Optional[torch.FloatTensor] = None
+    ctx_gold_scores: Optional[torch.FloatTensor] = None
 
 
 @add_start_docstrings("""T5 Model with a `language modeling` head on top.""", T5_START_DOCSTRING)
@@ -1094,11 +1067,33 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         self.decoder = FusionT5Decoder(decoder_config, self.shared)
 
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-        self.attn_specific = config.ctx_attention_loss is not None
-        if self.attn_specific:
+        self.has_ret_heads = config.ctx_attention_loss is not None and len(config.ctx_attention_loss['layer2heads']) > 0
+        if self.has_ret_heads:
+            self.block_size = config.ctx_attention_loss['block']
+            self.ret_layers = sorted(config.ctx_attention_loss['layer2heads'].keys())
+            self.num_ret_layers = len(self.ret_layers)
+            self.num_ret_heads = len(list(config.ctx_attention_loss['layer2heads'].values())[0])
+            for heads in config.ctx_attention_loss['layer2heads'].values():
+                assert len(heads) == self.num_ret_heads, 'the number of heads used to perform retrieval should be equal across layers'
             self.loss_alpha = config.ctx_attention_loss['alpha']
-            self.loss_layer = config.ctx_attention_loss['layer']
-            self.has_loss = self.loss_layer >= 0
+            self.loss_type = config.ctx_attention_loss['loss']
+            self.token_agg = config.ctx_attention_loss['tokenagg'] if 'tokenagg' in config.ctx_attention_loss else 'mean'
+            self.layerhead_agg = config.ctx_attention_loss['layerheadagg'] if 'layerheadagg' in config.ctx_attention_loss else 'mean'
+            self.layerhead_tau = float(config.ctx_attention_loss['layerheadtau']) if 'layerheadtau' in config.ctx_attention_loss else 1.0
+            nl, nh = self.num_ret_layers, self.num_ret_heads
+            if 'weight' in self.layerhead_agg:
+                self.layerhead_weight = torch.nn.Parameter(torch.ones(nl, nh), requires_grad=True)
+                self.layerhead_bias = torch.nn.Parameter(torch.zeros(nl, nh), requires_grad=True)
+                self.combine_layerhead = lambda scores: (scores + self.layerhead_bias[None, None, :, :, None]) * self.layerhead_weight[None, None, :, :, None]
+            elif 'softmax' in self.layerhead_agg:
+                self.layerhead_weight = torch.nn.Parameter(torch.zeros(nl, nh), requires_grad=True)
+                def combine_layerhead(scores):
+                    w = torch.softmax(self.layerhead_weight.view(-1) / self.layerhead_tau, -1).view(self.num_ret_layers, self.num_ret_heads)
+                    return scores * w[None, None, :, :, None] * nl * nh
+                self.combine_layerhead = combine_layerhead
+
+        self.bos_attention = config.bos_attention
+        self.ctx_topk = config.ctx_topk
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1287,6 +1282,52 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             return_dict=return_dict,
         )
 
+        in_generation = not self.training and use_cache and decoder_input_ids.size(1) == 1  # do not set use_cache=True for loss evaluation # TODO: disable use_cache for loss evaluation
+        gen_step = (0 if past_key_values is None else past_key_values[0][0][1].size(2)) if in_generation else -1  # zero-based
+        offset = 1 if self.bos_attention == 'single' else 0  # skip bos of targets
+        handle_ret = (decoder_ctx_input_ids is not None and self.has_ret_heads) and (not in_generation or gen_step == offset + self.block_size - 1)
+
+        ctx_pred_scores = ctx_gold_scores = None
+        if handle_ret:  # handle retrieval attention
+            ctx_attn_scores = torch.stack([decoder_outputs.attentions[layer] for layer in self.ret_layers], 2)  # (batch_size, n_ctxs, n_used_layers, n_used_heads, first_block_size + second_block_size)
+            ctx_pred_scores = ctx_attn_scores[..., :self.block_size]  # (batch_size, n_ctxs, n_used_layers, n_used_heads, first_block_size)
+            ctx_gold_scores = ctx_attn_scores[..., self.block_size:]  # (batch_size, n_ctxs, n_used_layers, n_used_heads, second_block_size)
+
+            # aggregate layers and heads
+            if 'weight' in self.layerhead_agg or 'softmax' in self.layerhead_agg:
+                ctx_pred_scores = self.combine_layerhead(ctx_pred_scores)
+
+            if 'mean' in self.layerhead_agg:
+                ctx_pred_scores = ctx_pred_scores.mean([2, 3])  # (batch_size, n_ctxs, first_block_size)
+                ctx_gold_scores = ctx_gold_scores.mean([2, 3])  # (batch_size, n_ctxs, second_block_size)
+            elif 'max' in self.layerhead_agg:
+                ctx_pred_scores = ctx_pred_scores.amax([2, 3])  # (batch_size, n_ctxs, first_block_size)
+                ctx_gold_scores = ctx_gold_scores.amax([2, 3])  # (batch_size, n_ctxs, second_block_size)
+            elif 'none' in self.layerhead_agg:
+                pass
+            else:
+                raise NotImplementedError
+
+            # aggregate tokens
+            if self.token_agg == 'mean':
+                ctx_pred_scores = ctx_pred_scores.mean(-1)  # (batch_size, n_ctxs) or (batch_size, n_ctxs, n_used_layers, n_used_heads)
+                ctx_gold_scores = ctx_gold_scores.mean(-1)  # (batch_size, n_ctxs) or (batch_size, n_ctxs, n_used_layers, n_used_heads)
+            else:
+                raise NotImplementedError
+
+            if self.ctx_topk:  # choose topk ctxs with the highest scores TODO: add ctx_topk in training?
+                assert self.layerhead_agg is not 'none'
+                batch_size, n_ctxs = ctx_pred_scores.size()
+                device = ctx_pred_scores.device
+                if self.ctx_topk == -1:  # special case: use the first one which is probably the positive ctx
+                    ctx_indices = torch.zeros(batch_size, 1).long().to(device)
+                elif self.ctx_topk == -2:  # special case: use a random ctx
+                    ctx_indices = torch.randint(0, n_ctxs, (batch_size, 1)).to(device)
+                else:
+                    ctx_indices = torch.topk(ctx_pred_scores, min(self.ctx_topk, n_ctxs), dim=-1).indices
+                if use_cache:  # past ctx_indices to next generation step through past_key_values
+                    decoder_outputs.past_key_values = tuple((l[0], l[1] + (ctx_indices,)) for l in decoder_outputs.past_key_values)
+
         sequence_output = decoder_outputs[0]
 
         # Set device for model parallelism
@@ -1302,23 +1343,33 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
         lm_logits = self.lm_head(sequence_output)
 
-        loss = ctx_pred_dist = ctx_gold_dist = ctx_attention_loss = None
+        loss = ctx_attention_loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss(ignore_index=-100)
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
             # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
             
-            if decoder_ctx_input_ids is not None and self.attn_specific and self.has_loss:
-                attn_dists = decoder_outputs.attentions[self.loss_layer]
-                ctx_pred_dist, ctx_gold_dist = attn_dists[0], attn_dists[1]
+            if handle_ret:  # compute loss
+                ctx_pred_logprob = ctx_pred_scores.log_softmax(-1)
+                ctx_gold_prob = ctx_gold_scores.softmax(-1)
+                if self.loss_type == 'hard':
+                    ctx_gold_prob = torch.zeros_like(ctx_pred_logprob).to(ctx_pred_logprob.device)
+                    ctx_gold_prob[:, 0] = 1.0
+                elif self.loss_type == 'soft':
+                    pass
+                else:
+                    raise NotImplementedError
                 kldiv = torch.nn.KLDivLoss(reduction='batchmean')
-                ctx_attention_loss = kldiv(ctx_pred_dist, ctx_gold_dist.detach())
+                ctx_attention_loss = kldiv(ctx_pred_logprob, ctx_gold_prob.detach())
                 loss = loss + self.loss_alpha * ctx_attention_loss
 
         if not return_dict:
             output = (lm_logits,) + decoder_outputs[1:] + encoder_outputs
             return ((loss,) + output) if loss is not None else output
 
+        if ctx_pred_scores is not None and ctx_pred_scores.dim() == 2:  # dummy dimension of layer and head
+            ctx_pred_scores = ctx_pred_scores[..., None, None]
+            ctx_gold_scores = ctx_gold_scores[..., None, None]
         return FusionSeq2SeqLMOutput(
             loss=loss,
             logits=lm_logits,
@@ -1329,8 +1380,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             encoder_last_hidden_state=encoder_outputs.last_hidden_state,
             encoder_hidden_states=encoder_outputs.hidden_states,
             encoder_attentions=encoder_outputs.attentions,
-            ctx_pred_dist=ctx_pred_dist,
-            ctx_gold_dist=ctx_gold_dist,
+            ctx_pred_scores=ctx_pred_scores,
+            ctx_gold_scores=ctx_gold_scores,
             ctx_attention_loss=ctx_attention_loss)
 
     def prepare_inputs_for_generation(
