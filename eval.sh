@@ -82,8 +82,8 @@ fi
 
 if [[ ${need_model_args} == "true" ]]; then  # use additional model args for public pretrained models
     bos_attention=single
-    ctx_attention_loss="block:8_layer2heads:12,[4]_loss:hard_alpha:4"
-    ctx_attention_loss="block:8_layer2heads:0,list(range(24))|6,list(range(24))|12,list(range(24))|18,list(range(24))|23,list(range(24))_loss:hard_alpha:4"
+    ctx_attention_loss="block:8_layer2heads:12.[4]_loss:hard_alpha:4"
+    ctx_attention_loss="block:8_layer2heads:0.list(range(24))|6.list(range(24))|12.list(range(24))|18.list(range(24))|23.list(range(24))_loss:hard_alpha:4"
     model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
 elif [[ ${need_model_args} == "false" ]]; then
     model_args=""
@@ -94,7 +94,7 @@ fi
 if [[ ${debug} == "small" ]]; then
     model=google/t5-small-lm-adapt
     bos_attention=single
-    ctx_attention_loss="block:8_layer2heads:0,list(range(4))|2,list(range(4))_loss:hard_alpha:4"
+    ctx_attention_loss="block:8_layer2heads:0.list(range(4))|2.list(range(4))_loss:hard_alpha:4"
     model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
     max_eval_samples=32
 fi

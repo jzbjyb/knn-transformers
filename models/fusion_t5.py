@@ -90,7 +90,7 @@ class FusionT5Config(T5Config):
         if ctx_attention_loss is None:
             return None
         parsed = dict(tuple(field.split(':')) for field in ctx_attention_loss.strip().split('_'))
-        parsed['layer2heads'] = [tuple(lh.split(',')) for lh in parsed['layer2heads'].split('|') if lh.strip()]
+        parsed['layer2heads'] = [tuple(lh.split('.', 1)) for lh in parsed['layer2heads'].split('|') if lh.strip()]
         parsed['layer2heads'] = {int(lh[0]): eval(lh[1]) for lh in parsed['layer2heads']}
         parsed['block'] = int(parsed['block'])
         parsed['alpha'] = float(parsed['alpha'])
