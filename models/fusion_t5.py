@@ -73,8 +73,11 @@ class FusionT5Config(T5Config):
         super().__init__(**kwargs)
         self.ctx_attention_loss = ctx_attention_loss
         if ctx_attention_loss is not None:
-            for layer, heads in ctx_attention_loss['layer2heads'].items():
+            num_used_heads = -1
+            for layer, heads in ctx_attention_loss['layer2heads']:
                 assert layer < self.num_decoder_layers
+                assert len(heads) == num_used_heads or num_used_heads == -1, 'the number of heads used to perform retrieval should be equal across layers'
+                num_used_heads = len(heads)
                 for head in heads:
                     assert head < self.num_heads
         self.bos_attention = bos_attention
@@ -91,7 +94,7 @@ class FusionT5Config(T5Config):
             return None
         parsed = dict(tuple(field.split(':')) for field in ctx_attention_loss.strip().split('_'))
         parsed['layer2heads'] = [tuple(lh.split('.', 1)) for lh in parsed['layer2heads'].split('|') if lh.strip()]
-        parsed['layer2heads'] = {int(lh[0]): eval(lh[1]) for lh in parsed['layer2heads']}
+        parsed['layer2heads'] = [(int(lh[0]), eval(lh[1])) for lh in parsed['layer2heads']]
         parsed['block'] = int(parsed['block'])
         parsed['alpha'] = float(parsed['alpha'])
         return parsed
@@ -107,7 +110,7 @@ class FusionT5Attention(T5Attention):
         self.attn_specific = config.ctx_attention_loss is not None
         if self.attn_specific:
             self.block_size = config.ctx_attention_loss['block']
-            layer2heads = config.ctx_attention_loss['layer2heads']
+            layer2heads: Dict[int, List[int]] = dict(config.ctx_attention_loss['layer2heads'])
             self.is_loss_layer = layer_index in layer2heads
             if self.is_loss_layer:
                 self.use_heads = layer2heads[layer_index]
@@ -1070,11 +1073,9 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         self.has_ret_heads = config.ctx_attention_loss is not None and len(config.ctx_attention_loss['layer2heads']) > 0
         if self.has_ret_heads:
             self.block_size = config.ctx_attention_loss['block']
-            self.ret_layers = sorted(config.ctx_attention_loss['layer2heads'].keys())
+            self.ret_layers = sorted(map(itemgetter(0), config.ctx_attention_loss['layer2heads']))
             self.num_ret_layers = len(self.ret_layers)
-            self.num_ret_heads = len(list(config.ctx_attention_loss['layer2heads'].values())[0])
-            for heads in config.ctx_attention_loss['layer2heads'].values():
-                assert len(heads) == self.num_ret_heads, 'the number of heads used to perform retrieval should be equal across layers'
+            self.num_ret_heads = len(config.ctx_attention_loss['layer2heads'][0][1])
             self.loss_alpha = config.ctx_attention_loss['alpha']
             self.loss_type = config.ctx_attention_loss['loss']
             self.token_agg = config.ctx_attention_loss['tokenagg'] if 'tokenagg' in config.ctx_attention_loss else 'mean'
