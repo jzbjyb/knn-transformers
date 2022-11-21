@@ -1,4 +1,4 @@
-from typing import List, Tuple, Any, Union, Dict, Set
+from typing import List, Tuple, Any, Union, Dict, Set, Callable
 import argparse
 import random
 import os
@@ -457,11 +457,38 @@ def dedup_translation(inp_file: str, out_file: str, dedup_field: str = 'decoder_
             fields.add(field)
             fout.write(json.dumps(example) + '\n')
 
+def layerhead(pt_file: str, transform: Callable = lambda x: x, topk: int = 10):
+    for key in ['aggsmean', 'aggnormsmean']:
+        if key in pt_file:
+            tau = pt_file[pt_file.find(key) + len(key):].split('_', 1)[0]
+            tau = float(tau[:1] + '.' + tau[1:])
+            print(f'agg {key} with tau {tau}')
+            transform = lambda x: torch.softmax(x.view(-1) / tau, -1).view(*x.size())
+            break
+    weights = torch.load(pt_file, map_location='cpu')
+    lh_weight = [v for k, v in weights.items() if 'layerhead_weight' in k][0]
+    try:
+        lh_bias = [v for k, v in weights.items() if 'layerhead_bias' in k][0]
+    except:
+        lh_bias = None
+    num_layers, num_heads = lh_weight.size()
+    print('#layers', num_layers, '#heads', num_heads)
+    for lh in [lh_weight, lh_bias]:
+        if lh is None:
+            continue
+        lh = transform(lh)
+        print('original', lh)
+        indices = torch.sort(lh.view(-1), descending=True).indices[:topk]
+        layer_indices, head_indices = indices // num_heads, indices % num_heads
+        print('topk')
+        for i, (li, hi) in enumerate(zip(layer_indices, head_indices)):
+            print(f'{i} | {li.item()}, {hi.item()}: {lh[li, hi].item()}')
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
         'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc', 
-        'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir', 'dedup_translation'])
+        'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir', 'dedup_translation', 'layerhead'])
     parser.add_argument('--inp', type=str, default=None, help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -526,3 +553,7 @@ if __name__ == '__main__':
         inp_file = args.inp
         out_file = args.out
         dedup_translation(inp_file, out_file)
+    
+    elif args.task == 'layerhead':
+        pt_file = args.inp
+        layerhead(pt_file)

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=fustiont5
 #SBATCH --time=8:00:00
 #SBATCH --partition=learnlab
 #SBATCH --constraint=volta32gb
-#SBATCH -o slurm/%j.out
-#SBATCH -e slurm/%j.err
+#SBATCH -o slurm/%x.%j.out
+#SBATCH -e slurm/%x.%j.err
 
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --gpus-per-node=8
 #SBATCH --cpus-per-task=80
 #SBATCH --mem=512GB
+#SBATCH --job-name=fustiont5
 
 module purge
 module load anaconda3
@@ -23,7 +23,7 @@ export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
 debug=false
 
-setting=generate
+setting=rerank
 data=bm25
 model=$1  # model to test
 need_model_args=$2  # specify model args or not
@@ -82,8 +82,8 @@ fi
 
 if [[ ${need_model_args} == "true" ]]; then  # use additional model args for public pretrained models
     bos_attention=single
-    ctx_attention_loss="block:8_layer2heads:12.[4]_loss:hard_alpha:4"
-    ctx_attention_loss="block:8_layer2heads:0.list(range(24))|6.list(range(24))|12.list(range(24))|18.list(range(24))|23.list(range(24))_loss:hard_alpha:4"
+    ctx_attention_loss="block:8_layer2heads:12.[4,5]_layerheadagg:normalize-softmax-mean_layerheadtau:0.001_tokenagg:premean_loss:hard_alpha:4"
+    ctx_attention_loss="block:8_layer2heads:0.list(range(24))|3.list(range(24))|6.list(range(24))|9.list(range(24))|12.list(range(24))|15.list(range(24))|18.list(range(24))|21.list(range(24))|23.list(range(24))_layerheadagg:none_loss:hard_alpha:4"
     model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
 elif [[ ${need_model_args} == "false" ]]; then
     model_args=""
@@ -94,7 +94,7 @@ fi
 if [[ ${debug} == "small" ]]; then
     model=google/t5-small-lm-adapt
     bos_attention=single
-    ctx_attention_loss="block:8_layer2heads:0.list(range(4))|2.list(range(4))_loss:hard_alpha:4"
+    ctx_attention_loss="block:8_layer2heads:0.[4,5]_layerheadagg:softmax-mean_layerheadtau:0.001_tokenagg:mean_loss:hard_alpha:4"
     model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
     max_eval_samples=32
 fi

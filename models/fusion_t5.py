@@ -1085,12 +1085,22 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             if 'weight' in self.layerhead_agg:
                 self.layerhead_weight = torch.nn.Parameter(torch.ones(nl, nh), requires_grad=True)
                 self.layerhead_bias = torch.nn.Parameter(torch.zeros(nl, nh), requires_grad=True)
-                self.combine_layerhead = lambda scores: (scores + self.layerhead_bias[None, None, :, :, None]) * self.layerhead_weight[None, None, :, :, None]
+                def combine_layerhead(scores):
+                    if scores.dim() == 5:
+                        return (scores + self.layerhead_bias[None, None, :, :, None]) * self.layerhead_weight[None, None, :, :, None]
+                    elif scores.dim() == 4:
+                        return (scores + self.layerhead_bias[None, None, :, :]) * self.layerhead_weight[None, None, :, :]
+                    raise ValueError
+                self.combine_layerhead = combine_layerhead
             elif 'softmax' in self.layerhead_agg:
                 self.layerhead_weight = torch.nn.Parameter(torch.zeros(nl, nh), requires_grad=True)
                 def combine_layerhead(scores):
                     w = torch.softmax(self.layerhead_weight.view(-1) / self.layerhead_tau, -1).view(self.num_ret_layers, self.num_ret_heads)
-                    return scores * w[None, None, :, :, None] * nl * nh
+                    if scores.dim() == 5:
+                        return scores * w[None, None, :, :, None] * nl * nh
+                    elif scores.dim() == 4:
+                        return scores * w[None, None, :, :] * nl * nh
+                    raise ValueError
                 self.combine_layerhead = combine_layerhead
 
         self.bos_attention = config.bos_attention
@@ -1294,25 +1304,50 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             ctx_pred_scores = ctx_attn_scores[..., :self.block_size]  # (batch_size, n_ctxs, n_used_layers, n_used_heads, first_block_size)
             ctx_gold_scores = ctx_attn_scores[..., self.block_size:]  # (batch_size, n_ctxs, n_used_layers, n_used_heads, second_block_size)
 
-            # aggregate layers and heads
-            if 'weight' in self.layerhead_agg or 'softmax' in self.layerhead_agg:
-                ctx_pred_scores = self.combine_layerhead(ctx_pred_scores)
+            if self.token_agg == 'premean':
+                ctx_pred_scores = ctx_pred_scores.mean(-1)  # (batch_size, n_ctxs, n_used_layers, n_used_heads)
+                ctx_gold_scores = ctx_gold_scores.mean(-1)  # (batch_size, n_ctxs, n_used_layers, n_used_heads)
 
-            if 'mean' in self.layerhead_agg:
-                ctx_pred_scores = ctx_pred_scores.mean([2, 3])  # (batch_size, n_ctxs, first_block_size)
-                ctx_gold_scores = ctx_gold_scores.mean([2, 3])  # (batch_size, n_ctxs, second_block_size)
-            elif 'max' in self.layerhead_agg:
-                ctx_pred_scores = ctx_pred_scores.amax([2, 3])  # (batch_size, n_ctxs, first_block_size)
-                ctx_gold_scores = ctx_gold_scores.amax([2, 3])  # (batch_size, n_ctxs, second_block_size)
-            elif 'none' in self.layerhead_agg:
-                pass
-            else:
-                raise NotImplementedError
+                if 'normalize' in self.layerhead_agg:
+                    ctx_pred_scores = ctx_pred_scores.softmax(1)
+                    ctx_gold_scores = ctx_gold_scores.softmax(1)
+                
+                if 'weight' in self.layerhead_agg or 'softmax' in self.layerhead_agg:
+                    ctx_pred_scores = self.combine_layerhead(ctx_pred_scores)
+                    ctx_gold_scores = self.combine_layerhead(ctx_gold_scores)
+                
+                if 'mean' in self.layerhead_agg:
+                    ctx_pred_scores = ctx_pred_scores.mean([2, 3])  # (batch_size, n_ctxs)
+                    ctx_gold_scores = ctx_gold_scores.mean([2, 3])  # (batch_size, n_ctxs)
+                elif 'max' in self.layerhead_agg:
+                    ctx_pred_scores = ctx_pred_scores.amax([2, 3])  # (batch_size, n_ctxs)
+                    ctx_gold_scores = ctx_gold_scores.amax([2, 3])  # (batch_size, n_ctxs)
+                elif 'none' in self.layerhead_agg:
+                    pass
+                else:
+                    raise NotImplementedError
 
-            # aggregate tokens
-            if self.token_agg == 'mean':
+            elif self.token_agg == 'mean':
+                # aggregate layers and heads
+                if 'weight' in self.layerhead_agg or 'softmax' in self.layerhead_agg:
+                    ctx_pred_scores = self.combine_layerhead(ctx_pred_scores)
+                    ctx_gold_scores = self.combine_layerhead(ctx_gold_scores)
+
+                if 'mean' in self.layerhead_agg:
+                    ctx_pred_scores = ctx_pred_scores.mean([2, 3])  # (batch_size, n_ctxs, first_block_size)
+                    ctx_gold_scores = ctx_gold_scores.mean([2, 3])  # (batch_size, n_ctxs, second_block_size)
+                elif 'max' in self.layerhead_agg:
+                    ctx_pred_scores = ctx_pred_scores.amax([2, 3])  # (batch_size, n_ctxs, first_block_size)
+                    ctx_gold_scores = ctx_gold_scores.amax([2, 3])  # (batch_size, n_ctxs, second_block_size)
+                elif 'none' in self.layerhead_agg:
+                    pass
+                else:
+                    raise NotImplementedError
+
+                # aggregate tokens
                 ctx_pred_scores = ctx_pred_scores.mean(-1)  # (batch_size, n_ctxs) or (batch_size, n_ctxs, n_used_layers, n_used_heads)
                 ctx_gold_scores = ctx_gold_scores.mean(-1)  # (batch_size, n_ctxs) or (batch_size, n_ctxs, n_used_layers, n_used_heads)
+            
             else:
                 raise NotImplementedError
 
@@ -1350,9 +1385,13 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
             # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
             
-            if handle_ret:  # compute loss
-                ctx_pred_logprob = ctx_pred_scores.log_softmax(-1)
-                ctx_gold_prob = ctx_gold_scores.softmax(-1)
+            if handle_ret and ctx_pred_scores.dim() == 2:  # compute loss
+                if 'normalize' in self.layerhead_agg:
+                    ctx_pred_logprob = torch.log(ctx_pred_scores + 1e-10)
+                    ctx_gold_prob = ctx_gold_scores
+                else:
+                    ctx_pred_logprob = ctx_pred_scores.log_softmax(-1)
+                    ctx_gold_prob = ctx_gold_scores.softmax(-1)
                 if self.loss_type == 'hard':
                     ctx_gold_prob = torch.zeros_like(ctx_pred_logprob).to(ctx_pred_logprob.device)
                     ctx_gold_prob[:, 0] = 1.0
