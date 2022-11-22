@@ -23,8 +23,8 @@ export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
 debug=false
 
-setting=rerank
-data=bm25
+setting=perplexity
+data=bm25_split
 model=$1  # model to test
 need_model_args=$2  # specify model args or not
 
@@ -50,6 +50,9 @@ elif [[ ${data} == "random" ]]; then
     # all docs (full ranking)
     val_file=data/wow/val_all_dpr.json
     depth=500
+elif [[ ${data} == "bm25_split" ]]; then
+    val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.split.json
+    depth=1
 else
     exit
 fi
@@ -63,27 +66,37 @@ use_context=true
 context_bos=true
 answer_bos=true
 max_eval_samples=1000
+batch_size=1
 
 if [[ ${setting} == "rerank" ]]; then
     max_answer_len=12
-    setting_extra="--do_eval_rerank rerank"
+    setting_extra="--do_eval_special rerank"
 elif [[ ${setting} == "generate_rerank" ]]; then
     generation_prefix_len=4
     max_answer_len=12
-    setting_extra="--do_eval_rerank generate_rerank"
+    setting_extra="--do_eval_special generate_rerank"
+elif [[ ${setting} == "perplexity" ]]; then
+    max_answer_len=128
+    batch_size=50
+    max_eval_samples=100000
+    setting_extra="--do_eval_special perplexity"
 elif [[ ${setting} == "generate" ]]; then
     generation_prefix_len=8
     max_answer_len=128
     ctx_topk=1
-    setting_extra="--ctx_topk ${ctx_topk}"
+    setting_extra="--ctx_topk ${ctx_topk} --predict_with_generate"
 else
     exit
 fi
 
 if [[ ${need_model_args} == "true" ]]; then  # use additional model args for public pretrained models
     bos_attention=single
-    ctx_attention_loss="block:8_layer2heads:12.[4,5]_layerheadagg:normalize-softmax-mean_layerheadtau:0.001_tokenagg:premean_loss:hard_alpha:4"
-    ctx_attention_loss="block:8_layer2heads:0.list(range(24))|3.list(range(24))|6.list(range(24))|9.list(range(24))|12.list(range(24))|15.list(range(24))|18.list(range(24))|21.list(range(24))|23.list(range(24))_layerheadagg:none_loss:hard_alpha:4"
+    # - misc
+    # ctx_attention_loss="block:8_layer2heads:12.[4,5]_layerheadagg:normalize-softmax-mean_layerheadtau:0.001_tokenagg:premean_loss:hard_alpha:4"
+    # - test reranking performance of all heads
+    # ctx_attention_loss="block:8_layer2heads:0.list(range(24))|3.list(range(24))|6.list(range(24))|9.list(range(24))|12.list(range(24))|15.list(range(24))|18.list(range(24))|21.list(range(24))|23.list(range(24))_layerheadagg:none_loss:hard_alpha:4"
+    # - test perplexity of different contexts
+    ctx_attention_loss="block:8_layer2heads:_loss:hard_alpha:4"
     model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
 elif [[ ${need_model_args} == "false" ]]; then
     model_args=""
@@ -94,7 +107,7 @@ fi
 if [[ ${debug} == "small" ]]; then
     model=google/t5-small-lm-adapt
     bos_attention=single
-    ctx_attention_loss="block:8_layer2heads:0.list(range(4))_layerheadagg:none_loss:hard_alpha:4"
+    ctx_attention_loss="block:8_layer2heads:_loss:hard_alpha:4"
     model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
     max_eval_samples=32
 fi
@@ -114,9 +127,8 @@ deepspeed train.py \
     --context_bos ${context_bos} \
     --answer_bos ${answer_bos} \
     --do_eval \
-    --per_device_eval_batch_size 1 \
+    --per_device_eval_batch_size ${batch_size} \
     --max_eval_samples ${max_eval_samples} \
-    --predict_with_generate \
     --dataloader_num_workers 4 \
     --report_to none \
     ${model_args} ${setting_extra}

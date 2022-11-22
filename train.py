@@ -25,11 +25,13 @@ import sys
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
 from tqdm import tqdm
+from collections import defaultdict
 
 import numpy as np
 import torch
 import torch.cuda.amp
 from torch.utils.data import DataLoader
+from torch.nn import CrossEntropyLoss
 from tqdm import trange
 
 import evaluate
@@ -206,7 +208,7 @@ class DataTrainingArguments:
 @dataclass
 class TrainingArgs(Seq2SeqTrainingArguments):
     extract_attention: bool = field(default=False)
-    do_eval_rerank: str = field(default=None)
+    do_eval_special: str = field(default=None)
 
 
 @dataclass
@@ -526,7 +528,7 @@ def main():
                 question = data_args.question_prefix + example['question']
                 ctxs = [data_args.context_prefix + ctx['text'] for ctx in example['ctxs'][:data_args.depth]]
                 answers = [data_args.answer_prefix + ans for ans in example['answers']]
-                formatted.append({'question': question, 'ctxs': ctxs, 'answers': answers})
+                formatted.append({'qid': example['id'], 'question': question, 'ctxs': ctxs, 'answers': answers})
             return formatted
         def compute_metrics(output):
             predictions=output.predictions
@@ -601,7 +603,7 @@ def main():
         eval_examples=validation_examples if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=collator,
-        compute_metrics=compute_metrics if training_args.do_eval else None,
+        compute_metrics=None,  # compute_metrics if training_args.do_eval else None, TODO: debug
         post_process_function=post_processing_function)
 
     if training_args.deepspeed:
@@ -628,10 +630,10 @@ def main():
         trainer.save_metrics("train", metrics)
         trainer.save_state()
     
-    if training_args.do_eval and training_args.do_eval_rerank:
-        logger.info("*** Evaluate reranking ***")
+    if training_args.do_eval and training_args.do_eval_special:
+        logger.info("*** Evaluate special ***")
         model.eval()
-        accuracies = []
+        finals = []
 
         sampler = ShardSampler(
             validation_dataset,
@@ -650,8 +652,10 @@ def main():
 
         for step, batch in tqdm(enumerate(dataloader)):
             batch = trainer._prepare_inputs(batch)
+
             with torch.no_grad():
-                if 'generate' in training_args.do_eval_rerank:
+                # generate
+                if 'generate' in training_args.do_eval_special:
                     gen_batch = dict(batch)
                     for key in ['labels', 'decoder_input_ids', 'decoder_attention_mask']:  # remove model inputs irrelevant to generation
                         if key in gen_batch:
@@ -672,10 +676,15 @@ def main():
                     batch['decoder_input_ids'] = gen_outputs
                     batch['decoder_attention_mask'] = torch.ones_like(gen_outputs)        
                     batch['labels'] = collator.get_labels_from_decoder_input_ids(gen_outputs)
-                if 'rerank' in training_args.do_eval_rerank:
+                
+                if 'rerank' in training_args.do_eval_special:  # compute retrieval attention for reranking
                     eval_outputs = model(**batch)
+                elif 'perplexity' in training_args.do_eval_special:  # compute perplexity
+                    eval_outputs = model(**batch)
+                else:
+                    raise NotImplementedError
 
-            def rerank_acc(eval_outputs, use_gold: bool = True):
+            def rerank(eval_outputs, use_gold: bool = False):
                 # gather
                 ctx_pred_scores = eval_outputs.ctx_gold_scores if use_gold else eval_outputs.ctx_pred_scores
                 ctx_pred_scores = trainer._pad_across_processes(ctx_pred_scores, pad_index=-1e10)  # (batch_size, n_ctx, n_used_layers, n_used_heads)
@@ -684,17 +693,42 @@ def main():
                 ranks = torch.sort(ctx_pred_scores, descending=True, dim=1).indices  # (gathered_batch_size, n_ctx, n_used_layers, n_used_heads)
                 top1_accs = ranks[:, 0, ...].eq(0).float()  # (gathered_batch_size, n_used_layers, n_used_heads)
                 return top1_accs
+            
+            def perplexity(eval_outputs):
+                labels = batch['labels']
+                logits = eval_outputs.logits
+                loss_fct = CrossEntropyLoss(reduction='none', ignore_index=-100)
+                loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1)).view(*labels.size())  # (batch_size, seq_len)
+                loss = loss.mean(-1)  # (batch_size,)
+                loss = trainer._pad_across_processes(loss, pad_index=0)  # (batch_size,)
+                loss = trainer._nested_gather(loss)  # (gathered_batch_size,)
+                return loss
 
-            if training_args.do_eval_rerank:
-                accuracies.append(rerank_acc(eval_outputs))
+            if 'rerank' in training_args.do_eval_special: 
+                finals.append(rerank(eval_outputs))
+            elif 'perplexity' in training_args.do_eval_special:
+                finals.append(perplexity(eval_outputs))
+            else:
+                raise NotImplementedError
 
         if trainer.is_world_process_zero():
-            if training_args.do_eval_rerank:
-                accuracies = torch.cat(accuracies, 0)  # (num_examples, n_used_layers, n_used_heads)
-                acc = accuracies.mean(0)  # (n_used_layers, n_used_heads)
-                print(f'#examples {len(accuracies)}, accuracy')
+            if 'rerank' in training_args.do_eval_special:
+                finals = torch.cat(finals, 0)  # (num_examples, n_used_layers, n_used_heads)
+                acc = finals.mean(0)  # (n_used_layers, n_used_heads)
+                print(f'#examples {len(finals)}, accuracy')
                 for layer in acc:
                     print('\t'.join(map(str, layer.tolist())))
+            elif 'perplexity' in training_args.do_eval_special:
+                qids = [example['qid'] for example in validation_dataset]
+                losses = torch.cat(finals, 0)[:len(qids)].tolist()  # (num_examples,)
+                assert len(qids) == len(losses)
+                qid2losses: Dict[str, List[float]] = defaultdict(list)
+                for qid, loss in zip(qids, losses):
+                    qid2losses[qid].append(loss)
+                acc = np.mean([np.argmin(losses) == 0 for qid, losses in qid2losses.items()])
+                print(f'#exampels {len(qid2losses)}, acc {acc}')
+            else:
+                raise NotImplementedError
 
         exit()
 

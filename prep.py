@@ -6,6 +6,7 @@ import json
 import time
 from collections import defaultdict
 import csv
+import copy
 from tqdm import tqdm
 import numpy as np
 import torch
@@ -484,11 +485,24 @@ def layerhead(pt_file: str, transform: Callable = lambda x: x, topk: int = 10):
         for i, (li, hi) in enumerate(zip(layer_indices, head_indices)):
             print(f'{i} | {li.item()}, {hi.item()}: {lh[li, hi].item()}')
 
+def split_ctxs(json_file: str, out_file: str):
+    with open(json_file, 'r') as fin:
+        data = json.load(fin)
+        new_data = []
+        for example in data:
+            for ctx in example['ctxs']:
+                _example = copy.deepcopy(example)
+                _example['ctxs'] = [ctx]
+                new_data.append(_example)
+    with open(out_file, 'w') as fout:
+        json.dump(new_data, fout, indent=True)
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
         'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc', 
-        'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir', 'dedup_translation', 'layerhead'])
+        'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
+        'dedup_translation', 'layerhead', 'split_ctxs'])
     parser.add_argument('--inp', type=str, default=None, help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -557,3 +571,8 @@ if __name__ == '__main__':
     elif args.task == 'layerhead':
         pt_file = args.inp
         layerhead(pt_file)
+    
+    elif args.task == 'split_ctxs':
+        json_file = args.inp
+        out_file = args.out
+        split_ctxs(json_file, out_file)
