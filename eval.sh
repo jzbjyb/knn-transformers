@@ -94,7 +94,7 @@ fi
 if [[ ${debug} == "small" ]]; then
     model=google/t5-small-lm-adapt
     bos_attention=single
-    ctx_attention_loss="block:8_layer2heads:0.[4,5]_layerheadagg:softmax-mean_layerheadtau:0.001_tokenagg:mean_loss:hard_alpha:4"
+    ctx_attention_loss="block:8_layer2heads:0.list(range(4))_layerheadagg:none_loss:hard_alpha:4"
     model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
     max_eval_samples=32
 fi

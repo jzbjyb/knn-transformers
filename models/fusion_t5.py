@@ -114,6 +114,8 @@ class FusionT5Attention(T5Attention):
             self.is_loss_layer = layer_index in layer2heads
             if self.is_loss_layer:
                 self.use_heads = layer2heads[layer_index]
+        self.ctx_token_agg = 'max'
+        assert self.ctx_token_agg in {'max', 'mean', 'normalize-sum'}
 
     def add_position_bias(
         self, 
@@ -320,6 +322,9 @@ class FusionT5Attention(T5Attention):
             return ctx_scores
 
         ctx_scores = compute_ctx_scores(query_states)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
+        if 'normalize' in self.ctx_token_agg:
+            ctx_scores_normalized = nn.functional.softmax(
+                torch.cat([ctx_scores.flatten(3, 4), scores], -1).float(), dim=-1).type_as(ctx_scores)[..., :ctx_scores.size(-2) * ctx_scores.size(-1)].view(*ctx_scores.size())  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
 
         ctx_attn_scores = None
         if self.attn_specific:
@@ -330,20 +335,37 @@ class FusionT5Attention(T5Attention):
                 if in_generation and gen_step == offset + self.block_size - 1:
                     ctx_scores_for_loss = compute_ctx_scores(query_states_with_past)
                 else:
-                    ctx_scores_for_loss = ctx_scores
+                    if 'normalize' in self.ctx_token_agg:
+                        ctx_scores_for_loss = ctx_scores_normalized
+                    else:
+                        ctx_scores_for_loss = ctx_scores
 
                 block1_attn = ctx_scores_for_loss[:, self.use_heads, offset:offset + self.block_size]  # (batch_size, n_used_heads, first_block_size, n_ctxs, ctx_seq_length)
+                block_ctx_mask = ctx_all_mask[:, :1, :1].eq(0).to(block1_attn)  # (batch_size, 1, 1, n_ctxs, ctx_seq_length)
                 # since mask is autoregressive, the last position (i.e., -1) has the complete mask TODO: assume different heads use the same mask
                 block1_mask = mask[:, 0, -1, offset:offset + self.block_size].eq(0).to(block1_attn)  # (batch_size, first_block_size)
 
                 block2_attn = ctx_scores_for_loss[:, self.use_heads, offset + self.block_size:]  # (batch_size, n_used_heads, second_block_size, n_ctxs, ctx_seq_length)
                 block2_mask = mask[:, 0, -1, offset + self.block_size:].eq(0).to(block2_attn)  # (batch_size, second_block_size)
 
-                attn1 = (block1_attn.max(-1).values * block1_mask.unsqueeze(1).unsqueeze(-1))  # (batch_size, n_used_heads, first_block_size, n_ctxs)
-                attn2 = (block2_attn.max(-1).values * block2_mask.unsqueeze(1).unsqueeze(-1))  # (batch_size, n_used_heads, second_block_size, n_ctxs)
+                if self.ctx_token_agg == 'max':
+                    attn1 = block1_attn.max(-1).values * block1_mask.unsqueeze(1).unsqueeze(-1)  # (batch_size, n_used_heads, first_block_size, n_ctxs)
+                    attn2 = block2_attn.max(-1).values * block2_mask.unsqueeze(1).unsqueeze(-1)  # (batch_size, n_used_heads, second_block_size, n_ctxs)
+                elif self.ctx_token_agg == 'mean':
+                    attn1 = ((block1_attn * block_ctx_mask).sum(-1) / (block_ctx_mask.sum(-1) + 1e-5)) * block1_mask.unsqueeze(1).unsqueeze(-1)  # (batch_size, n_used_heads, first_block_size, n_ctxs)
+                    attn2 = ((block2_attn * block_ctx_mask).sum(-1) / (block_ctx_mask.sum(-1) + 1e-5)) * block2_mask.unsqueeze(1).unsqueeze(-1)  # (batch_size, n_used_heads, second_block_size, n_ctxs)
+                elif self.ctx_token_agg == 'normalize-sum':
+                    attn1 = (block1_attn * block_ctx_mask).sum(-1) * block1_mask.unsqueeze(1).unsqueeze(-1)  # (batch_size, n_used_heads, first_block_size, n_ctxs)
+                    attn2 = (block2_attn * block_ctx_mask).sum(-1) * block2_mask.unsqueeze(1).unsqueeze(-1)  # (batch_size, n_used_heads, second_block_size, n_ctxs)
+                else:
+                    raise ValueError
+                
                 ctx_attn_scores = torch.cat([
                     attn1.permute(0, 3, 1, 2).contiguous(), 
                     attn2.permute(0, 3, 1, 2).contiguous()], -1)  # (batch_size, n_ctxs, n_used_heads, first_block_size + second_block_size)
+                ctx_attn_scores_mask = torch.cat([block1_mask, block2_mask], -1)[:, None, None, :].repeat(
+                    1, ctx_attn_scores.size(1), ctx_attn_scores.size(2), 1).to(ctx_attn_scores)  # (batch_size, n_ctxs, n_used_heads, first_block_size + second_block_size)
+                ctx_attn_scores = torch.stack([ctx_attn_scores, ctx_attn_scores_mask], 0)
 
             # skip the first block
             block_mask = ctx_all_mask.eq(0)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length) all ctx tokens are True
@@ -1300,13 +1322,17 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
         ctx_pred_scores = ctx_gold_scores = None
         if handle_ret:  # handle retrieval attention
-            ctx_attn_scores = torch.stack([decoder_outputs.attentions[layer] for layer in self.ret_layers], 2)  # (batch_size, n_ctxs, n_used_layers, n_used_heads, first_block_size + second_block_size)
+            ctx_attn_scores = torch.stack([decoder_outputs.attentions[layer] for layer in self.ret_layers], 3)  # (2, batch_size, n_ctxs, n_used_layers, n_used_heads, first_block_size + second_block_size)
+            ctx_attn_scores_mask = ctx_attn_scores[1]  # (batch_size, n_ctxs, n_used_layers, n_used_heads, first_block_size + second_block_size)
+            ctx_attn_scores = ctx_attn_scores[0]  # (batch_size, n_ctxs, n_used_layers, n_used_heads, first_block_size + second_block_size)
             ctx_pred_scores = ctx_attn_scores[..., :self.block_size]  # (batch_size, n_ctxs, n_used_layers, n_used_heads, first_block_size)
             ctx_gold_scores = ctx_attn_scores[..., self.block_size:]  # (batch_size, n_ctxs, n_used_layers, n_used_heads, second_block_size)
+            ctx_pred_scores_mask = ctx_attn_scores_mask[..., :self.block_size]  # (batch_size, n_ctxs, n_used_layers, n_used_heads, first_block_size)
+            ctx_gold_scores_mask = ctx_attn_scores_mask[..., self.block_size:]  # (batch_size, n_ctxs, n_used_layers, n_used_heads, second_block_size)
 
             if self.token_agg == 'premean':
-                ctx_pred_scores = ctx_pred_scores.mean(-1)  # (batch_size, n_ctxs, n_used_layers, n_used_heads)
-                ctx_gold_scores = ctx_gold_scores.mean(-1)  # (batch_size, n_ctxs, n_used_layers, n_used_heads)
+                ctx_pred_scores = ctx_pred_scores.sum(-1) / (ctx_pred_scores_mask.sum(-1) + 1e-5)  # (batch_size, n_ctxs, n_used_layers, n_used_heads)
+                ctx_gold_scores = ctx_gold_scores.sum(-1) / (ctx_gold_scores_mask.sum(-1) + 1e-5)  # (batch_size, n_ctxs, n_used_layers, n_used_heads)
 
                 if 'normalize' in self.layerhead_agg:
                     ctx_pred_scores = ctx_pred_scores.softmax(1)
@@ -1327,7 +1353,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                 else:
                     raise NotImplementedError
 
-            elif self.token_agg == 'mean':
+            elif self.token_agg in {'mean', 'max'}:
                 # aggregate layers and heads
                 if 'weight' in self.layerhead_agg or 'softmax' in self.layerhead_agg:
                     ctx_pred_scores = self.combine_layerhead(ctx_pred_scores)
@@ -1336,18 +1362,27 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                 if 'mean' in self.layerhead_agg:
                     ctx_pred_scores = ctx_pred_scores.mean([2, 3])  # (batch_size, n_ctxs, first_block_size)
                     ctx_gold_scores = ctx_gold_scores.mean([2, 3])  # (batch_size, n_ctxs, second_block_size)
+                    ctx_pred_scores_mask = ctx_pred_scores_mask.amax([2, 3])  # (batch_size, n_ctxs, first_block_size)
+                    ctx_gold_scores_mask = ctx_gold_scores_mask.amax([2, 3])  # (batch_size, n_ctxs, first_block_size)
                 elif 'max' in self.layerhead_agg:
                     ctx_pred_scores = ctx_pred_scores.amax([2, 3])  # (batch_size, n_ctxs, first_block_size)
                     ctx_gold_scores = ctx_gold_scores.amax([2, 3])  # (batch_size, n_ctxs, second_block_size)
+                    ctx_pred_scores_mask = ctx_pred_scores_mask.amax([2, 3])  # (batch_size, n_ctxs, first_block_size)
+                    ctx_gold_scores_mask = ctx_gold_scores_mask.amax([2, 3])  # (batch_size, n_ctxs, first_block_size)
                 elif 'none' in self.layerhead_agg:
                     pass
                 else:
                     raise NotImplementedError
 
                 # aggregate tokens
-                ctx_pred_scores = ctx_pred_scores.mean(-1)  # (batch_size, n_ctxs) or (batch_size, n_ctxs, n_used_layers, n_used_heads)
-                ctx_gold_scores = ctx_gold_scores.mean(-1)  # (batch_size, n_ctxs) or (batch_size, n_ctxs, n_used_layers, n_used_heads)
-            
+                if self.token_agg == 'mean':
+                    ctx_pred_scores = ctx_pred_scores.sum(-1) / (ctx_pred_scores_mask.sum(-1) + 1e-5)  # (batch_size, n_ctxs) or (batch_size, n_ctxs, n_used_layers, n_used_heads)
+                    ctx_gold_scores = ctx_gold_scores.sum(-1) / (ctx_gold_scores_mask.sum(-1) + 1e-5)  # (batch_size, n_ctxs) or (batch_size, n_ctxs, n_used_layers, n_used_heads)
+                elif self.token_agg == 'max':  # TODO: replace zero with -inf
+                    ctx_pred_scores = ctx_pred_scores.max(-1).values  # (batch_size, n_ctxs) or (batch_size, n_ctxs, n_used_layers, n_used_heads)
+                    ctx_gold_scores = ctx_gold_scores.max(-1).values if ctx_gold_scores.size(-1) > 0 else ctx_gold_scores.mean(-1)  # (batch_size, n_ctxs) or (batch_size, n_ctxs, n_used_layers, n_used_heads)
+                else:
+                    raise NotImplementedError
             else:
                 raise NotImplementedError
 

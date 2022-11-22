@@ -675,9 +675,9 @@ def main():
                 if 'rerank' in training_args.do_eval_rerank:
                     eval_outputs = model(**batch)
 
-            def rerank_acc(eval_outputs):
+            def rerank_acc(eval_outputs, use_gold: bool = True):
                 # gather
-                ctx_pred_scores = eval_outputs.ctx_pred_scores
+                ctx_pred_scores = eval_outputs.ctx_gold_scores if use_gold else eval_outputs.ctx_pred_scores
                 ctx_pred_scores = trainer._pad_across_processes(ctx_pred_scores, pad_index=-1e10)  # (batch_size, n_ctx, n_used_layers, n_used_heads)
                 ctx_pred_scores = trainer._nested_gather(ctx_pred_scores)  # (gathered_batch_size, n_ctx, n_used_layers, n_used_heads)
                 # rank
@@ -692,7 +692,9 @@ def main():
             if training_args.do_eval_rerank:
                 accuracies = torch.cat(accuracies, 0)  # (num_examples, n_used_layers, n_used_heads)
                 acc = accuracies.mean(0)  # (n_used_layers, n_used_heads)
-                print(f'#examples {len(accuracies)}, accuracy: {acc}')
+                print(f'#examples {len(accuracies)}, accuracy')
+                for layer in acc:
+                    print('\t'.join(map(str, layer.tolist())))
 
         exit()
 
