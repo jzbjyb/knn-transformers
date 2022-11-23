@@ -33,8 +33,7 @@ debug=false
 train_file=data/wow/train_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 
-output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer0912151821_aggmax_ctx32_bm25_sepcrossattn_singlebos
-#output_dir=checkpoints/models/t53b_wow_ctx32_bm25_sepcrossattn_singlebos_onlyblock8
+output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn_singlebos_condition12
 
 init_model=google/t5-xl-lm-adapt
 depth=10
@@ -43,7 +42,7 @@ use_context=true
 context_bos=true
 answer_bos=true
 bos_attention=single
-ctx_attention_loss="block:8_layer2heads:0.list(range(24))|9.list(range(24))|12.list(range(24))|15.list(range(24))|18.list(range(24))|21.list(range(24))_layerheadagg:max_loss:hard_alpha:4"
+ctx_attention_loss="block:8_layer2heads:12.[4]_conditionfrom:12_loss:hard_alpha:4"
 
 eval_steps=100
 max_eval_samples=1000
@@ -53,7 +52,8 @@ if [[ ${debug} == "small" ]]; then
     #ctx_attention_loss="block:8_layer2heads:0.list(range(4))|2.list(range(4))_layerheadagg:softmax-mean_layerheadtau:0.001_loss:hard_alpha:4"
     #ctx_attention_loss="block:8_layer2heads:4.[4]_loss:hard_alpha:4"
     #ctx_attention_loss="block:8_layer2heads:0.[0,1]|1.[0,1]_layerheadagg:normalize-softmax-mean_layerheadtau:0.001_tokenagg:premean_loss:hard_alpha:4"
-    ctx_attention_loss="block:8_layer2heads:0.[9,18]|9.[1,4]|12.[4,5]|15.[0,5]|18.[1,4]|21.[4,5]_loss:hard_alpha:4"
+    #ctx_attention_loss="block:8_layer2heads:0.[9,18]|9.[1,4]|12.[4,5]|15.[0,5]|18.[1,4]|21.[4,5]_loss:hard_alpha:4"
+    ctx_attention_loss="block:8_layer2heads:2.[2]_conditionfrom:2_loss:hard_alpha:4"
     output_dir=checkpoints/models/test
     rm -r ${output_dir}
     eval_steps=5

@@ -93,8 +93,9 @@ class FusionT5Config(T5Config):
         if ctx_attention_loss is None:
             return None
         parsed = dict(tuple(field.split(':')) for field in ctx_attention_loss.strip().split('_'))
-        parsed['layer2heads'] = [tuple(lh.split('.', 1)) for lh in parsed['layer2heads'].split('|') if lh.strip()]
+        parsed['layer2heads'] = [tuple(lh.split('.', 1)) for lh in parsed['layer2heads'].split('|') if lh.strip()] if 'layer2heads' in parsed else []
         parsed['layer2heads'] = [(int(lh[0]), eval(lh[1])) for lh in parsed['layer2heads']]
+        parsed['conditionfrom'] = int(parsed['conditionfrom']) if 'conditionfrom' in parsed else 0  # condition on ctx starting from this layer 
         parsed['block'] = int(parsed['block'])
         parsed['alpha'] = float(parsed['alpha'])
         return parsed
@@ -115,6 +116,8 @@ class FusionT5Attention(T5Attention):
             if self.is_loss_layer:
                 self.use_heads = layer2heads[layer_index]
         self.ctx_token_agg = 'max'
+        self.condition_on_ctx = layer_index >= config.ctx_attention_loss['conditionfrom']
+        self.layer_index = layer_index
         assert self.ctx_token_agg in {'max', 'mean', 'normalize-sum'}
 
     def add_position_bias(
@@ -378,6 +381,10 @@ class FusionT5Attention(T5Attention):
                     block_mask = block_mask.repeat(1, 1, ctx_scores.size(2), 1, 1)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
                 assert block_mask.size(2) == ctx_scores.size(2)
                 block_mask[:, :, offset + self.block_size:] = False
+            
+            # skip this layer in it's not supposed to condition on ctx
+            if not self.condition_on_ctx:  # TODO: more efficient implementation
+                block_mask[:] = True
 
             if debug:
                 print('block mask', block_mask[0, 0, :10, :3, :7])
