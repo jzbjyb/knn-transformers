@@ -23,8 +23,8 @@ export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
 debug=false
 
-setting=perplexity
-data=bm25_split
+setting=generate
+data=bm25
 model=$1  # model to test
 need_model_args=$2  # specify model args or not
 
@@ -74,7 +74,7 @@ if [[ ${setting} == "rerank" ]]; then
 elif [[ ${setting} == "generate_rerank" ]]; then
     generation_prefix_len=4
     max_answer_len=12
-    setting_extra="--do_eval_special generate_rerank"
+    setting_extra="--do_eval_special generate_rerank --predict_with_generate"
 elif [[ ${setting} == "perplexity" ]]; then
     max_answer_len=128
     batch_size=50

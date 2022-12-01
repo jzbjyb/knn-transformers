@@ -1,4 +1,4 @@
-transformers==4.21.3
+transformers==4.24.0
 beir==1.0.1
 datasets
 tqdm

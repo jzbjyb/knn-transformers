@@ -603,7 +603,7 @@ def main():
         eval_examples=validation_examples if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=collator,
-        compute_metrics=None,  # compute_metrics if training_args.do_eval else None, TODO: debug
+        compute_metrics=compute_metrics if training_args.do_eval else None,
         post_process_function=post_processing_function)
 
     if training_args.deepspeed:

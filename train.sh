@@ -33,7 +33,7 @@ debug=false
 train_file=data/wow/train_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
 
-output_dir=checkpoints/models/t53b_wow_alpha4_hard_layer12_head4_ctx32_bm25_sepcrossattn_singlebos_condition12
+output_dir=checkpoints/models/t53b_wow_ctx32_bm25_sepcrossattn_singlebos_onlyblock8_condition12
 
 init_model=google/t5-xl-lm-adapt
 depth=10
@@ -42,7 +42,7 @@ use_context=true
 context_bos=true
 answer_bos=true
 bos_attention=single
-ctx_attention_loss="block:8_layer2heads:12.[4]_conditionfrom:12_loss:hard_alpha:4"
+ctx_attention_loss="block:8_conditionfrom:12_loss:hard_alpha:4"
 
 eval_steps=100
 max_eval_samples=1000
