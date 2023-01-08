@@ -42,7 +42,7 @@ from transformers.utils.model_parallel_utils import assert_device_map, get_devic
 from transformers.models.t5.configuration_t5 import T5Config
 
 from transformers.models.t5.modeling_t5 import (
-    _CONFIG_FOR_DOC, 
+    _CONFIG_FOR_DOC,
     load_tf_weights_in_t5,
     PARALLELIZE_DOCSTRING,
     DEPARALLELIZE_DOCSTRING,
@@ -95,14 +95,14 @@ class FusionT5Config(T5Config):
         parsed = dict(tuple(field.split(':')) for field in ctx_attention_loss.strip().split('_'))
         parsed['layer2heads'] = [tuple(lh.split('.', 1)) for lh in parsed['layer2heads'].split('|') if lh.strip()] if 'layer2heads' in parsed else []
         parsed['layer2heads'] = [(int(lh[0]), eval(lh[1])) for lh in parsed['layer2heads']]
-        parsed['conditionfrom'] = int(parsed['conditionfrom']) if 'conditionfrom' in parsed else 0  # condition on ctx starting from this layer 
+        parsed['conditionfrom'] = int(parsed['conditionfrom']) if 'conditionfrom' in parsed else 0  # condition on ctx starting from this layer
         parsed['block'] = int(parsed['block'])
         parsed['alpha'] = float(parsed['alpha'])
         return parsed
 
 class FusionT5Attention(T5Attention):
     def __init__(
-        self, 
+        self,
         config: FusionT5Config,
         has_relative_attention_bias: bool = False,
         layer_index: int = -1):
@@ -121,7 +121,7 @@ class FusionT5Attention(T5Attention):
         assert self.ctx_token_agg in {'max', 'mean', 'normalize-sum'}
 
     def add_position_bias(
-        self, 
+        self,
         extended_seq_length: int,  # the total length of query
         extended_key_length: int,  # the total length of key
         scores: torch.Tensor,  # (batch_size, n_heads, seq_length, [n_ctxs,] key_length)
@@ -188,14 +188,14 @@ class FusionT5Attention(T5Attention):
                 output_attentions=output_attentions)
             attention_output = ((attention_output[0], None), ((None,) + attention_output[1], None)) + attention_output[2:]
             return attention_output
-        
+
         assert (past_key_value is None) == (ctx_past_key_value is None), 'both past_key_value and ctx_past_key_value should be non-None in generation'
         in_generation = not self.training and use_cache and hidden_states.size(1) == 1  # do not set use_cache=True for loss evaluation # TODO: disable use_cache for loss evaluation
         gen_step = (0 if past_key_value is None else past_key_value[-1].size(2)) if in_generation else -1  # zero-based
         batch_size = hidden_states.size(0)
 
         if ctx_past_key_value is None:  # encode ctxs
-            # always compute position bias on the fly 
+            # always compute position bias on the fly
             # TODO: support layer_head_mask
             n_ctxs = ctx_hidden_states.size(1)
             ctx_hidden_states, ctx_past_key_value = super().forward(
@@ -292,26 +292,26 @@ class FusionT5Attention(T5Attention):
 
         # compute scores over ctx
         ctx_all_mask = ctx_all_mask.permute(0, 2, 3, 1, 4)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
-        
+
         def compute_ctx_scores(_query_states):  # (batch_size, n_heads, seq_length, dim_per_head)
             ctx_scores = torch.einsum('bnqd,bnckd->bnqck', _query_states, ctx_key)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
             seq_length, ctx_seq_length = ctx_scores.size(2), ctx_scores.size(-1)
             min_val_for_mask = torch.finfo(ctx_all_mask.dtype).min
             if self.bos_attention == 'double':
                 ctx_scores = self.add_position_bias(
-                    extended_seq_length=ctx_seq_length + real_seq_length, 
-                    extended_key_length=ctx_seq_length + key_length, 
-                    scores=ctx_scores, 
+                    extended_seq_length=ctx_seq_length + real_seq_length,
+                    extended_key_length=ctx_seq_length + key_length,
+                    scores=ctx_scores,
                     mask=ctx_all_mask)[0]
             elif self.bos_attention == 'single':
                 ctx_scores = self.add_position_bias(
                     extended_seq_length=ctx_seq_length + real_seq_length,  # why move ctx closer to target by skipping the bos of target (-1) does not work?
-                    extended_key_length=ctx_seq_length + key_length, 
-                    scores=ctx_scores, 
+                    extended_key_length=ctx_seq_length + key_length,
+                    scores=ctx_scores,
                     mask=ctx_all_mask)[0]
                 # mask (1) attention to bos of ctx, and (2) attention from bos of target
                 cam_shift_right = torch.cat([
-                    torch.ones_like(ctx_all_mask)[..., :1] * min_val_for_mask, 
+                    torch.ones_like(ctx_all_mask)[..., :1] * min_val_for_mask,
                     ctx_all_mask[..., :-1]], -1)
                 final_mask = cam_shift_right.ne(0) & ctx_all_mask.eq(0)  # (1) true for bos of ctx
                 if final_mask.size(2) == 1:
@@ -362,9 +362,9 @@ class FusionT5Attention(T5Attention):
                     attn2 = (block2_attn * block_ctx_mask).sum(-1) * block2_mask.unsqueeze(1).unsqueeze(-1)  # (batch_size, n_used_heads, second_block_size, n_ctxs)
                 else:
                     raise ValueError
-                
+
                 ctx_attn_scores = torch.cat([
-                    attn1.permute(0, 3, 1, 2).contiguous(), 
+                    attn1.permute(0, 3, 1, 2).contiguous(),
                     attn2.permute(0, 3, 1, 2).contiguous()], -1)  # (batch_size, n_ctxs, n_used_heads, first_block_size + second_block_size)
                 ctx_attn_scores_mask = torch.cat([block1_mask, block2_mask], -1)[:, None, None, :].repeat(
                     1, ctx_attn_scores.size(1), ctx_attn_scores.size(2), 1).to(ctx_attn_scores)  # (batch_size, n_ctxs, n_used_heads, first_block_size + second_block_size)
@@ -381,7 +381,7 @@ class FusionT5Attention(T5Attention):
                     block_mask = block_mask.repeat(1, 1, ctx_scores.size(2), 1, 1)  # (batch_size, n_heads, seq_length, n_ctxs, ctx_seq_length)
                 assert block_mask.size(2) == ctx_scores.size(2)
                 block_mask[:, :, offset + self.block_size:] = False
-            
+
             # skip this layer in it's not supposed to condition on ctx
             if not self.condition_on_ctx:  # TODO: more efficient implementation
                 block_mask[:] = True
@@ -418,14 +418,14 @@ class FusionT5Attention(T5Attention):
 
 class FusionT5LayerSelfAttention(T5LayerSelfAttention):
     def __init__(
-        self, 
-        config, 
+        self,
+        config,
         has_relative_attention_bias: bool = False,
         layer_index: int = -1):
         super().__init__(config, has_relative_attention_bias=has_relative_attention_bias)
         self.SelfAttention = FusionT5Attention(
-            config, 
-            has_relative_attention_bias=has_relative_attention_bias, 
+            config,
+            has_relative_attention_bias=has_relative_attention_bias,
             layer_index=layer_index)
 
     def forward(
@@ -548,22 +548,22 @@ class FusionT5LayerCrossAttention(T5LayerCrossAttention):
             ctx_hidden_states = ctx_hidden_states + self.dropout(ctx_attention_output[0])
             # reshape
             ctx_hidden_states = ctx_hidden_states.view(bs, n_ctxs, *ctx_hidden_states.shape[1:])
-        
+
         outputs = ((hidden_states, ctx_hidden_states),) + attention_output[1:]
         return outputs
 
 
 class FusionT5Block(T5Block):
     def __init__(
-        self, 
-        config, 
+        self,
+        config,
         has_relative_attention_bias: bool = False,
         layer_index: int = -1):
         super().__init__(config, has_relative_attention_bias=has_relative_attention_bias)
         if self.is_decoder:
             self.layer = nn.ModuleList()
             self.layer.append(FusionT5LayerSelfAttention(
-                config, 
+                config,
                 has_relative_attention_bias=has_relative_attention_bias,
                 layer_index=layer_index))
             self.layer.append(FusionT5LayerCrossAttention(config))
@@ -697,16 +697,23 @@ class FusionT5PreTrainedModel(T5PreTrainedModel):
             module.gradient_checkpointing = value
 
 
+@dataclass
+class BaseModelOutputWithPastAndCrossAttentionsCustom(BaseModelOutputWithPastAndCrossAttentions):
+    last_hidden_state_for_ctx: Optional[torch.FloatTensor] = None
+    ctx_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    ctx_embeddings: Optional[torch.FloatTensor] = None
+
+
 class FusionT5Decoder(T5Stack):
     def __init__(self, config, embed_tokens=None):
         super().__init__(config, embed_tokens=embed_tokens)
         self.block = nn.ModuleList(
             [FusionT5Block(
-                config, 
+                config,
                 has_relative_attention_bias=True,  # has_relative_attention_bias for all layers
                 layer_index=i) for i in range(config.num_layers)])
         rab = self.block[0].layer[0].SelfAttention.relative_attention_bias
-        for block in self.block:  # copy relative_attention_bias to all layers to enable on-the-fly computation of position_bias 
+        for block in self.block:  # copy relative_attention_bias to all layers to enable on-the-fly computation of position_bias
             block.layer[0].SelfAttention.relative_attention_bias = rab
         # Initialize weights and apply final processing
         # TODO: any issue when executed twice?
@@ -719,7 +726,7 @@ class FusionT5Decoder(T5Stack):
         for block in self.block:
             block.layer[0].SelfAttention.relative_attention_bias = rab
         self._copied = True
-    
+
     def forward(
         self,
         input_ids=None,  # (batch_size, seq_length)
@@ -737,8 +744,10 @@ class FusionT5Decoder(T5Stack):
         use_cache=None,
         output_attentions=None,
         output_hidden_states=None,
+        output_ctx_hidden_states=None,
+        output_embeddings=None,
         return_dict=None,
-    ):        
+    ):
         # copy
         self._copy_relative_attention_bias()
 
@@ -751,6 +760,7 @@ class FusionT5Decoder(T5Stack):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
+        output_ctx_hidden_states = (output_ctx_hidden_states if output_ctx_hidden_states is not None else self.config.output_hidden_states)
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         ctx_input_ids, ctx_attention_mask = decoder_ctx_input_ids, decoder_ctx_attention_mask
         has_ctx = ctx_input_ids is not None
@@ -783,6 +793,8 @@ class FusionT5Decoder(T5Stack):
         ctx_inputs_embeds = None
         if has_ctx_and_run_hidden_states:  # emb ctx
             ctx_inputs_embeds = self.embed_tokens(ctx_input_ids)
+            if output_embeddings:
+                ctx_inputs_embeds.retain_grad()
 
         # required mask seq length can be calculated via length of past
         # 1 refers to key of (query-key-value) triplets
@@ -848,6 +860,7 @@ class FusionT5Decoder(T5Stack):
 
         present_key_value_states = () if use_cache else None
         all_hidden_states = () if output_hidden_states else None
+        all_ctx_hidden_states = () if output_ctx_hidden_states else None
         all_attentions = () if output_attentions else None
         all_cross_attentions = () if (output_attentions and self.is_decoder) else None
         position_bias = None
@@ -890,6 +903,8 @@ class FusionT5Decoder(T5Stack):
                     cross_attn_layer_head_mask = cross_attn_layer_head_mask.to(hidden_states.device)
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
+            if output_ctx_hidden_states:
+                all_ctx_hidden_states = all_ctx_hidden_states + (ctx_hidden_states,)
 
             if self.gradient_checkpointing and self.training:
                 if use_cache:
@@ -974,10 +989,13 @@ class FusionT5Decoder(T5Stack):
 
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.dropout(hidden_states)
+        # TODO: add the above for ctx_hidden_states?
 
         # Add last layer
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
+        if output_ctx_hidden_states:
+            all_ctx_hidden_states = all_ctx_hidden_states + (ctx_hidden_states,)
 
         if not return_dict:
             return tuple(
@@ -991,18 +1009,15 @@ class FusionT5Decoder(T5Stack):
                 ]
                 if v is not None
             )
-        return BaseModelOutputWithPastAndCrossAttentions(
+        return BaseModelOutputWithPastAndCrossAttentionsCustom(
             last_hidden_state=hidden_states,
             past_key_values=present_key_value_states,
             hidden_states=all_hidden_states,
+            ctx_hidden_states=all_ctx_hidden_states,
             attentions=all_attentions,
             cross_attentions=all_cross_attentions,
+            ctx_embeddings=ctx_inputs_embeds if output_embeddings else None,
         )
-
-
-@dataclass
-class BaseModelOutputWithPastAndCrossAttentionsWithTwoEncoder(BaseModelOutputWithPastAndCrossAttentions):
-    last_hidden_state_for_ctx: Optional[torch.FloatTensor] = None
 
 
 class FusionT5Encoder(T5Stack):
@@ -1048,11 +1063,11 @@ class FusionT5Encoder(T5Stack):
                 return_dict=return_dict,
             )[0]  # (batch_size * n_ctxs, seq_length_for_ctx, dim)
             hidden_states_for_ctx = hidden_states_for_ctx.view(bs, n_ctxs, *hidden_states_for_ctx.shape[1:])
-        
+
         if not return_dict:
             outputs = outputs[:1] + (hidden_states_for_ctx,) + outputs[1:]
             return outputs
-        return BaseModelOutputWithPastAndCrossAttentionsWithTwoEncoder(
+        return BaseModelOutputWithPastAndCrossAttentionsCustom(
             last_hidden_state=outputs.last_hidden_state,
             last_hidden_state_for_ctx=hidden_states_for_ctx,
             past_key_values=outputs.past_key_values,
@@ -1067,6 +1082,7 @@ class FusionSeq2SeqLMOutput(Seq2SeqLMOutput):
     rerank_accuracy: Optional[torch.FloatTensor] = None
     ctx_pred_scores: Optional[torch.FloatTensor] = None
     ctx_gold_scores: Optional[torch.FloatTensor] = None
+    ctx_embeddings: Optional[torch.FloatTensor] = None
 
 
 @add_start_docstrings("""T5 Model with a `language modeling` head on top.""", T5_START_DOCSTRING)
@@ -1209,6 +1225,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         use_cache: Optional[bool] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
+        output_embeddings: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple[torch.FloatTensor], Seq2SeqLMOutput]:
         r"""
@@ -1265,8 +1282,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
             )
-        elif return_dict and not isinstance(encoder_outputs, BaseModelOutputWithPastAndCrossAttentionsWithTwoEncoder):
-            encoder_outputs = BaseModelOutputWithPastAndCrossAttentionsWithTwoEncoder(
+        elif return_dict and not isinstance(encoder_outputs, BaseModelOutputWithPastAndCrossAttentionsCustom):
+            encoder_outputs = BaseModelOutputWithPastAndCrossAttentionsCustom(
                 last_hidden_state=encoder_outputs[0],
                 last_hidden_state_for_ctx=encoder_outputs[1],
                 hidden_states=encoder_outputs[2] if len(encoder_outputs) > 2 else None,
@@ -1319,6 +1336,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             use_cache=use_cache,
             output_attentions=True,  # TODO: debug
             output_hidden_states=output_hidden_states,
+            output_embeddings=output_embeddings,
             return_dict=return_dict,
         )
 
@@ -1344,11 +1362,11 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                 if 'normalize' in self.layerhead_agg:
                     ctx_pred_scores = ctx_pred_scores.softmax(1)
                     ctx_gold_scores = ctx_gold_scores.softmax(1)
-                
+
                 if 'weight' in self.layerhead_agg or 'softmax' in self.layerhead_agg:
                     ctx_pred_scores = self.combine_layerhead(ctx_pred_scores)
                     ctx_gold_scores = self.combine_layerhead(ctx_gold_scores)
-                
+
                 if 'mean' in self.layerhead_agg:
                     ctx_pred_scores = ctx_pred_scores.mean([2, 3])  # (batch_size, n_ctxs)
                     ctx_gold_scores = ctx_gold_scores.mean([2, 3])  # (batch_size, n_ctxs)
@@ -1426,7 +1444,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             loss_fct = CrossEntropyLoss(ignore_index=-100)
             loss = loss_fct(lm_logits.view(-1, lm_logits.size(-1)), labels.view(-1))
             # TODO(thom): Add z_loss https://github.com/tensorflow/mesh/blob/fa19d69eafc9a482aff0b59ddd96b025c0cb207d/mesh_tensorflow/layers.py#L666
-            
+
             if handle_ret and ctx_pred_scores.dim() == 2:  # compute loss
                 if 'normalize' in self.layerhead_agg:
                     ctx_pred_logprob = torch.log(ctx_pred_scores + 1e-10)
@@ -1464,7 +1482,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             encoder_attentions=encoder_outputs.attentions,
             ctx_pred_scores=ctx_pred_scores,
             ctx_gold_scores=ctx_gold_scores,
-            ctx_attention_loss=ctx_attention_loss)
+            ctx_attention_loss=ctx_attention_loss,
+            ctx_embeddings=decoder_outputs.ctx_embeddings)
 
     def prepare_inputs_for_generation(
         self,
@@ -1527,10 +1546,10 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
 
 def prepare(
-    tokenizer, 
-    questions: List[str], 
-    answers: List[str], 
-    ctxs: List[List[str]], 
+    tokenizer,
+    questions: List[str],
+    answers: List[str],
+    ctxs: List[List[str]],
     question_max_length: int = 50,
     answer_max_length: int = 50,
     ctx_max_length: int = 50,
@@ -1551,7 +1570,7 @@ def prepare(
         'Barack Obama.',
         'the Imperial Family.'
     ]
-    
+
     # question
     questions = tokenizer(
         questions,
@@ -1575,7 +1594,7 @@ def prepare(
     tokenizer.padding_side = 'right'
     decoder_ctx_input_ids = ctxs.input_ids.view(bs, n_ctxs, -1)  # (batch_size, n_ctxs, ctx_seq_length)
     decoder_ctx_attention_mask = ctxs.attention_mask.view(bs, n_ctxs, -1)  # (batch_size, n_ctxs, ctx_seq_length)
-    
+
     # answers
     answers = tokenizer(
         [add_to_answers + ans for ans in answers],
@@ -1610,6 +1629,6 @@ def prepare(
     if not for_generation:
         batch['labels'] = labels  # decoder_input_ids will be created based on labels
         batch['decoder_input_ids'] = decoder_input_ids
-        batch['decoder_attention_mask'] = decoder_attention_mask 
+        batch['decoder_attention_mask'] = decoder_attention_mask
 
     return batch

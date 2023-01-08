@@ -12,9 +12,6 @@
 #SBATCH --mem=512GB
 #SBATCH --job-name=fustiont5
 
-module purge
-module load anaconda3
-. /usr/share/modules/init/sh
 eval "$(conda shell.bash hook)"
 conda activate knn
 
@@ -23,7 +20,7 @@ export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
 debug=false
 
-setting=generate
+setting=gradient-batch
 data=bm25
 model=$1  # model to test
 need_model_args=$2  # specify model args or not
@@ -80,6 +77,14 @@ elif [[ ${setting} == "perplexity" ]]; then
     batch_size=50
     max_eval_samples=100000
     setting_extra="--do_eval_special perplexity"
+elif [[ ${setting} == "gradient" ]]; then
+    max_answer_len=128
+    batch_size=8
+    max_eval_samples=10000
+    setting_extra="--do_eval_special gradient"
+elif [[ ${setting} == "gradient-batch" ]]; then
+    max_answer_len=128
+    setting_extra="--do_eval_special gradient-batch"
 elif [[ ${setting} == "generate" ]]; then
     generation_prefix_len=8
     max_answer_len=128
@@ -113,6 +118,7 @@ if [[ ${debug} == "small" ]]; then
 fi
 
 deepspeed train.py \
+    --deepspeed deepspeed/lr-decay-zero1.json \
     --model_name_or_path ${model} \
     --train_file ${train_file} \
     --validation_file ${val_file} \
@@ -129,6 +135,7 @@ deepspeed train.py \
     --do_eval \
     --per_device_eval_batch_size ${batch_size} \
     --max_eval_samples ${max_eval_samples} \
+    --gradient_checkpointing \
     --dataloader_num_workers 4 \
     --report_to none \
     ${model_args} ${setting_extra}

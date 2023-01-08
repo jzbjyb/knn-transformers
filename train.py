@@ -32,6 +32,7 @@ import torch
 import torch.cuda.amp
 from torch.utils.data import DataLoader
 from torch.nn import CrossEntropyLoss
+import torch.linalg
 from tqdm import trange
 
 import evaluate
@@ -232,7 +233,7 @@ class DataCollatorForFusion:
 
     def train(self):
         self._train = True
-    
+
     @property
     def all_tokens(self):
         if hasattr(self, '_all_tokens'):
@@ -243,7 +244,7 @@ class DataCollatorForFusion:
         if not self.answer_bos:  # use the first token of the answer prefix to start generation if bos is not prepended to the answer
             return self.tokenizer.encode(self.answer_prefix)[0]
         return self.model.config.decoder_start_token_id
-    
+
     def get_labels_from_decoder_input_ids(self, decoder_input_ids):
         assert self.tokenizer.pad_token_id == 0
         # remove the first token of answers (treated as generation trigger token) to make it labels
@@ -253,8 +254,8 @@ class DataCollatorForFusion:
         return labels
 
     def __call__(
-        self, 
-        examples: List[Dict], 
+        self,
+        examples: List[Dict],
         debug: bool = False):
         decoder_start_token = self.tokenizer.convert_ids_to_tokens([self.model.config.decoder_start_token_id])[0]
 
@@ -298,7 +299,7 @@ class DataCollatorForFusion:
         self.tokenizer.padding_side = 'right'
         decoder_ctx_input_ids = ctxs.input_ids.view(bs, n_ctxs, -1)  # (batch_size, n_ctxs, ctx_seq_length)
         decoder_ctx_attention_mask = ctxs.attention_mask.view(bs, n_ctxs, -1)  # (batch_size, n_ctxs, ctx_seq_length)
-        
+
         # answers
         dst = f'{decoder_start_token} ' if self.answer_bos else ''
         answers = self.tokenizer(
@@ -326,7 +327,7 @@ class DataCollatorForFusion:
             if self.encoder_input_for_context:
                 batch['input_ids_for_ctx'] = input_ids_for_ctx
                 batch['attention_mask_for_ctx'] = attention_mask_for_ctx
-        
+
         if debug:
             print(batch)
             print(decoder_ctx_input_ids[0, :3])
@@ -423,7 +424,7 @@ def main():
                 config_specific_kwargs[key] = getattr(model_args, key)
     else:
         config_specific_kwargs = {}
-    
+
     if 'opt' in model_args.model_name_or_path:
         _config_class = FusionOPTConfig
         _model_class = FusionOPTForCausalLM
@@ -520,7 +521,7 @@ def main():
             else:
                 formatted_predictions = [x.strip() for x in decoded_preds]
             return EvalPrediction(predictions=formatted_predictions, label_ids=references)
-    
+
     elif 't5' in model_args.model_name_or_path:
         def format_data_dict(examples: List[Dict]):
             formatted = []
@@ -537,9 +538,9 @@ def main():
             metrics = metric_func.compute(predictions=predictions, references=references)
             return metrics
         def post_processing_function(
-            references, 
-            features, 
-            outputs, 
+            references,
+            features,
+            outputs,
             stage: str = 'eval',
             debug: bool = False,
             remove_decoding_prefix: bool = True):
@@ -588,8 +589,8 @@ def main():
         answer_bos=data_args.answer_bos,
         encoder_input_for_context=data_args.encoder_input_for_context)
     gen_kwargs = {
-        'max_length': data_args.max_answer_len, 
-        'num_beams': 1, 
+        'max_length': data_args.max_answer_len,
+        'num_beams': 1,
         'decoder_start_token_id': collator.get_real_decoder_start_token_id(),
         'prefix_len': data_args.generation_prefix_len,
     }
@@ -629,7 +630,7 @@ def main():
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
-    
+
     if training_args.do_eval and training_args.do_eval_special:
         logger.info("*** Evaluate special ***")
         model.eval()
@@ -640,7 +641,7 @@ def main():
             batch_size=training_args.per_device_eval_batch_size,
             num_processes=training_args.world_size,
             process_index=training_args.process_index)
-        
+
         dataloader = DataLoader(
             validation_dataset,
             sampler=sampler,
@@ -653,9 +654,9 @@ def main():
         for step, batch in tqdm(enumerate(dataloader)):
             batch = trainer._prepare_inputs(batch)
 
-            with torch.no_grad():
-                # generate
-                if 'generate' in training_args.do_eval_special:
+            # generate
+            if 'generate' in training_args.do_eval_special:
+                with torch.no_grad():
                     gen_batch = dict(batch)
                     for key in ['labels', 'decoder_input_ids', 'decoder_attention_mask']:  # remove model inputs irrelevant to generation
                         if key in gen_batch:
@@ -674,15 +675,19 @@ def main():
                     # generate and use generated outputs to overwrite inputs
                     gen_outputs = model.generate(**gen_batch, **_gen_kwargs, prefix_allowed_tokens_fn=prefix_allowed_tokens_fn)
                     batch['decoder_input_ids'] = gen_outputs
-                    batch['decoder_attention_mask'] = torch.ones_like(gen_outputs)        
+                    batch['decoder_attention_mask'] = torch.ones_like(gen_outputs)
                     batch['labels'] = collator.get_labels_from_decoder_input_ids(gen_outputs)
-                
-                if 'rerank' in training_args.do_eval_special:  # compute retrieval attention for reranking
+
+            if 'rerank' in training_args.do_eval_special:  # compute retrieval attention for reranking
+                with torch.no_grad():
                     eval_outputs = model(**batch)
-                elif 'perplexity' in training_args.do_eval_special:  # compute perplexity
+            elif 'perplexity' in training_args.do_eval_special:  # compute perplexity
+                with torch.no_grad():
                     eval_outputs = model(**batch)
-                else:
-                    raise NotImplementedError
+            elif 'gradient' in training_args.do_eval_special or 'gradient-batch' in training_args.do_eval_special:  # bp
+                eval_outputs = model(**batch, output_embeddings=True)  # TODO: use deepspeed
+            else:
+                raise NotImplementedError
 
             def rerank(eval_outputs, use_gold: bool = False):
                 # gather
@@ -693,7 +698,7 @@ def main():
                 ranks = torch.sort(ctx_pred_scores, descending=True, dim=1).indices  # (gathered_batch_size, n_ctx, n_used_layers, n_used_heads)
                 top1_accs = ranks[:, 0, ...].eq(0).float()  # (gathered_batch_size, n_used_layers, n_used_heads)
                 return top1_accs
-            
+
             def perplexity(eval_outputs):
                 labels = batch['labels']
                 logits = eval_outputs.logits
@@ -702,12 +707,40 @@ def main():
                 loss = loss.mean(-1)  # (batch_size,)
                 loss = trainer._pad_across_processes(loss, pad_index=0)  # (batch_size,)
                 loss = trainer._nested_gather(loss)  # (gathered_batch_size,)
-                return loss
+                return -loss  # higher is better
 
-            if 'rerank' in training_args.do_eval_special: 
+            def gradient(eval_outputs, agg: str = 'mean', remove_ctx_dim: bool = False):
+                eval_outputs.loss.backward()
+                #trainer.deepspeed.backward(eval_outputs.loss)
+                ctx_embeddings = eval_outputs.ctx_embeddings  # (bs, n_ctxs, ctx_seq_length, dim)
+                # compute grad norm
+                grad = torch.linalg.norm(ctx_embeddings.grad, dim=-1)  # (bs, n_ctxs, ctx_seq_length)
+                if agg == 'mean':
+                    grad = grad.mean(-1)  # (bs, n_ctxs)
+                elif agg == 'max':
+                    grad = grad.max(-1).values  # (bs, n_ctxs)
+                elif agg == 'min':
+                    grad = grad.min(-1).values  # (bs, n_ctxs)
+                else:
+                    raise NotImplementedError
+                if remove_ctx_dim:
+                    grad = grad[:, 0]  # (bs, n_ctxs)
+                grad = trainer._pad_across_processes(grad, pad_index=-1)  # (bs, n_ctxs) or (bs)
+                grad = trainer._nested_gather(grad)  # (gathered_batch_size, n_ctxs) or (gathered_batch_size)
+                if not remove_ctx_dim:
+                    ranks = torch.sort(grad, descending=True, dim=1).indices  # (gathered_batch_size, n_ctxs)
+                    top1_accs = ranks[:, 0].eq(0).float()  # (gathered_batch_size)
+                    return top1_accs
+                return grad
+
+            if 'rerank' in training_args.do_eval_special:
                 finals.append(rerank(eval_outputs))
             elif 'perplexity' in training_args.do_eval_special:
                 finals.append(perplexity(eval_outputs))
+            elif 'gradient' in training_args.do_eval_special:
+                finals.append(gradient(eval_outputs, agg='mean', remove_ctx_dim=True))
+            elif 'gradient-batch' in training_args.do_eval_special:
+                finals.append(gradient(eval_outputs, agg='mean', remove_ctx_dim=False))
             else:
                 raise NotImplementedError
 
@@ -718,15 +751,19 @@ def main():
                 print(f'#examples {len(finals)}, accuracy')
                 for layer in acc:
                     print('\t'.join(map(str, layer.tolist())))
-            elif 'perplexity' in training_args.do_eval_special:
+            elif 'gradient-batch' in training_args.do_eval_special:
+                finals = torch.cat(finals, 0)  # (num_examples)
+                acc = finals.mean(0).item()
+                print(f'#examples {len(finals)}, accuracy {acc}')
+            elif 'perplexity' in training_args.do_eval_special or 'gradient' in training_args.do_eval_special:
                 qids = [example['qid'] for example in validation_dataset]
-                losses = torch.cat(finals, 0)[:len(qids)].tolist()  # (num_examples,)
-                assert len(qids) == len(losses)
-                qid2losses: Dict[str, List[float]] = defaultdict(list)
-                for qid, loss in zip(qids, losses):
-                    qid2losses[qid].append(loss)
-                acc = np.mean([np.argmin(losses) == 0 for qid, losses in qid2losses.items()])
-                print(f'#exampels {len(qid2losses)}, acc {acc}')
+                scores = torch.cat(finals, 0)[:len(qids)].tolist()  # (num_examples,)
+                assert len(qids) == len(scores)
+                qid2scores: Dict[str, List[float]] = defaultdict(list)
+                for qid, score in zip(qids, scores):
+                    qid2scores[qid].append(score)
+                acc = np.mean([np.argmax(scores) == 0 for qid, scores in qid2scores.items()])
+                print(f'#exampels {len(qid2scores)}, acc {acc}')
             else:
                 raise NotImplementedError
 
@@ -750,7 +787,7 @@ def main():
             with torch.no_grad():
                 if training_args.fp16:
                     with torch.cuda.amp.autocast():
-                        # TODO: decoder_start_token_id 
+                        # TODO: decoder_start_token_id
                         outputs = model.generate(
                             **batch, num_beams=num_beams, max_length=data_args.max_answer_len)
                 else:
