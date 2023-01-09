@@ -62,7 +62,8 @@ from transformers.utils.versions import require_version
 from transformers.trainer_utils import EvalLoopOutput, EvalPrediction
 
 from deepspeed import checkpointing as ds_checkpointing
-from models.fusion_t5 import FusionT5Config, FusionT5ForConditionalGeneration
+from models.fusion_t5 import FusionT5Config, FusionT5ForConditionalGeneration, FusionSeq2SeqLMOutput
+from models.retriever import BM25
 
 from em_eval import ems
 
@@ -593,6 +594,7 @@ def main():
         'num_beams': 1,
         'decoder_start_token_id': collator.get_real_decoder_start_token_id(),
         'prefix_len': data_args.generation_prefix_len,
+        'output_scores': True,
     }
 
     # Initialize our Trainer
@@ -650,6 +652,18 @@ def main():
             drop_last=False,
             num_workers=training_args.dataloader_num_workers,
             pin_memory=training_args.dataloader_pin_memory)
+        # TODO: if there is not enough examples for the last batch the examples at the beginning will be reused
+
+        retriever = BM25(
+            tokenizer=tokenizer,
+            beir_dir='data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans',
+            index_name='test',
+            format_func=lambda doc: f'<pad> {data_args.context_prefix}{doc["text"]}' if doc is not None else f'<pad> {data_args.context_prefix}',  # TODO: always use <pad>
+            max_length=data_args.max_context_len)
+        decoder_retrieval_kwargs = {
+            'retriever': retriever,
+            'frequency': 1 if data_args.use_context else 0
+        }
 
         for step, batch in tqdm(enumerate(dataloader)):
             batch = trainer._prepare_inputs(batch)
@@ -657,33 +671,53 @@ def main():
             # generate
             if 'generate' in training_args.do_eval_special:
                 with torch.no_grad():
+                    # remove model inputs irrelevant to generation
                     gen_batch = dict(batch)
-                    for key in ['labels', 'decoder_input_ids', 'decoder_attention_mask']:  # remove model inputs irrelevant to generation
+                    for key in ['labels', 'decoder_input_ids', 'decoder_attention_mask']:
                         if key in gen_batch:
                             del gen_batch[key]
-                    # prepare prefix function
+
                     _gen_kwargs = dict(gen_kwargs)
+                    # prepare prefix function
+                    prefix_len = _gen_kwargs.pop('prefix_len', 0)
                     prefix_allowed_tokens_fn = None
-                    if 'prefix_len' in _gen_kwargs and _gen_kwargs['prefix_len']:
-                        prefix_ids = batch['labels'][:, :_gen_kwargs['prefix_len']]
+                    if prefix_len:
+                        prefix_ids = batch['labels'][:, :prefix_len]
                         def prefix_allowed_tokens_fn(batch_id: int, gen_ids: torch.Tensor) -> List[int]:
                             if gen_ids.shape[-1] > len(prefix_ids[batch_id]):
                                 return collator.all_tokens
                             return prefix_ids[batch_id][gen_ids.shape[-1] - 1]
-                    if 'prefix_len' in _gen_kwargs:
-                        del _gen_kwargs['prefix_len']
+
+                    # output generation probabilities
+                    output_scores = _gen_kwargs.pop('output_scores', False)
+
                     # generate and use generated outputs to overwrite inputs
-                    gen_outputs = model.generate(**gen_batch, **_gen_kwargs, prefix_allowed_tokens_fn=prefix_allowed_tokens_fn)
-                    batch['decoder_input_ids'] = gen_outputs
-                    batch['decoder_attention_mask'] = torch.ones_like(gen_outputs)
-                    batch['labels'] = collator.get_labels_from_decoder_input_ids(gen_outputs)
+                    gen_batch['decoder_retrieval_kwargs'] = decoder_retrieval_kwargs
+                    gen_outputs = model.generate(
+                        **gen_batch,
+                        **_gen_kwargs,
+                        prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+                        output_scores=output_scores,
+                        return_dict_in_generate=True)
+                    generated_tokens = gen_outputs.sequences
+
+                    batch['decoder_input_ids'] = generated_tokens
+                    batch['decoder_attention_mask'] = torch.ones_like(generated_tokens)
+                    batch['labels'] = collator.get_labels_from_decoder_input_ids(generated_tokens)
+
+                    if output_scores:
+                        logits = torch.stack(gen_outputs.scores, 1)  # (bs, seq_len, vocab_size) with bos
+                        logits = torch.cat([logits, torch.zeros(logits.size(0), 1, logits.size(2)).to(logits)], 1)  # add bos (bs, seq_len, vocab_size)
 
             if 'rerank' in training_args.do_eval_special:  # compute retrieval attention for reranking
                 with torch.no_grad():
                     eval_outputs = model(**batch)
             elif 'perplexity' in training_args.do_eval_special:  # compute perplexity
-                with torch.no_grad():
-                    eval_outputs = model(**batch)
+                if 'generate' in training_args.do_eval_special:  # use generated tokens
+                    eval_outputs = FusionSeq2SeqLMOutput(logits=logits)
+                else:
+                    with torch.no_grad():
+                        eval_outputs = model(**batch)
             elif 'gradient' in training_args.do_eval_special or 'gradient-batch' in training_args.do_eval_special:  # bp
                 eval_outputs = model(**batch, output_embeddings=True)  # TODO: use deepspeed
             else:
@@ -703,11 +737,14 @@ def main():
                 labels = batch['labels']
                 logits = eval_outputs.logits
                 loss_fct = CrossEntropyLoss(reduction='none', ignore_index=-100)
-                loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1)).view(*labels.size())  # (batch_size, seq_len)
-                loss = loss.mean(-1)  # (batch_size,)
-                loss = trainer._pad_across_processes(loss, pad_index=0)  # (batch_size,)
-                loss = trainer._nested_gather(loss)  # (gathered_batch_size,)
-                return -loss  # higher is better
+                nll = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1)).view(*labels.size())  # (batch_size, seq_len)
+                nll = nll.sum(-1)  # (batch_size,)
+                count = labels.ne(-100).sum(-1)  # (batch_size,)
+                nll = trainer._pad_across_processes(nll, pad_index=0)  # (batch_size,)
+                count = trainer._pad_across_processes(count, pad_index=0)  # (batch_size,)
+                nll = trainer._nested_gather(nll)  # (gathered_batch_size,)
+                count = trainer._nested_gather(count)  # (gathered_batch_size,)
+                return -nll, count  # higher is better
 
             def gradient(eval_outputs, agg: str = 'mean', remove_ctx_dim: bool = False):
                 eval_outputs.loss.backward()
@@ -755,6 +792,11 @@ def main():
                 finals = torch.cat(finals, 0)  # (num_examples)
                 acc = finals.mean(0).item()
                 print(f'#examples {len(finals)}, accuracy {acc}')
+            elif 'generate_perplexity' in training_args.do_eval_special:
+                ll, count = zip(*finals)
+                ll = torch.cat(ll)[:len(validation_dataset)]
+                count = torch.cat(count)[:len(validation_dataset)]
+                print(f'#examples {len(ll)}, #tokens {count.sum().item()}, perplexity: {torch.exp(-ll.sum() / count.sum()).item()}')
             elif 'perplexity' in training_args.do_eval_special or 'gradient' in training_args.do_eval_special:
                 qids = [example['qid'] for example in validation_dataset]
                 scores = torch.cat(finals, 0)[:len(qids)].tolist()  # (num_examples,)

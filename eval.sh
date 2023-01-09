@@ -20,7 +20,7 @@ export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 
 debug=false
 
-setting=gradient-batch
+setting=generate_perplexity
 data=bm25
 model=$1  # model to test
 need_model_args=$2  # specify model args or not
@@ -42,7 +42,7 @@ if [[ ${data} == "bm25" ]]; then
     #val_file=data/wow/val_astarget_selfprov_evidence.json.beir_ans.fid/dev.json
     # bm25 docs (dedup)
     val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
-    depth=100
+    depth=1
 elif [[ ${data} == "random" ]]; then
     # all docs (full ranking)
     val_file=data/wow/val_all_dpr.json
@@ -54,7 +54,6 @@ else
     exit
 fi
 
-
 # ------------- hyperparameters -------------
 max_question_len=128
 max_context_len=32
@@ -63,7 +62,7 @@ use_context=true
 context_bos=true
 answer_bos=true
 max_eval_samples=1000
-batch_size=1
+batch_size=32
 
 if [[ ${setting} == "rerank" ]]; then
     max_answer_len=12
@@ -77,6 +76,10 @@ elif [[ ${setting} == "perplexity" ]]; then
     batch_size=50
     max_eval_samples=100000
     setting_extra="--do_eval_special perplexity"
+elif [[ ${setting} == "generate_perplexity" ]]; then
+    generation_prefix_len=128
+    max_answer_len=128
+    setting_extra="--do_eval_special generate_perplexity --predict_with_generat"
 elif [[ ${setting} == "gradient" ]]; then
     max_answer_len=128
     batch_size=8
@@ -86,9 +89,9 @@ elif [[ ${setting} == "gradient-batch" ]]; then
     max_answer_len=128
     setting_extra="--do_eval_special gradient-batch"
 elif [[ ${setting} == "generate" ]]; then
-    generation_prefix_len=8
+    generation_prefix_len=128
     max_answer_len=128
-    ctx_topk=1
+    ctx_topk=0
     setting_extra="--ctx_topk ${ctx_topk} --predict_with_generate"
 else
     exit
@@ -102,7 +105,8 @@ if [[ ${need_model_args} == "true" ]]; then  # use additional model args for pub
     # ctx_attention_loss="block:8_layer2heads:0.list(range(24))|3.list(range(24))|6.list(range(24))|9.list(range(24))|12.list(range(24))|15.list(range(24))|18.list(range(24))|21.list(range(24))|23.list(range(24))_layerheadagg:none_loss:hard_alpha:4"
     # - test perplexity of different contexts
     ctx_attention_loss="block:8_layer2heads:_loss:hard_alpha:4"
-    model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
+    #model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
+    model_args="--bos_attention ${bos_attention}"
 elif [[ ${need_model_args} == "false" ]]; then
     model_args=""
 else
@@ -113,12 +117,14 @@ if [[ ${debug} == "small" ]]; then
     model=google/t5-small-lm-adapt
     bos_attention=single
     ctx_attention_loss="block:8_layer2heads:_loss:hard_alpha:4"
-    model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
-    max_eval_samples=32
+    #model_args="--bos_attention ${bos_attention} --ctx_attention_loss ${ctx_attention_loss}"
+    model_args="--bos_attention ${bos_attention}"
+    max_eval_samples=8
+    batch_size=2
+    use_context=false
 fi
 
 deepspeed train.py \
-    --deepspeed deepspeed/lr-decay-zero1.json \
     --model_name_or_path ${model} \
     --train_file ${train_file} \
     --validation_file ${val_file} \
@@ -135,7 +141,6 @@ deepspeed train.py \
     --do_eval \
     --per_device_eval_batch_size ${batch_size} \
     --max_eval_samples ${max_eval_samples} \
-    --gradient_checkpointing \
     --dataloader_num_workers 4 \
     --report_to none \
     ${model_args} ${setting_extra}

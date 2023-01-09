@@ -28,8 +28,8 @@ from transformers.deepspeed import is_deepspeed_zero3_enabled
 
 class QuestionAnsweringSeq2SeqTrainer(Seq2SeqTrainer):
     def __init__(
-        self, 
-        *args, 
+        self,
+        *args,
         eval_examples: List[Dict] = None,
         post_process_function: Callable = None,
         **kwargs):
@@ -128,7 +128,7 @@ class QuestionAnsweringSeq2SeqTrainer(Seq2SeqTrainer):
             self.compute_metrics = compute_metrics
 
         self.data_collator.train()
-        
+
         if self.post_process_function is None or self.compute_metrics is None:
             return output
 
@@ -141,7 +141,7 @@ class QuestionAnsweringSeq2SeqTrainer(Seq2SeqTrainer):
                 metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
 
         return PredictionOutput(predictions=predictions.predictions, label_ids=predictions.label_ids, metrics=metrics)
-    
+
     def prediction_step(
         self,
         model,
@@ -170,24 +170,40 @@ class QuestionAnsweringSeq2SeqTrainer(Seq2SeqTrainer):
         )
         if gen_kwargs.get('decoder_start_token_id') is None:
             gen_kwargs['decoder_start_token_id'] = self.data_collator.get_real_decoder_start_token_id()
-    
+
         generation_inputs = dict(inputs)
         for key in ['labels', 'decoder_input_ids', 'decoder_attention_mask']:
             if key in generation_inputs:
                 del generation_inputs[key]
 
         # add prefix function
+        prefix_len = gen_kwargs.pop('prefix_len', 0)
         prefix_allowed_tokens_fn = None
-        if 'prefix_len' in gen_kwargs and gen_kwargs['prefix_len']:
-            prefix_ids = inputs['labels'][:, :gen_kwargs['prefix_len']]
+        if prefix_len:
+            prefix_ids = inputs['labels'][:, :prefix_len]
             def prefix_allowed_tokens_fn(batch_id: int, gen_ids: torch.Tensor) -> List[int]:
                 if gen_ids.shape[-1] > len(prefix_ids[batch_id]):
                     return self.data_collator.all_tokens
                 return prefix_ids[batch_id][gen_ids.shape[-1] - 1]
-        if 'prefix_len' in gen_kwargs:
-            del gen_kwargs['prefix_len']
 
-        generated_tokens = self.model.generate(**generation_inputs, **gen_kwargs, prefix_allowed_tokens_fn=prefix_allowed_tokens_fn)
+        # output generation probabilities
+        output_scores = gen_kwargs.pop('output_scores', False)
+
+        gen_out = self.model.generate(
+            **generation_inputs,
+            **gen_kwargs,
+            prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+            output_scores=output_scores,
+            return_dict_in_generate=True)
+
+        generated_tokens = gen_out.sequences  # (bs, seq_len)
+        if output_scores:
+            token_logprobs = torch.log_softmax(torch.stack(gen_out.scores, 1), -1)  # (bs, seq_len - 1, vocab_size)
+            token_logprobs = torch.cat([
+                torch.zeros(token_logprobs.size(0), 1, token_logprobs.size(2)).to(token_logprobs),
+                token_logprobs], 1)  # add bos (bs, seq_len, vocab_size)
+            token_logprobs = torch.gather(token_logprobs, -1, generated_tokens.unsqueeze(-1)).squeeze(-1)  # (bs, seq_len)
+            sum_logprobs = token_logprobs[generated_tokens.ne(self.tokenizer.pad_token_id)].sum()  # sum of logprobs
 
         # in case the batch is shorter than max length, the output should be padded
         if gen_kwargs.get("max_length") is not None and generated_tokens.shape[-1] < gen_kwargs["max_length"]:
@@ -207,6 +223,9 @@ class QuestionAnsweringSeq2SeqTrainer(Seq2SeqTrainer):
                     loss = (outputs["loss"] if isinstance(outputs, dict) else outputs[0]).mean().detach()
             else:
                 loss = None
+
+        if output_scores:  # output generation probabilities as loss
+            loss = sum_logprobs
 
         if self.args.prediction_loss_only:
             return (loss, None, None)
