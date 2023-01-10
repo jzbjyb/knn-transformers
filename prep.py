@@ -12,13 +12,13 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer
 from datasets import load_dataset
-from kilt.knowledge_source import KnowledgeSource
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.lexical import BM25Search as BM25
 
 class Wikipedia(object):
     def __init__(self):
+        from kilt.knowledge_source import KnowledgeSource
         self.ks = KnowledgeSource()
 
     def get_provenance(self, wiki_id: str, ps: int, pe: int, cs: int, ce: int, whole_paragraph: bool = False) -> str:
@@ -46,10 +46,10 @@ class Wikipedia(object):
         return ' '.join(prov)
 
 def prep_kilt(
-    output_file: str, 
+    output_file: str,
     dataset_name: str,
-    split: str = 'validation', 
-    evidence_method: str = 'provenance', 
+    split: str = 'validation',
+    evidence_method: str = 'provenance',
     whole_paragraph_as_evidence: bool = False,
     skip_answer_as_evidence: bool = True,
     remove_wo_ctx: bool = True,
@@ -62,7 +62,7 @@ def prep_kilt(
 
     data = load_dataset('kilt_tasks', name=dataset_name)
     wikipedia = Wikipedia()
-        
+
     formatteds: List[Tuple] = []
     for i, example in tqdm(enumerate(data[split]), desc='format data'):
         inp: str = example['input']
@@ -88,11 +88,11 @@ def prep_kilt(
                         evidences.append(prov.strip())
                 if 'answer' in evidence_method and ans:
                     evidences.append(ans)
-        
+
         if len(evidences) <= 0 and remove_wo_ctx:  # remove examples without ctx
             continue
         formatteds.append((inp, evidences, answer))
-    
+
     print(f'#examples {len(formatteds)}')
 
     if num_negative_evidence:
@@ -128,7 +128,7 @@ def prep_kilt(
             qa_file = f'{output_file}_qa.json'
             prov_file = f'{output_file}_evidence.json'
             inds = range(len(formatteds))
-        
+
         with open(qa_file, 'w') as qfin, open(prov_file, 'w') as pfin:
             for ind in inds:
                 inp, evidences, answer = formatteds[ind]
@@ -174,7 +174,7 @@ class PredictionWithRetrieval(object):
             return self.tokenizer.convert_ids_to_tokens([token_id])[0]
         else:
             return token_id
-    
+
     def add_one_word(self, line: str):
         seq = line.strip().split(' ')
         token: List = []  # [pred_token, head1, head2, ..., headn]
@@ -191,10 +191,10 @@ class PredictionWithRetrieval(object):
             else:  # id
                 token[-1][-1] = (token[-1][-1], t)
         assert len(token) == 1 + self.n_heads
-    
+
     def get_ids(self, head_idx: int):
         return np.array([[ret_id for (_, ret_id) in tok[head_idx + 1]] for tok in self.tokens])
-    
+
     def get_ids_portion(self, id: int, head_idx: int):
         ids = self.get_ids(head_idx=head_idx)  # (n_tokens, topk)
         return (ids == id).any(axis=1).sum() / ids.shape[0]  # percentage of tokens with retrieval from id
@@ -260,11 +260,11 @@ def retrieval_acc_pt(filename: str, method: str = 'str'):
         if method == 'index':
             acc = ids.eq(torch.arange(ids.size(0)).unsqueeze(-1)).any(-1).float().mean(0).item()
         elif method == 'str':
-            acc = np.mean([examples_dedup[did]['translation']['decoder_prefix'].strip() == examples[i]['translation']['decoder_prefix'].strip() 
+            acc = np.mean([examples_dedup[did]['translation']['decoder_prefix'].strip() == examples[i]['translation']['decoder_prefix'].strip()
                 for i, did in enumerate(ids[:, 0])])
         head_accs.append((head, acc))
         print(f'{head}: {ids.size(0)} {acc}')
-    
+
     head_accs = sorted(head_accs, key=lambda x: (-x[1], x[0]))
     print('ranked')
     for i in range(min(len(head_accs), 5)):
@@ -294,9 +294,9 @@ def save_beir_format(
                     fout.write(f'{qid}\t{did}\t1\n')
 
 def translation_to_beir(
-    translation_file: str, 
-    beir_dir: str, 
-    split: str = 'dev', 
+    translation_file: str,
+    beir_dir: str,
+    split: str = 'dev',
     dedup_doc: bool = False):
     qid2dict: Dict[str, Dict] = {}
     did2dict: Dict[str, Dict] = {}
@@ -320,13 +320,13 @@ def translation_to_beir(
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 def use_answer_as_query_in_beir(
-    beir_dir: str, 
-    out_dir: str, 
-    truncate_to: int = None, 
+    beir_dir: str,
+    out_dir: str,
+    truncate_to: int = None,
     tokenizer: AutoTokenizer = None):
     from_query_file = os.path.join(beir_dir, 'queries.jsonl')
     to_query_file = os.path.join(out_dir, 'queries.jsonl')
-    
+
     # query file
     os.makedirs(out_dir, exist_ok=True)
     with open(from_query_file, 'r') as fin, open(to_query_file, 'w') as fout:
@@ -338,7 +338,7 @@ def use_answer_as_query_in_beir(
             example['metadata']['original_text'] = example['text']
             example['text'] = ans
             fout.write(json.dumps(example) + '\n')
-    
+
     # corpus and qrel
     rel_dir = os.path.relpath(beir_dir, out_dir)
     os.symlink(os.path.join(rel_dir, 'corpus.jsonl'), os.path.join(out_dir, 'corpus.jsonl'))
@@ -376,7 +376,7 @@ def convert_beir_to_fid_format(
     add_self: bool = False,
     add_self_to_the_first: bool = False,
     add_qrel_as_answer: str = None):
-    
+
     assert add_qrel_as_answer in {None, 'title', 'text'}
     clean_text_for_tsv = lambda x: '' if x is None else x.replace('\n', ' ').replace('\t', ' ').replace('\r', ' ')
     beir_data = BEIRDataset(beir_dir, name=dataset_name)
@@ -497,12 +497,20 @@ def split_ctxs(json_file: str, out_file: str):
     with open(out_file, 'w') as fout:
         json.dump(new_data, fout, indent=True)
 
+def convert_beir_corpus_to_translation(beir_corpus_file: str, out_file: str):
+    with open(beir_corpus_file, 'r') as fin, open(out_file, 'w') as fout:
+        for l in fin:
+            l = json.loads(l)
+            t = {'translation': {'en': '', 'zh': l['text']}}
+            fout.write(json.dumps(t) + '\n')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
-        'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc', 
+        'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc',
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
-        'dedup_translation', 'layerhead', 'split_ctxs'])
+        'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation'])
     parser.add_argument('--inp', type=str, default=None, help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -512,11 +520,11 @@ if __name__ == '__main__':
 
     if args.task == 'kilt':
         prep_kilt(
-            output_file=args.out, 
-            dataset_name='wow', 
-            split='validation', 
-            evidence_method='self_provenance', 
-            whole_paragraph_as_evidence=False, 
+            output_file=args.out,
+            dataset_name='wow',
+            split='validation',
+            evidence_method='self_provenance',
+            whole_paragraph_as_evidence=False,
             skip_answer_as_evidence=True,
             remove_wo_ctx=True,
             num_negative_evidence=10000,
@@ -530,49 +538,54 @@ if __name__ == '__main__':
         print(f'total number of examples {len(pwrs)}')
         for head_idx in range(n_heads):
             print(head_idx, np.mean([pwr.get_ids_portion(i, head_idx) for i, pwr in enumerate(pwrs)]))
-    
+
     elif args.task == 'head_analysis':
         head_analysis(args.inp)
-    
+
     elif args.task == 'shuffle_evidence':
         shuffle_evidence(args.inp, args.out)
-    
+
     elif args.task == 'retrieval_acc':
         retrieval_acc(args.inp, format='pt')
-    
+
     elif args.task == 'translation_to_beir':
         translation_file = args.inp
         beir_dir = args.out
         translation_to_beir(translation_file, beir_dir, split='dev', dedup_doc=True)
-    
+
     elif args.task == 'convert_beir_to_fid_format':
         beir_dir = args.inp
         out_dir = args.out
         convert_beir_to_fid_format(
-            beir_dir, 
-            out_dir, 
+            beir_dir,
+            out_dir,
             dataset_name='wow',
             splits=['dev'],
             add_self=True,
             add_self_to_the_first=True,
             topk=100)
-    
+
     elif args.task == 'use_answer_as_query_in_beir':
         beir_dir = args.inp
         out_dir = args.out
         tokenizer = AutoTokenizer.from_pretrained('google/t5-xl-lm-adapt')
         use_answer_as_query_in_beir(beir_dir, out_dir, truncate_to=8, tokenizer=tokenizer)
-    
+
     elif args.task == 'dedup_translation':
         inp_file = args.inp
         out_file = args.out
         dedup_translation(inp_file, out_file)
-    
+
     elif args.task == 'layerhead':
         pt_file = args.inp
         layerhead(pt_file)
-    
+
     elif args.task == 'split_ctxs':
         json_file = args.inp
         out_file = args.out
         split_ctxs(json_file, out_file)
+
+    elif args.task == 'convert_beir_corpus_to_translation':
+        beir_corpus_file = args.inp
+        out_file = args.out
+        convert_beir_corpus_to_translation(beir_corpus_file, out_file)

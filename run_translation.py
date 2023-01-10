@@ -540,7 +540,7 @@ def main():
                 load_from_cache_file=not data_args.overwrite_cache,
                 desc="Running tokenizer on train dataset",
             )
-        total_eval_tokens = 0        
+        total_eval_tokens = 0
         for chunk in train_dataset['labels']:
             total_eval_tokens += len([x for x in chunk[1:] if x != -100])
         logger.info(f'[train] Total eval tokens: {total_eval_tokens}')
@@ -562,7 +562,7 @@ def main():
                 load_from_cache_file=not data_args.overwrite_cache,
                 desc="Running tokenizer on validation dataset",
             )
-        total_eval_tokens = 0        
+        total_eval_tokens = 0
         for chunk in eval_dataset['labels']:
             total_eval_tokens += len([x for x in chunk if x != -100])
         logger.info(f'[{data_args.eval_subset}] Total eval tokens: {total_eval_tokens}')
@@ -657,11 +657,11 @@ def main():
             dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir,
             move_dstore_to_mem=knn_args.move_dstore_to_mem, cuda=knn_args.knn_gpu,
             recompute_dists=knn_args.recompute_dists, retrieval_layers=list(range(24)),
-            k=knn_args.k, stage=stage, track=knn_args.retrieval_track, by_ids=knn_args.retrieve_by_ids, 
+            k=knn_args.k, stage=stage, track=knn_args.retrieval_track, by_ids=knn_args.retrieve_by_ids,
             skip_retrieval_steps=1, skip_first_token=True, add_after_first=True)  # TODO: debug
     elif knn_args.retomaton or knn_args.cluster_dstore:
-        knn_wrapper = RetomatonWrapper(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
-            dimension=dimension, 
+        knn_wrapper = RetomatonWrapper(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir,
+            dimension=dimension,
             knn_sim_func=knn_args.knn_sim_func, knn_keytype=knn_args.knn_keytype,
             no_load_keys=knn_args.no_load_keys, move_dstore_to_mem=knn_args.move_dstore_to_mem, knn_gpu=knn_args.knn_gpu,
             recompute_dists=knn_args.recompute_dists,
@@ -669,17 +669,17 @@ def main():
             no_pointer=knn_args.no_pointer, min_knns=knn_args.min_knns, max_knns=knn_args.max_knns,
             members=knn_args.members)
     elif knn_args.knn:
-        knn_wrapper = KNNWrapper(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
-            dimension= dimension, 
+        knn_wrapper = KNNWrapper(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir,
+            dimension= dimension,
             knn_sim_func=knn_args.knn_sim_func, knn_keytype=knn_args.knn_keytype,
             no_load_keys=knn_args.no_load_keys, move_dstore_to_mem=knn_args.move_dstore_to_mem, knn_gpu=knn_args.knn_gpu,
             recompute_dists=knn_args.recompute_dists,
             k=knn_args.k, lmbda=knn_args.lmbda, knn_temp=knn_args.knn_temp, probe=knn_args.probe)
     elif knn_args.save_knnlm_dstore or knn_args.build_index:
         training_args.predict_with_generate = False
-        knn_wrapper = KNNSaver(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir, 
+        knn_wrapper = KNNSaver(dstore_size=knn_args.dstore_size, dstore_dir=knn_args.dstore_dir,
             dimension=dimension, knn_keytype=knn_args.knn_keytype, use_approx_index=knn_args.use_approx_index)
-    
+
     if knn_wrapper is not None:
         knn_wrapper.break_into(model)
 
@@ -786,10 +786,10 @@ def main():
 
     if knn_args.cluster_dstore:
         knn_wrapper.cluster_dstore(num_clusters=knn_args.num_clusters, sample_size=knn_args.sample_size, model=model)
-    
+
     if knn_wrapper is not None:
         knn_wrapper.break_out()
-    
+
     return results
 
 

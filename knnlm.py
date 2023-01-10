@@ -12,7 +12,7 @@ import faiss
 import faiss.contrib.torch_utils
 
 logger = logging.getLogger(__name__)
-logger.setLevel(20)
+logger.setLevel(logging.INFO)
 
 class DIST(Enum):
     l2 = auto()
@@ -39,15 +39,15 @@ class KEY_TYPE(Enum):
 
 class KNNWrapper(object):
     def __init__(
-        self, 
+        self,
         dstore_size: int,
         dstore_dir: str,
-        dimension: int, 
+        dimension: int,
         knn_sim_func: DIST = None,
         knn_keytype: KEY_TYPE = None,
         no_load_keys: bool = False,
         move_dstore_to_mem: bool = False,
-        knn_gpu: bool = True,
+        knn_gpu: int = 0,
         recompute_dists: bool = False,
         k: int = 1024,
         lmbda: float = 0.25,
@@ -65,9 +65,7 @@ class KNNWrapper(object):
         self.no_load_keys = no_load_keys
         self.recompute_dists = recompute_dists
         self.move_dstore_to_mem = move_dstore_to_mem
-        self.knn_gpu = knn_gpu and torch.cuda.is_available() and torch.cuda.device_count() > 0
-
-        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.knn_gpu = knn_gpu
         self.prompt_input_ids = None
         self.keys = None
         self.values = None
@@ -85,26 +83,37 @@ class KNNWrapper(object):
         self.dist_func = dist_type_to_dist_func[knn_sim_func] # l2 or dot product function
 
 
+    @property
+    def use_gpu(self):
+        return self.knn_gpu >= 0
+
+
+    @property
+    def device(self):
+        if self.use_gpu:
+            return torch.device(f'cuda:{self.knn_gpu}')
+        return torch.device('cpu')
+
+
     def setup_faiss(self):
         if not self.dstore_dir:
             raise ValueError('Cannot build a datastore without the data.')
 
         start = time.time()
-        index_name = get_index_path(self.dstore_dir, self.model.config.model_type, self.dstore_size, self.dimension) 
+        index_name = get_index_path(self.dstore_dir, self.model.config.model_type, self.dstore_size, self.dimension)
         cpu_index = faiss.read_index(index_name, faiss.IO_FLAG_ONDISK_SAME_DIR)
         logger.info(f'Reading datastore took {time.time() - start} s')
         cpu_index.nprobe = self.probe
 
-        if self.knn_gpu:
+        if self.use_gpu:
             start = time.time()
-            co = faiss.GpuClonerOptions()
-            co.useFloat16 = True
-            gpu_index = faiss.index_cpu_to_gpu(faiss.StandardGpuResources(), 0, cpu_index, co)
+            co = faiss.GpuClonerOptions()  # co.useFloat16 = True
+            gpu_index = faiss.index_cpu_to_gpu(faiss.StandardGpuResources(), self.knn_gpu, cpu_index, co)
             logger.info(f'Moving index to GPU took {time.time() - start} s')
         else:
             gpu_index = cpu_index
 
-        # make_direct_map() allows calling reconstruct(n), 
+        # make_direct_map() allows calling reconstruct(n),
         # and reconstructing key vectors given their ids
         # currently, this is implemented only for CPU indexes:
         # https://github.com/facebookresearch/faiss/issues/2181
@@ -127,7 +136,7 @@ class KNNWrapper(object):
 
             if not self.no_load_keys:
                 del self.keys
-                self.keys_from_memmap = np.memmap(f'{keys_vals_prefix}_keys.npy', 
+                self.keys_from_memmap = np.memmap(f'{keys_vals_prefix}_keys.npy',
                     dtype=np.float16, mode='r', shape=(self.dstore_size, self.dimension))
                 self.keys = self.keys_from_memmap[:].astype(np.float16)
 
@@ -148,7 +157,7 @@ class KNNWrapper(object):
         # Inject our pre_forward_hook to capture the labels at every forward pass
         self.original_forward_func = model.forward
         model.forward = self.pre_forward_hook
-        
+
         # Inject our activation_capturer to capture the activations at every forward pass
         layer_to_capture_fn, capture_input = KNNWrapper.model_layer_to_capture[model.config.model_type][self.knn_keytype]
         layer_to_capture = layer_to_capture_fn(model)
@@ -161,7 +170,7 @@ class KNNWrapper(object):
         self.vocab_size = final_layer.out_features
 
     def get_knns(self, queries):
-        if not self.knn_gpu:
+        if not self.use_gpu:
             queries = queries.cpu()
         dists, knns = self.index.search(queries, self.k)
         dists, knns = dists.to(self.device), knns.to(self.device)
@@ -185,33 +194,33 @@ class KNNWrapper(object):
             ], axis=-1).to(self.device)
         else:
             nonpad_mask = torch.cat([
-                self.labels[:, shift:] != -100, 
+                self.labels[:, shift:] != -100,
                 torch.zeros([self.labels.shape[0], shift], dtype=torch.bool).to(self.device)
             ], axis=-1)
 
         lm_logits = lm_logits[nonpad_mask]
         queries = queries[nonpad_mask] # (nonpad, dim)
-        
-        dists, knns = self.get_knns(queries) # (nonpad batch * time, k)
+
+        dists, knns = self.get_knns(queries)  # (nonpad batch * time, k)
         if self.recompute_dists:
             knns_vecs = torch.from_numpy(self.keys[knns]).to(self.device)
-            dists = self.dist_func(queries, knns_vecs) 
-        
+            dists = self.dist_func(queries, knns_vecs)
+
         neg_dists = -dists
-        knn_log_probs, _ = self.knns_to_log_prob(knns, neg_dists)
-        
+        knn_log_probs, _ = self.knns_to_log_prob(knns, neg_dists)  # (nonpad batch * time, k) * 2
+
         interpolated_scores = KNNWrapper.interpolate(knn_log_probs, lm_logits, self.lmbda) # (nonpad, vocab)
         output[nonpad_mask] = interpolated_scores
-        return output 
+        return output
 
     def knns_to_log_prob(self, knns, neg_dists):
-        probs = torch.nn.functional.softmax(neg_dists / self.knn_temperature, dim=-1)
+        probs = torch.nn.functional.softmax(neg_dists / self.knn_temperature, dim=-1)  # (nonpad batch * time, k)
         vals_at_knns = self.vals[knns].squeeze(-1) # (nonpad batch * time, k)
-        knn_log_probs = torch.full(size=(vals_at_knns.shape[:-1] + (self.vocab_size,)), fill_value=0.0).to(self.device) \
-            .scatter_add(dim=-1, index=vals_at_knns, src=probs).log() # (nonpad_batch * time, vocab)
-        knn_log_probs = torch.nan_to_num(knn_log_probs, nan=None, neginf=-10000.0)
+        knn_log_probs = torch.zeros(*(vals_at_knns.shape[:-1] + (self.vocab_size,)), device=self.device)
+        knn_log_probs.scatter_add_(dim=-1, index=vals_at_knns, src=probs).log_() # (nonpad_batch * time, vocab)
+        knn_log_probs = torch.nan_to_num(knn_log_probs, nan=None, neginf=torch.finfo(knn_log_probs.dtype).min)
         return knn_log_probs, vals_at_knns
-        
+
     def register_hook(self, layer, func, pre=False):
         handle = layer.register_forward_pre_hook(func) if pre else layer.register_forward_hook(func)
         self.hook_handles.append(handle)
@@ -222,10 +231,10 @@ class KNNWrapper(object):
         if self.model is not None and self.model.broken_into is not None:
             self.model.forward = self.original_forward_func
             self.model.broken_into = None
-    
+
     def get_metrics(self):
         return {}
-    
+
     @staticmethod
     def l2(query, keys):
         # query: (batch*time, dim)
@@ -244,14 +253,13 @@ class KNNWrapper(object):
     @staticmethod
     def interpolate(knn_log_probs, lm_log_probs, lmbda):
         interpolated = torch.logaddexp(
-            lm_log_probs + np.log(1 - lmbda), 
+            lm_log_probs + np.log(1 - lmbda),
             knn_log_probs + np.log(lmbda))
-
         return interpolated
 
     @staticmethod
     def get_model_last_layer(model_type):
-        # works for gpt2, marian, t5. If a model does not have an ".lm_head" layer, 
+        # works for gpt2, marian, t5. If a model does not have an ".lm_head" layer,
         # add an "if model_type is ..." statement here, and return the output embedding layer
         return lambda model: model.lm_head
 
@@ -260,7 +268,7 @@ class KNNWrapper(object):
         if model_type.startswith('gpt2'):
             return lambda model: model.transformer.wte
 
-    # For every model name and key type, returns a lambda that returns the relevant layer in the model, 
+    # For every model name and key type, returns a lambda that returns the relevant layer in the model,
     # and whether the input of that layer should be captured (True) or the output (False)
     model_layer_to_capture = {
         'bart': {
@@ -288,7 +296,7 @@ class KNNWrapper(object):
 
 class KNNSaver(object):
     def __init__(
-        self, 
+        self,
         dstore_size: int,
         dstore_dir: str,
         dimension: int,
@@ -318,7 +326,7 @@ class KNNSaver(object):
         self.model = model
         model.broken_into = True
         self.is_encoder_decoder = model.config.is_encoder_decoder
-        
+
         # Inject our activation_capturer to capture the activations at every forward pass
         layer_to_capture_fn, capture_input = KNNWrapper.model_layer_to_capture[model.config.model_type][self.knn_keytype]
         layer_to_capture = layer_to_capture_fn(model)
@@ -328,7 +336,7 @@ class KNNSaver(object):
         # Inject our pre_forward_hook to capture the labels at every forward pass
         self.original_forward_func = model.forward
         model.forward = self.pre_forward_hook
-        
+
         # Inject our main function after the model's final layer
         final_layer = KNNWrapper.get_model_last_layer(model.config.model_type)(model)
         self.register_hook(final_layer, self.post_forward_hook)
@@ -341,7 +349,7 @@ class KNNSaver(object):
         else:
             mode = 'w+'
             Path(keys_filename).parent.mkdir(parents=True, exist_ok=True)
-        
+
         self.dstore_keys = np.memmap(keys_filename, dtype=np.float16, mode=mode, shape=(self.dstore_size, self.dimension))
         self.dstore_vals = np.memmap(vals_filename, dtype=np.int32, mode=mode, shape=(self.dstore_size, 1))
 
@@ -378,13 +386,13 @@ class KNNSaver(object):
             raise ex
 
         self.dstore_idx += batch_time_size
-        
+
         return output
 
     def register_hook(self, layer, func, pre=False):
         handle = layer.register_forward_pre_hook(func) if pre else layer.register_forward_hook(func)
         self.hook_handles.append(handle)
-    
+
     def break_out(self):
         for h in self.hook_handles:
             h.remove()
@@ -399,15 +407,15 @@ class KNNSaver(object):
             self.build_index_exact(*args, **kwargs)
 
     def build_index_approx(
-        self, 
-        num_keys_to_add_at_a_time: int = 1000000, 
+        self,
+        num_keys_to_add_at_a_time: int = 1000000,
         ncentroids: int = 4096,
         seed: int = 1,
         code_size: int = 64,
         probe: int = 32):
         logger.info('Building index')
-        index_name = get_index_path(self.dstore_dir, self.model.config.model_type, self.dstore_size, self.dimension) 
-        
+        index_name = get_index_path(self.dstore_dir, self.model.config.model_type, self.dstore_size, self.dimension)
+
         # Initialize faiss index
         quantizer = faiss.IndexFlatL2(self.dimension)
         index = faiss.IndexIVFPQ(quantizer, self.dimension,
@@ -445,7 +453,7 @@ class KNNSaver(object):
         logger.info(f'Writing index took {time.time() - start} s')
 
     def build_index_exact(
-        self, 
+        self,
         num_keys_to_add_at_a_time: int = 1000000):
         logger.info('Building index')
         index_name = get_index_path(self.dstore_dir, self.model.config.model_type, self.dstore_size, self.dimension)
@@ -483,7 +491,7 @@ class ActivationCapturer(nn.Module):
 
         self.captured = None
 
-    
+
     def forward(self, module, input, output):
         if self.capture_input:
             self.captured = input[0].detach()

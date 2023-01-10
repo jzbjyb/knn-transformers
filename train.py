@@ -64,6 +64,7 @@ from transformers.trainer_utils import EvalLoopOutput, EvalPrediction
 from deepspeed import checkpointing as ds_checkpointing
 from models.fusion_t5 import FusionT5Config, FusionT5ForConditionalGeneration, FusionSeq2SeqLMOutput
 from models.retriever import BM25
+from knnlm import KNNWrapper, KEY_TYPE, DIST
 
 from em_eval import ems
 
@@ -136,6 +137,7 @@ class ModelArguments:
     ctx_attention_loss: Optional[str] = field(default=None)
     bos_attention: Optional[str] = field(default=None)
     ctx_topk: Optional[int] = field(default=0)
+    knnlm: Optional[bool] = field(default=False)
 
     def __post_init__(self):
         if self.config_overrides is not None and (self.config_name is not None or self.model_name_or_path is not None):
@@ -486,6 +488,23 @@ def main():
 
     model.resize_token_embeddings(len(tokenizer))
 
+    if model_args.knnlm:  # load knnlm
+        knn_wrapper = KNNWrapper(
+            dstore_size=38089,
+            dstore_dir='checkpoints/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.translation.json/t5small/knn',
+            dimension=model.config.hidden_size,
+            knn_sim_func=DIST.l2,
+            knn_keytype=KEY_TYPE.last_ffn_input,
+            no_load_keys=True,
+            move_dstore_to_mem=True,
+            knn_gpu=training_args.local_rank,
+            recompute_dists=False,
+            k=1,
+            lmbda=0.1,
+            knn_temp=50,
+            probe=32)
+        knn_wrapper.break_into(model)
+
     if 'opt' in model_args.model_name_or_path or 'gpt2' in model_args.model_name_or_path:
         def format_data_dict(examples: List[Dict]):
             formated = []
@@ -662,6 +681,7 @@ def main():
             max_length=data_args.max_context_len)
         decoder_retrieval_kwargs = {
             'retriever': retriever,
+            'topk': data_args.depth,
             'frequency': 1 if data_args.use_context else 0
         }
 

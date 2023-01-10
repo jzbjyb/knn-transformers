@@ -42,7 +42,7 @@ if [[ ${data} == "bm25" ]]; then
     #val_file=data/wow/val_astarget_selfprov_evidence.json.beir_ans.fid/dev.json
     # bm25 docs (dedup)
     val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
-    depth=1
+    depth=100
 elif [[ ${data} == "random" ]]; then
     # all docs (full ranking)
     val_file=data/wow/val_all_dpr.json
@@ -56,7 +56,7 @@ fi
 
 # ------------- hyperparameters -------------
 max_question_len=128
-max_context_len=32
+max_context_len=128
 generation_prefix_len=0
 use_context=true
 context_bos=true
@@ -79,6 +79,7 @@ elif [[ ${setting} == "perplexity" ]]; then
 elif [[ ${setting} == "generate_perplexity" ]]; then
     generation_prefix_len=128
     max_answer_len=128
+    depth=1
     setting_extra="--do_eval_special generate_perplexity --predict_with_generat"
 elif [[ ${setting} == "gradient" ]]; then
     max_answer_len=128

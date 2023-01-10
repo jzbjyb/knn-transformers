@@ -1327,6 +1327,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         handle_ret = (decoder_ctx_input_ids is not None and self.has_ret_heads) and (not in_generation or gen_step == offset + self.block_size - 1)
 
         ret_frequency = decoder_retrieval_kwargs.get('frequency', 0)
+        ret_topk = decoder_retrieval_kwargs.get('topk', 1)
         retriever = decoder_retrieval_kwargs.get('retriever', None)
         new_context = False
         if ret_frequency and gen_step % ret_frequency == 0:  # perform retrieval
@@ -1334,7 +1335,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             encoder_until_now = input_ids
             decoder_until_now = torch.cat([decoder_input_ids_previous, decoder_input_ids], -1) if decoder_input_ids_previous is not None else decoder_input_ids
             decoder_ctx_ids, decoder_ctx_input_ids, decoder_ctx_attention_mask = retriever.retrieve_and_prepare(
-                encoder_until_now, decoder_until_now, decoder_ctx_input_ids, decoder_ctx_attention_mask, topk=1)
+                encoder_until_now, decoder_until_now, decoder_ctx_input_ids, decoder_ctx_attention_mask, topk=ret_topk, use_ctx=False)
             if past_key_values is not None:  # remove past key values for ctx to use the new decoder_ctx_input_ids
                 past_key_values = tuple((target_pkv, None) for target_pkv, ctx_pkv in past_key_values)
 
