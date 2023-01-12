@@ -12,18 +12,17 @@ class BM25:
     def __init__(
         self,
         tokenizer: AutoTokenizer,
-        beir_dir: str,
+        corpus: GenericDataLoader,
         index_name: str,
-        split: str = 'dev',
         format_func: Callable = lambda doc: doc['text'],
         max_length: int = 256,
         use_encoder_input_ids: bool = False,
         use_decoder_input_ids: bool = True,
     ):
         self.tokenizer = tokenizer
-        self.corpus = GenericDataLoader(data_folder=beir_dir).load(split=split)[0]
+        self.corpus = corpus
         # build bm25 index
-        index_name = index_name or beir_dir
+        index_name = index_name
         model = BM25Search(index_name=index_name, hostname='localhost', initialize=True, number_of_shards=1)  # TODO: only initialize when necessary
         model.index(self.corpus)
         time.sleep(5)

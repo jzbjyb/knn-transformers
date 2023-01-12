@@ -319,6 +319,27 @@ def translation_to_beir(
             split2qiddid[split].append((qid, did))
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
+def convert_fid_to_beir(
+    fid_file: str,
+    beir_dir: str,
+    split='dev'):
+    with open(fid_file, 'r') as fin:
+        data = json.load(fin)
+    qid2dict: Dict[str, Dict] = {}
+    did2dict: Dict[str, Dict] = {}
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    for example in data:
+        qid: str = example['id']
+        question: str = example['question']
+        answer: List[List[str]] = example['answers']
+        qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer}}
+        for i, ctx in enumerate(example['ctxs']):
+            did = ctx['id']
+            did2dict[did] = {'_id': did, 'title': ctx['title'], 'text': ctx['text']}
+            if i == 0:
+                split2qiddid[split].append((qid, did))
+    save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
+
 def use_answer_as_query_in_beir(
     beir_dir: str,
     out_dir: str,
@@ -510,7 +531,7 @@ if __name__ == '__main__':
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
         'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc',
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
-        'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation'])
+        'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation', 'convert_fid_to_beir'])
     parser.add_argument('--inp', type=str, default=None, help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -589,3 +610,8 @@ if __name__ == '__main__':
         beir_corpus_file = args.inp
         out_file = args.out
         convert_beir_corpus_to_translation(beir_corpus_file, out_file)
+
+    elif args.task == 'convert_fid_to_beir':
+        fid_file = args.inp
+        beir_dir = args.out
+        convert_fid_to_beir(fid_file, beir_dir, split='dev')

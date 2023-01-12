@@ -1,3 +1,4 @@
+
 # coding=utf-8
 # Copyright 2018 Mesh TensorFlow authors, T5 Authors and HuggingFace Inc. team.
 #
@@ -20,6 +21,7 @@ import warnings
 from typing import Optional, Tuple, Union, List, Dict, Any
 from operator import itemgetter
 
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
@@ -1038,6 +1040,7 @@ class FusionT5Encoder(T5Stack):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
+        idxs: Optional[List[str]] = None,
     ):
         outputs = super().forward(
             input_ids=input_ids,
@@ -1083,6 +1086,7 @@ class FusionSeq2SeqLMOutput(Seq2SeqLMOutput):
     ctx_embeddings: Optional[torch.FloatTensor] = None
     decoder_ctx_input_ids: Optional[torch.LongTensor] = None
     decoder_ctx_attention_mask: Optional[torch.FloatTensor] = None
+    decoder_ctx_ids: Optional[torch.LongTensor] = None
 
 
 @add_start_docstrings("""T5 Model with a `language modeling` head on top.""", T5_START_DOCSTRING)
@@ -1229,6 +1233,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         output_embeddings: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         decoder_retrieval_kwargs: Dict[str, Any] = {},
+        idxs: Optional[List[str]] = None,
     ) -> Union[Tuple[torch.FloatTensor], Seq2SeqLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -1330,10 +1335,11 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         ret_topk = decoder_retrieval_kwargs.get('topk', 1)
         retriever = decoder_retrieval_kwargs.get('retriever', None)
         new_context = False
-        if ret_frequency and gen_step % ret_frequency == 0:  # perform retrieval
+        if ret_frequency and in_generation and gen_step % ret_frequency == 0:  # perform retrieval
             new_context = True
             encoder_until_now = input_ids
             decoder_until_now = torch.cat([decoder_input_ids_previous, decoder_input_ids], -1) if decoder_input_ids_previous is not None else decoder_input_ids
+            # (bs, n_ctxs), (bs, n_ctxs, ctx_seq_length)
             decoder_ctx_ids, decoder_ctx_input_ids, decoder_ctx_attention_mask = retriever.retrieve_and_prepare(
                 encoder_until_now, decoder_until_now, decoder_ctx_input_ids, decoder_ctx_attention_mask, topk=ret_topk, use_ctx=False)
             if past_key_values is not None:  # remove past key values for ctx to use the new decoder_ctx_input_ids
@@ -1500,7 +1506,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             ctx_attention_loss=ctx_attention_loss,
             ctx_embeddings=decoder_outputs.ctx_embeddings,
             decoder_ctx_input_ids=decoder_ctx_input_ids if new_context else None,
-            decoder_ctx_attention_mask=decoder_ctx_attention_mask if new_context else None)
+            decoder_ctx_attention_mask=decoder_ctx_attention_mask if new_context else None,
+            decoder_ctx_ids=decoder_ctx_ids if new_context else None)
 
     def _prepare_encoder_decoder_kwargs_for_generation(
         self,
@@ -1750,6 +1757,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
         cross_attentions = () if (return_dict_in_generate and output_attentions) else None
         decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
+        retrieval_sequences = () if return_dict_in_generate else None
 
         # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
         if return_dict_in_generate and self.config.is_encoder_decoder:
@@ -1794,6 +1802,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
+                retrieval_sequences += (outputs.decoder_ctx_ids,)
                 if output_scores:
                     scores += (next_token_logits,)  # use the original logits
                 if output_attentions:
@@ -1838,9 +1847,10 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
         if return_dict_in_generate:
             if self.config.is_encoder_decoder:
-                return GreedySearchEncoderDecoderOutput(
+                return GreedySearchEncoderDecoderOutputWithRetrieval(
                     sequences=input_ids,
                     scores=scores,
+                    retrieval_sequences=retrieval_sequences,
                     encoder_attentions=encoder_attentions,
                     encoder_hidden_states=encoder_hidden_states,
                     decoder_attentions=decoder_attentions,
@@ -1848,14 +1858,25 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                     decoder_hidden_states=decoder_hidden_states,
                 )
             else:
-                return GreedySearchDecoderOnlyOutput(
+                return GreedySearchDecoderOnlyOutputWithRetrieval(
                     sequences=input_ids,
                     scores=scores,
+                    retrieval_sequences=retrieval_sequences,
                     attentions=decoder_attentions,
                     hidden_states=decoder_hidden_states,
                 )
         else:
             return input_ids
+
+
+@dataclass
+class GreedySearchDecoderOnlyOutputWithRetrieval(GreedySearchDecoderOnlyOutput):
+    retrieval_sequences: Optional[Tuple[np.ndarray]] = None
+
+
+@dataclass
+class GreedySearchEncoderDecoderOutputWithRetrieval(GreedySearchEncoderDecoderOutput):
+    retrieval_sequences: Optional[Tuple[np.ndarray]] = None
 
 
 def prepare(

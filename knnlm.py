@@ -148,21 +148,23 @@ class KNNWrapper(object):
 
         return cpu_index, gpu_index
 
-    def break_into(self, model):
+    def break_into(self, model, only_capture: bool = False):
         self.model = model
         model.broken_into = True
         self.reconstruct_index, self.index = self.setup_faiss()
         self.is_encoder_decoder = model.config.is_encoder_decoder
-
-        # Inject our pre_forward_hook to capture the labels at every forward pass
-        self.original_forward_func = model.forward
-        model.forward = self.pre_forward_hook
 
         # Inject our activation_capturer to capture the activations at every forward pass
         layer_to_capture_fn, capture_input = KNNWrapper.model_layer_to_capture[model.config.model_type][self.knn_keytype]
         layer_to_capture = layer_to_capture_fn(model)
         self.activation_capturer = ActivationCapturer(layer_to_capture, capture_input=capture_input)
         self.register_hook(layer_to_capture, self.activation_capturer)
+        if only_capture:
+            return
+
+        # Inject our pre_forward_hook to capture the labels at every forward pass
+        self.original_forward_func = model.forward
+        model.forward = self.pre_forward_hook
 
         # Inject our main function after the model's final layer
         final_layer = KNNWrapper.get_model_last_layer(model.config.model_type)(model)
@@ -178,7 +180,7 @@ class KNNWrapper(object):
 
     def pre_forward_hook(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
         self.labels = labels
-        return self.original_forward_func(input_ids=input_ids, labels=labels, attention_mask=attention_mask, **kwargs)
+        return self.original_forward_func(input_ids=input_ids, attention_mask=attention_mask, labels=labels, **kwargs)
 
     def post_forward_hook(self, module, input, output):
         batch, time_dim, vocab_size = output.shape

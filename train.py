@@ -61,6 +61,7 @@ from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 from transformers.trainer_utils import EvalLoopOutput, EvalPrediction
 
+from beir.datasets.data_loader import GenericDataLoader
 from deepspeed import checkpointing as ds_checkpointing
 from models.fusion_t5 import FusionT5Config, FusionT5ForConditionalGeneration, FusionSeq2SeqLMOutput
 from models.retriever import BM25
@@ -262,6 +263,9 @@ class DataCollatorForFusion:
         debug: bool = False):
         decoder_start_token = self.tokenizer.convert_ids_to_tokens([self.model.config.decoder_start_token_id])[0]
 
+        # question ids
+        qids = [e['qid'] for e in examples]
+
         # questions
         questions = self.tokenizer(
             [e['question'] for e in examples],
@@ -318,6 +322,7 @@ class DataCollatorForFusion:
         labels = self.get_labels_from_decoder_input_ids(decoder_input_ids)
 
         batch = {
+            'idxs': qids,
             'input_ids': input_ids,
             'attention_mask': attention_mask,
             'decoder_input_ids': decoder_input_ids,
@@ -490,8 +495,10 @@ def main():
 
     if model_args.knnlm:  # load knnlm
         knn_wrapper = KNNWrapper(
-            dstore_size=38089,
-            dstore_dir='checkpoints/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.translation.json/t5small/knn',
+            #dstore_size=38089,
+            #dstore_dir='checkpoints/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.translation.json/t5xl/knn',
+            dstore_size=4687476,
+            dstore_dir='checkpoints/bioasq/bioasq_test.beir.translation.json/t5small/knn',
             dimension=model.config.hidden_size,
             knn_sim_func=DIST.l2,
             knn_keytype=KEY_TYPE.last_ffn_input,
@@ -500,7 +507,7 @@ def main():
             knn_gpu=training_args.local_rank,
             recompute_dists=False,
             k=1,
-            lmbda=0.1,
+            lmbda=0.25,
             knn_temp=50,
             probe=32)
         knn_wrapper.break_into(model)
@@ -548,7 +555,7 @@ def main():
             for example in examples:
                 question = data_args.question_prefix + example['question']
                 ctxs = [data_args.context_prefix + ctx['text'] for ctx in example['ctxs'][:data_args.depth]]
-                answers = [data_args.answer_prefix + ans for ans in example['answers']]
+                answers = [data_args.answer_prefix + (ans[0] if type(ans) is list else ans) for ans in example['answers']]
                 formatted.append({'qid': example['id'], 'question': question, 'ctxs': ctxs, 'answers': answers})
             return formatted
         def compute_metrics(output):
@@ -673,12 +680,16 @@ def main():
             pin_memory=training_args.dataloader_pin_memory)
         # TODO: if there is not enough examples for the last batch the examples at the beginning will be reused
 
+        corpus, queries, qrels = GenericDataLoader(data_folder='data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans').load(split='dev')
+        #corpus, queries, qrels = GenericDataLoader(data_folder='data/bioasq_test.beir').load(split='dev')
         retriever = BM25(
             tokenizer=tokenizer,
-            beir_dir='data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans',
+            corpus=corpus,
             index_name='test',
             format_func=lambda doc: f'<pad> {data_args.context_prefix}{doc["text"]}' if doc is not None else f'<pad> {data_args.context_prefix}',  # TODO: always use <pad>
-            max_length=data_args.max_context_len)
+            max_length=data_args.max_context_len,
+            use_encoder_input_ids=False,  # TODO: debug
+            use_decoder_input_ids=True)
         decoder_retrieval_kwargs = {
             'retriever': retriever,
             'topk': data_args.depth,
@@ -726,15 +737,18 @@ def main():
                     batch['labels'] = collator.get_labels_from_decoder_input_ids(generated_tokens)
 
                     if output_scores:
-                        logits = torch.stack(gen_outputs.scores, 1)  # (bs, seq_len, vocab_size) with bos
-                        logits = torch.cat([logits, torch.zeros(logits.size(0), 1, logits.size(2)).to(logits)], 1)  # add bos (bs, seq_len, vocab_size)
+                        logits = torch.stack(gen_outputs.scores, 1)  # (bs, seq_len - 1, vocab_size) without bos
+                        logits = torch.cat([logits, torch.zeros(logits.size(0), 1, logits.size(2)).to(logits)], 1)  # (bs, seq_len, vocab_size) with bos
+                    if gen_outputs.retrieval_sequences is not None:
+                        retrieval_sequences = np.stack(list(filter(lambda x: x is not None, gen_outputs.retrieval_sequences)), 1)  # (bs, <=seq_len, n_ctxs)
 
             if 'rerank' in training_args.do_eval_special:  # compute retrieval attention for reranking
                 with torch.no_grad():
                     eval_outputs = model(**batch)
             elif 'perplexity' in training_args.do_eval_special:  # compute perplexity
                 if 'generate' in training_args.do_eval_special:  # use generated tokens
-                    eval_outputs = FusionSeq2SeqLMOutput(logits=logits)
+                    eval_outputs = FusionSeq2SeqLMOutput(
+                        logits=logits, decoder_ctx_ids=retrieval_sequences)
                 else:
                     with torch.no_grad():
                         eval_outputs = model(**batch)
@@ -753,7 +767,7 @@ def main():
                 top1_accs = ranks[:, 0, ...].eq(0).float()  # (gathered_batch_size, n_used_layers, n_used_heads)
                 return top1_accs
 
-            def perplexity(eval_outputs):
+            def perplexity(eval_outputs, evaluate_retrieval: Dict = {'percentiles': [0.25, 0.5, 0.75, 1.0]}):
                 labels = batch['labels']
                 logits = eval_outputs.logits
                 loss_fct = CrossEntropyLoss(reduction='none', ignore_index=-100)
@@ -764,7 +778,25 @@ def main():
                 count = trainer._pad_across_processes(count, pad_index=0)  # (batch_size,)
                 nll = trainer._nested_gather(nll)  # (gathered_batch_size,)
                 count = trainer._nested_gather(count)  # (gathered_batch_size,)
-                return -nll, count  # higher is better
+
+                accs = None
+                if evaluate_retrieval:
+                    qids = batch['idxs']  # (bs)
+                    dids = eval_outputs.decoder_ctx_ids  # (bs, seq_len, n_ctxs)
+                    accs: List[List[float]] = []
+                    for qid, _dids, c in zip(qids, dids, count):
+                        accs.append([])
+                        rel_dids: List[str] = np.array([d for d, r in qrels[qid].items() if r])
+                        rels = np.isin(_dids, rel_dids).any(-1)[:c.item()]  # (rel_seq_len)
+                        for pt in evaluate_retrieval['percentiles']:
+                            pt = int(len(rels) * pt)
+                            acc = rels[:pt].mean()
+                            accs[-1].append(acc)
+                    accs = torch.tensor(accs).to(logits.device)  # (bs, n_percentiles)
+                    accs = trainer._pad_across_processes(accs, pad_index=0)  # (bs, n_percentiles)
+                    accs = trainer._nested_gather(accs)  # (gathered_batch_size, n_percentiles)
+
+                return -nll, count, accs
 
             def gradient(eval_outputs, agg: str = 'mean', remove_ctx_dim: bool = False):
                 eval_outputs.loss.backward()
@@ -813,10 +845,11 @@ def main():
                 acc = finals.mean(0).item()
                 print(f'#examples {len(finals)}, accuracy {acc}')
             elif 'generate_perplexity' in training_args.do_eval_special:
-                ll, count = zip(*finals)
+                ll, count, accuracy = zip(*finals)
                 ll = torch.cat(ll)[:len(validation_dataset)]
                 count = torch.cat(count)[:len(validation_dataset)]
-                print(f'#examples {len(ll)}, #tokens {count.sum().item()}, perplexity: {torch.exp(-ll.sum() / count.sum()).item()}')
+                accuracy = torch.cat(accuracy, 0)[:len(validation_dataset)].mean(0)
+                print(f'#examples {len(ll)}, #tokens {count.sum().item()}, perplexity: {torch.exp(-ll.sum() / count.sum()).item()}, retrieval accuracy: {accuracy}')
             elif 'perplexity' in training_args.do_eval_special or 'gradient' in training_args.do_eval_special:
                 qids = [example['qid'] for example in validation_dataset]
                 scores = torch.cat(finals, 0)[:len(qids)].tolist()  # (num_examples,)
@@ -872,3 +905,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
