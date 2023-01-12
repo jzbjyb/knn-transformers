@@ -55,6 +55,7 @@ from transformers.utils.versions import require_version
 from knnlm import KNNWrapper, KNNSaver, KEY_TYPE, DIST
 from retomaton import RetomatonWrapper
 from memtrans import MemTransWrapper
+from models.fusion_t5 import FusionT5ForConditionalGeneration, FusionT5Config
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.21.0.dev0")
@@ -406,6 +407,8 @@ def main():
         if data_args.test_file is not None:
             data_files["test"] = data_args.test_file
             extension = data_args.test_file.split(".")[-1]
+        if extension == 'jsonl':
+            extension = 'json'
         raw_datasets = load_dataset(
             extension,
             data_files=data_files,
@@ -420,12 +423,17 @@ def main():
     # Distributed training:
     # The .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
+    '''
     config = AutoConfig.from_pretrained(
         model_args.config_name if model_args.config_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
+    '''
+    _dict = FusionT5Config.get_config_dict(model_args.model_name_or_path)[0]
+    _dict.update({'bos_attention': 'single'})
+    config = FusionT5Config.from_dict(_dict)
     tokenizer = AutoTokenizer.from_pretrained(
         model_args.tokenizer_name if model_args.tokenizer_name else model_args.model_name_or_path,
         cache_dir=model_args.cache_dir,
@@ -433,7 +441,7 @@ def main():
         revision=model_args.model_revision,
         use_auth_token=True if model_args.use_auth_token else None,
     )
-    model = AutoModelForSeq2SeqLM.from_pretrained(
+    model = FusionT5ForConditionalGeneration.from_pretrained(
         model_args.model_name_or_path,
         from_tf=bool(".ckpt" in model_args.model_name_or_path),
         config=config,
@@ -503,7 +511,7 @@ def main():
             f"`{model.__class__.__name__}`. This will lead to loss being calculated twice and will take up more memory"
         )
 
-    def preprocess_function(examples):
+    def preprocess_function_for_translation(examples):
         inputs = [ex[source_lang] for ex in examples["translation"]]
         targets = [ex[target_lang] for ex in examples["translation"]]
         inputs = [prefix + inp + suffix for inp in inputs]
@@ -522,6 +530,28 @@ def main():
             ]
 
         model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+
+    def preprocess_function(examples):
+        targets = examples['text']
+        inputs = [''] * len(targets)
+        inputs = [prefix + inp + suffix for inp in inputs]
+        targets = [data_args.target_prefix + tgt + data_args.target_suffix for tgt in targets]
+        model_inputs = tokenizer(inputs, max_length=data_args.max_source_length, padding=padding, truncation=True)
+
+        # Setup the tokenizer for targets
+        with tokenizer.as_target_tokenizer():
+            labels = tokenizer(targets, max_length=max_target_length, padding=padding, truncation=True)
+
+        # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
+        # padding in the loss.
+        if padding == "max_length" and data_args.ignore_pad_token_for_loss:
+            labels["input_ids"] = [
+                [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
+            ]
+
+        model_inputs["labels"] = labels["input_ids"]
+        model_inputs['idxs'] = examples['_id']
         return model_inputs
 
     if training_args.do_train:
@@ -588,12 +618,19 @@ def main():
                 desc="Running tokenizer on prediction dataset",
             )
 
+    class DataCollatorForSeq2SeqBypass(DataCollatorForSeq2Seq):
+        def __call__(self, features, return_tensors=None):
+            idxs = np.array([f.pop('idxs', None) for f in features])
+            results = super().__call__(features, return_tensors=return_tensors)
+            results['idxs'] = idxs
+            return results
+
     # Data collator
     label_pad_token_id = -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
     if data_args.pad_to_max_length:
         data_collator = default_data_collator
     else:
-        data_collator = DataCollatorForSeq2Seq(
+        data_collator = DataCollatorForSeq2SeqBypass(
             tokenizer,
             model=model,
             label_pad_token_id=label_pad_token_id,

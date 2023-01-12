@@ -122,11 +122,9 @@ class KNNWrapper(object):
 
         keys_vals_prefix = get_dstore_path(self.dstore_dir, self.model.config.model_type, self.dstore_size, self.dimension)
         if not self.no_load_keys:
-            self.keys = np.memmap(f'{keys_vals_prefix}_keys.npy', dtype=np.float16, mode='r',
-                                  shape=(self.dstore_size, self.dimension))
-        self.vals = np.memmap(f'{keys_vals_prefix}_vals.npy', dtype=np.int32, mode='r',
-                              shape=(self.dstore_size, 1))
-        # self.vals = torch.from_numpy(self.vals).to(self.device)
+            self.keys = np.memmap(f'{keys_vals_prefix}_keys.npy', dtype=np.float16, mode='r', shape=(self.dstore_size, self.dimension))
+        self.vals = np.memmap(f'{keys_vals_prefix}_vals.npy', dtype=np.int32, mode='r', shape=(self.dstore_size,))  # self.vals = torch.from_numpy(self.vals).to(self.device)
+        self.idxs = np.memmap(f'{keys_vals_prefix}_idxs.npy', dtype=np.int32, mode='r', shape=(self.dstore_size,))
 
         # If you wish to load all the keys into memory
         # CAUTION: Only do this if your RAM can handle it!
@@ -135,22 +133,17 @@ class KNNWrapper(object):
             start = time.time()
 
             if not self.no_load_keys:
-                del self.keys
-                self.keys_from_memmap = np.memmap(f'{keys_vals_prefix}_keys.npy',
-                    dtype=np.float16, mode='r', shape=(self.dstore_size, self.dimension))
-                self.keys = self.keys_from_memmap[:].astype(np.float16)
+                self.keys = self.keys[:].astype(np.float16)
 
-            del self.vals
-            vals_from_memmap = np.memmap(f'{keys_vals_prefix}_vals.npy', dtype=np.int32, mode='r', shape=(self.dstore_size, 1))
-            self.vals = torch.from_numpy(vals_from_memmap[:]).long().to(self.device)
-            del vals_from_memmap
+            self.vals = torch.from_numpy(self.vals[:]).long().to(self.device)
+            self.idxs = torch.from_numpy(self.idxs[:]).long().to(self.device)
             logger.info('Loading to memory took {} s'.format(time.time() - start))
 
         return cpu_index, gpu_index
 
     def break_into(self, model, only_capture: bool = False):
         self.model = model
-        model.broken_into = True
+        model.broken_into = self
         self.reconstruct_index, self.index = self.setup_faiss()
         self.is_encoder_decoder = model.config.is_encoder_decoder
 
@@ -209,7 +202,8 @@ class KNNWrapper(object):
             dists = self.dist_func(queries, knns_vecs)
 
         neg_dists = -dists
-        knn_log_probs, _ = self.knns_to_log_prob(knns, neg_dists)  # (nonpad batch * time, k) * 2
+        knn_log_probs, vals_at_knns, idxs_at_knns = self.knns_to_log_prob(knns, neg_dists)  # (nonpad batch * time, k) * 2
+        self.idxs_at_knns = idxs_at_knns
 
         interpolated_scores = KNNWrapper.interpolate(knn_log_probs, lm_logits, self.lmbda) # (nonpad, vocab)
         output[nonpad_mask] = interpolated_scores
@@ -217,11 +211,12 @@ class KNNWrapper(object):
 
     def knns_to_log_prob(self, knns, neg_dists):
         probs = torch.nn.functional.softmax(neg_dists / self.knn_temperature, dim=-1)  # (nonpad batch * time, k)
-        vals_at_knns = self.vals[knns].squeeze(-1) # (nonpad batch * time, k)
+        vals_at_knns = self.vals[knns]  # (nonpad batch * time, k)
+        idxs_at_knns = self.idxs[knns]  # (nonpad batch * time, k)
         knn_log_probs = torch.zeros(*(vals_at_knns.shape[:-1] + (self.vocab_size,)), device=self.device)
         knn_log_probs.scatter_add_(dim=-1, index=vals_at_knns, src=probs).log_() # (nonpad_batch * time, vocab)
         knn_log_probs = torch.nan_to_num(knn_log_probs, nan=None, neginf=torch.finfo(knn_log_probs.dtype).min)
-        return knn_log_probs, vals_at_knns
+        return knn_log_probs, vals_at_knns, idxs_at_knns
 
     def register_hook(self, layer, func, pre=False):
         handle = layer.register_forward_pre_hook(func) if pre else layer.register_forward_hook(func)
@@ -315,7 +310,7 @@ class KNNSaver(object):
         self.model = None
         self.activation_capturer = None
         self.is_encoder_decoder = None
-        self.dstore_idx = 0
+        self.dstore_offset = 0
         self.dstore_keys = None
         self.dstore_vals = None
         self.labels = None
@@ -326,7 +321,7 @@ class KNNSaver(object):
 
     def break_into(self, model):
         self.model = model
-        model.broken_into = True
+        model.broken_into = self
         self.is_encoder_decoder = model.config.is_encoder_decoder
 
         # Inject our activation_capturer to capture the activations at every forward pass
@@ -346,6 +341,7 @@ class KNNSaver(object):
         keys_vals_prefix = get_dstore_path(self.dstore_dir, model.config.model_type, self.dstore_size, self.dimension)
         keys_filename = f'{keys_vals_prefix}_keys.npy'
         vals_filename = f'{keys_vals_prefix}_vals.npy'
+        idxs_filename = f'{keys_vals_prefix}_idxs.npy'
         if os.path.exists(keys_filename) and os.path.exists(vals_filename):
             mode = 'r'
         else:
@@ -353,12 +349,14 @@ class KNNSaver(object):
             Path(keys_filename).parent.mkdir(parents=True, exist_ok=True)
 
         self.dstore_keys = np.memmap(keys_filename, dtype=np.float16, mode=mode, shape=(self.dstore_size, self.dimension))
-        self.dstore_vals = np.memmap(vals_filename, dtype=np.int32, mode=mode, shape=(self.dstore_size, 1))
+        self.dstore_vals = np.memmap(vals_filename, dtype=np.int32, mode=mode, shape=(self.dstore_size,))
+        self.dstore_idxs = np.memmap(idxs_filename, dtype=np.int32, mode=mode, shape=(self.dstore_size,))
 
-    def pre_forward_hook(self, input_ids=None, attention_mask=None, labels=None, **kwargs):
+    def pre_forward_hook(self, input_ids=None, attention_mask=None, labels=None, idxs=None, **kwargs):
         if labels is None:
             raise ValueError('labels must be provided when saving a datastore. Are you using --predict_with_generate by mistake? If so, disable it')
         self.labels = labels
+        self.idxs = idxs
         return self.original_forward_func(input_ids=input_ids, labels=labels, attention_mask=attention_mask, **kwargs)
 
     def post_forward_hook(self, module, input, output):
@@ -366,28 +364,33 @@ class KNNSaver(object):
         captured_keys = self.activation_capturer.captured
         if shift == 1:
             captured_keys = captured_keys[:, :-shift]
+        bs, seq_len = captured_keys.shape[:2]
         captured_keys = captured_keys.flatten(0, 1) # (batch * time, dim)
         captured_values = self.labels[:, shift:].flatten(0, 1) # (batch * time)
+        captured_idxs: np.ndarray = self.idxs.astype(np.int32)[:, None].repeat(seq_len, axis=-1).flatten() # (batch * time)
 
         nonpad_mask = captured_values != -100
         keys = captured_keys[nonpad_mask]
         values = captured_values[nonpad_mask]
+        idxs = captured_idxs[nonpad_mask.cpu().numpy()]
 
         batch_time_size = keys.shape[0]
         # if shape[0] == args.tokens_per_sample:
-        if self.dstore_idx + batch_time_size > self.dstore_size:
-            batch_time_size = max(self.dstore_size - self.dstore_idx, 0)
+        if self.dstore_offset + batch_time_size > self.dstore_size:
+            batch_time_size = max(self.dstore_size - self.dstore_offset, 0)
             keys = keys[:batch_time_size]
             values = values[:batch_time_size]
+            ids = ids[:batch_time_size]
         try:
-            self.dstore_keys[self.dstore_idx:(batch_time_size + self.dstore_idx)] = keys.cpu().numpy().astype(np.float16)
-            self.dstore_vals[self.dstore_idx:(batch_time_size + self.dstore_idx)] = values.unsqueeze(-1).cpu().numpy().astype(np.int32)
+            self.dstore_keys[self.dstore_offset:(batch_time_size + self.dstore_offset)] = keys.cpu().numpy().astype(np.float16)
+            self.dstore_vals[self.dstore_offset:(batch_time_size + self.dstore_offset)] = values.cpu().numpy().astype(np.int32)
+            self.dstore_idxs[self.dstore_offset:(batch_time_size + self.dstore_offset)] = idxs
         except ValueError as ex:
             logger.error(f'Error saving datastore with mode {self.dstore_keys.mode}, did you try to save an already existing datastore?')
-            logger.error(f'Delete the files {self.dstore_keys.filename} and {self.dstore_vals.filename} and try again')
+            logger.error(f'Delete the files {self.dstore_keys.filename}, {self.dstore_vals.filename}, {self.dstore_ids.filename} and try again')
             raise ex
 
-        self.dstore_idx += batch_time_size
+        self.dstore_offset += batch_time_size
 
         return output
 

@@ -1040,7 +1040,7 @@ class FusionT5Encoder(T5Stack):
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
-        idxs: Optional[List[str]] = None,
+        idxs=None,
     ):
         outputs = super().forward(
             input_ids=input_ids,
@@ -1548,6 +1548,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         encoder_outputs=None,
         decoder_retrieval_kwargs: Dict[str, Any] = {},
         encoder_input_ids=None,
+        idxs=None,
         **kwargs
     ):
 
@@ -1791,6 +1792,10 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
             )
+
+            # output retrieval results for knnlm
+            if hasattr(self, 'broken_into') and self.broken_into is not None:
+                outputs.decoder_ctx_ids = self.broken_into.idxs_at_knns.cpu().numpy().astype(np.str_)
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need

@@ -42,6 +42,7 @@ if [[ ${data} == "bm25" ]]; then
     #val_file=data/wow/val_astarget_selfprov_evidence.json.beir_ans.fid/dev.json
     # bm25 docs (dedup)
     val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
+    #val_file=data/bioasq_test.json
     depth=100
 elif [[ ${data} == "random" ]]; then
     # all docs (full ranking)
@@ -58,7 +59,7 @@ fi
 max_question_len=128
 max_context_len=128
 generation_prefix_len=0
-use_context=true
+use_context=false
 context_bos=true
 answer_bos=true
 max_eval_samples=1000
@@ -144,4 +145,5 @@ deepspeed train.py \
     --max_eval_samples ${max_eval_samples} \
     --dataloader_num_workers 4 \
     --report_to none \
-    ${model_args} ${setting_extra}
+    ${model_args} ${setting_extra} \
+    --knnlm

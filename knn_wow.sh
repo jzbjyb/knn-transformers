@@ -14,28 +14,31 @@
 eval "$(conda shell.bash hook)"
 conda activate knn
 
-output=checkpoints/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.translation.json/t5xl/knn
-train_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.translation.json
-validation_file=data/wow/val_astarget_selfprov_qa.json
-generation_file=${output}/generation.txt
+output=checkpoints/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans/t5small/knn
+train_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans/corpus.jsonl
+validation_file=${train_file}
+dstore_size=38089
+
+#output=checkpoints/bioasq/bioasq_test.beir.translation.json/t5small/knn
+#train_file=data/bioasq_test.beir.translation.json
+#validation_file=data/bioasq_test.beir.translation.json
+#dstore_size=4687476
 
 batch_size=32
 max_evi_length=128
 max_gen_length=128
 
-model=google/t5-xl-lm-adapt
-source_lang=en
-target_lang=zh
+model=google/t5-small-lm-adapt
 split=train
 num_samples=100
 use_approx_index=false
-dstore_size=38089
+generation_file=${output}/generation.txt
 
 : '
 python -u run_translation.py  \
   --model_name_or_path ${model} \
   --train_file ${train_file} --validation_file ${validation_file} \
-  --source_lang ${source_lang} --target_lang ${target_lang} \
+  --source_lang xxx --target_lang xxx \
   --output_dir ${output} \
   --dstore_dir ${output} \
   --per_device_train_batch_size ${batch_size} --per_device_eval_batch_size ${batch_size} \
@@ -48,7 +51,7 @@ python -u run_translation.py  \
 python -u run_translation.py  \
   --model_name_or_path ${model} \
   --train_file ${train_file} --validation_file ${validation_file} \
-  --source_lang ${source_lang} --target_lang ${target_lang} \
+  --source_lang xxx --target_lang xxx \
   --output_dir ${output} \
   --dstore_dir ${output} \
   --per_device_train_batch_size ${batch_size} --per_device_eval_batch_size ${batch_size} \
@@ -59,7 +62,7 @@ exit
 python -u run_translation.py  \
   --model_name_or_path ${model} \
   --train_file ${train_file} --validation_file ${validation_file} \
-  --source_lang ${source_lang} --target_lang ${target_lang} \
+  --source_lang xxx --target_lang xxx \
   --output_dir ${output} \
   --dstore_dir ${output} \
   --generation_file ${generation_file} \

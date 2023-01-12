@@ -65,7 +65,7 @@ from beir.datasets.data_loader import GenericDataLoader
 from deepspeed import checkpointing as ds_checkpointing
 from models.fusion_t5 import FusionT5Config, FusionT5ForConditionalGeneration, FusionSeq2SeqLMOutput
 from models.retriever import BM25
-from knnlm import KNNWrapper, KEY_TYPE, DIST
+from knnlm import KNNWrapper, KNNSaver, KEY_TYPE, DIST
 
 from em_eval import ems
 
@@ -495,10 +495,10 @@ def main():
 
     if model_args.knnlm:  # load knnlm
         knn_wrapper = KNNWrapper(
-            #dstore_size=38089,
-            #dstore_dir='checkpoints/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.translation.json/t5xl/knn',
-            dstore_size=4687476,
-            dstore_dir='checkpoints/bioasq/bioasq_test.beir.translation.json/t5small/knn',
+            dstore_size=38089,
+            dstore_dir='checkpoints/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans/t5small/knn',
+            #dstore_size=4687476,
+            #dstore_dir='checkpoints/bioasq/bioasq_test.beir.translation.json/t5small/knn',
             dimension=model.config.hidden_size,
             knn_sim_func=DIST.l2,
             knn_keytype=KEY_TYPE.last_ffn_input,
@@ -740,7 +740,8 @@ def main():
                         logits = torch.stack(gen_outputs.scores, 1)  # (bs, seq_len - 1, vocab_size) without bos
                         logits = torch.cat([logits, torch.zeros(logits.size(0), 1, logits.size(2)).to(logits)], 1)  # (bs, seq_len, vocab_size) with bos
                     if gen_outputs.retrieval_sequences is not None:
-                        retrieval_sequences = np.stack(list(filter(lambda x: x is not None, gen_outputs.retrieval_sequences)), 1)  # (bs, <=seq_len, n_ctxs)
+                        retrieval_sequences = list(filter(lambda x: x is not None, gen_outputs.retrieval_sequences))
+                        retrieval_sequences = np.stack(retrieval_sequences, 1) if len(retrieval_sequences) else None  # (bs, <=seq_len, n_ctxs)
 
             if 'rerank' in training_args.do_eval_special:  # compute retrieval attention for reranking
                 with torch.no_grad():
@@ -780,7 +781,7 @@ def main():
                 count = trainer._nested_gather(count)  # (gathered_batch_size,)
 
                 accs = None
-                if evaluate_retrieval:
+                if evaluate_retrieval and eval_outputs.decoder_ctx_ids is not None:
                     qids = batch['idxs']  # (bs)
                     dids = eval_outputs.decoder_ctx_ids  # (bs, seq_len, n_ctxs)
                     accs: List[List[float]] = []
@@ -848,7 +849,7 @@ def main():
                 ll, count, accuracy = zip(*finals)
                 ll = torch.cat(ll)[:len(validation_dataset)]
                 count = torch.cat(count)[:len(validation_dataset)]
-                accuracy = torch.cat(accuracy, 0)[:len(validation_dataset)].mean(0)
+                accuracy = torch.cat(accuracy, 0)[:len(validation_dataset)].mean(0) if accuracy[0] is not None else None
                 print(f'#examples {len(ll)}, #tokens {count.sum().item()}, perplexity: {torch.exp(-ll.sum() / count.sum()).item()}, retrieval accuracy: {accuracy}')
             elif 'perplexity' in training_args.do_eval_special or 'gradient' in training_args.do_eval_special:
                 qids = [example['qid'] for example in validation_dataset]
@@ -905,4 +906,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
