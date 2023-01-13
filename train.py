@@ -23,15 +23,17 @@ import os
 import random
 import sys
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from tqdm import tqdm
 from collections import defaultdict
+import pickle
 
 import numpy as np
 import torch
 import torch.cuda.amp
 from torch.utils.data import DataLoader
 from torch.nn import CrossEntropyLoss
+import torch.distributed as dist
 import torch.linalg
 from tqdm import trange
 
@@ -264,7 +266,7 @@ class DataCollatorForFusion:
         decoder_start_token = self.tokenizer.convert_ids_to_tokens([self.model.config.decoder_start_token_id])[0]
 
         # question ids
-        qids = [e['qid'] for e in examples]
+        qids = np.array([e['qid'] for e in examples])
 
         # questions
         questions = self.tokenizer(
@@ -355,6 +357,44 @@ def _load_data_file(path: str, max_num_samples: int = 0):
         max_num_samples = min(len(data), max_num_samples)
         data = data[:max_num_samples]
     return data
+
+
+class CacheManager:
+    def __init__(
+        self,
+        get_cache: bool = False,
+        save_cache: bool = False,
+        cache_file: str = None
+    ):
+        self.get_cache = get_cache
+        self.save_cache = save_cache
+        self.step = 0
+        self.rank = dist.get_rank()
+        self.cache_file = f'{cache_file}.{self.rank}' if cache_file else cache_file
+        if self.cache_file and os.path.exists(self.cache_file):
+            with open(self.cache_file, 'rb') as fin:
+                self.cache = pickle.load(fin)
+                print('cache size', len(self.cache))
+        else:
+            self.cache = {}
+
+    def save(self, val: Any):
+        if not self.save_cache:
+            return
+        self.cache[(self.rank, self.step)] = val
+        self.step += 1
+
+    def get(self):
+        if not self.get_cache:
+            return None
+        val = self.cache[(self.rank, self.step)]
+        self.step += 1
+        return val
+
+    def dump(self):
+        if self.cache_file and not os.path.exists(self.cache_file):
+            with open(self.cache_file, 'wb') as fout:
+                pickle.dump(self.cache, fout)
 
 
 def main():
@@ -695,6 +735,7 @@ def main():
             'topk': data_args.depth,
             'frequency': 1 if data_args.use_context else 0
         }
+        model.cache = CacheManager(get_cache=True, save_cache=False, cache_file='.cache')
 
         for step, batch in tqdm(enumerate(dataloader)):
             batch = trainer._prepare_inputs(batch)
@@ -768,36 +809,55 @@ def main():
                 top1_accs = ranks[:, 0, ...].eq(0).float()  # (gathered_batch_size, n_used_layers, n_used_heads)
                 return top1_accs
 
-            def perplexity(eval_outputs, evaluate_retrieval: Dict = {'percentiles': [0.25, 0.5, 0.75, 1.0]}):
+            def perplexity(
+                eval_outputs,
+                evaluate_retrieval: Dict = {'percentiles': [0.25, 0.5, 0.75, 1.0]},
+                output_all: bool = True,
+            ):
+                qids = batch['idxs']
                 labels = batch['labels']
                 logits = eval_outputs.logits
                 loss_fct = CrossEntropyLoss(reduction='none', ignore_index=-100)
-                nll = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1)).view(*labels.size())  # (batch_size, seq_len)
-                nll = nll.sum(-1)  # (batch_size,)
-                count = labels.ne(-100).sum(-1)  # (batch_size,)
-                nll = trainer._pad_across_processes(nll, pad_index=0)  # (batch_size,)
-                count = trainer._pad_across_processes(count, pad_index=0)  # (batch_size,)
-                nll = trainer._nested_gather(nll)  # (gathered_batch_size,)
-                count = trainer._nested_gather(count)  # (gathered_batch_size,)
+                lp = -loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1)).view(*labels.size())  # (batch_size, seq_len)
 
-                accs = None
+                slp = lp.sum(-1)  # (batch_size,)
+                seqlen = labels.ne(-100).sum(-1)  # (batch_size,)
+
+                dids = accs = None
                 if evaluate_retrieval and eval_outputs.decoder_ctx_ids is not None:
-                    qids = batch['idxs']  # (bs)
                     dids = eval_outputs.decoder_ctx_ids  # (bs, seq_len, n_ctxs)
                     accs: List[List[float]] = []
-                    for qid, _dids, c in zip(qids, dids, count):
+                    assert len(qids) == len(dids) == len(seqlen)
+                    for qid, _dids, sl in zip(qids, dids, seqlen):
                         accs.append([])
                         rel_dids: List[str] = np.array([d for d, r in qrels[qid].items() if r])
-                        rels = np.isin(_dids, rel_dids).any(-1)[:c.item()]  # (rel_seq_len)
+                        rels = np.isin(_dids, rel_dids).any(-1)[:sl.item()]  # (rel_seq_len)
                         for pt in evaluate_retrieval['percentiles']:
                             pt = int(len(rels) * pt)
                             acc = rels[:pt].mean()
                             accs[-1].append(acc)
                     accs = torch.tensor(accs).to(logits.device)  # (bs, n_percentiles)
-                    accs = trainer._pad_across_processes(accs, pad_index=0)  # (bs, n_percentiles)
-                    accs = trainer._nested_gather(accs)  # (gathered_batch_size, n_percentiles)
+                    accs = trainer._nested_gather(trainer._pad_across_processes(accs, pad_index=0))  # (gathered_batch_size, n_percentiles)
+                    if output_all:
+                        # (gathered_batch_size, seq_len, n_ctxs)
+                        dids = trainer._nested_gather(trainer._pad_across_processes(torch.tensor(dids.astype(np.int32)).to(labels.device), pad_index=-1))
 
-                return -nll, count, accs
+                # (gathered_batch_size,)
+                slp = trainer._nested_gather(trainer._pad_across_processes(slp, pad_index=0))
+                # (gathered_batch_size,)
+                seqlen = trainer._nested_gather(trainer._pad_across_processes(seqlen, pad_index=0))
+
+                if output_all:
+                    # (gathered_batch_size,)
+                    qids = trainer._nested_gather(trainer._pad_across_processes(torch.tensor(qids.astype(np.int32)).to(labels.device), pad_index=-1))
+                    # (gathered_batch_size, seq_len)
+                    lp = trainer._nested_gather(trainer._pad_across_processes(lp, pad_index=0))
+                    # (gathered_batch_size, seq_len)
+                    labels = trainer._nested_gather(trainer._pad_across_processes(labels, pad_index=-100))
+                else:
+                    qids = lp = labels = None
+
+                return slp, seqlen, accs, qids, lp, labels, dids
 
             def gradient(eval_outputs, agg: str = 'mean', remove_ctx_dim: bool = False):
                 eval_outputs.loss.backward()
@@ -846,11 +906,13 @@ def main():
                 acc = finals.mean(0).item()
                 print(f'#examples {len(finals)}, accuracy {acc}')
             elif 'generate_perplexity' in training_args.do_eval_special:
-                ll, count, accuracy = zip(*finals)
-                ll = torch.cat(ll)[:len(validation_dataset)]
-                count = torch.cat(count)[:len(validation_dataset)]
+                slp, seqlen, accuracy, qids, lp, labels, dids = zip(*finals)
+                slp = torch.cat(slp)[:len(validation_dataset)]
+                seqlen = torch.cat(seqlen)[:len(validation_dataset)]
                 accuracy = torch.cat(accuracy, 0)[:len(validation_dataset)].mean(0) if accuracy[0] is not None else None
-                print(f'#examples {len(ll)}, #tokens {count.sum().item()}, perplexity: {torch.exp(-ll.sum() / count.sum()).item()}, retrieval accuracy: {accuracy}')
+                if qids[0] is not None:
+                    torch.save({'labels': labels, 'logprobs': lp, 'docids': dids, 'qids': qids}, os.path.join(training_args.output_dir, 'logprob_label.pt'))
+                print(f'#examples {len(slp)}, #tokens {seqlen.sum().item()}, perplexity: {torch.exp(-slp.sum() / seqlen.sum()).item()}, retrieval accuracy: {accuracy}')
             elif 'perplexity' in training_args.do_eval_special or 'gradient' in training_args.do_eval_special:
                 qids = [example['qid'] for example in validation_dataset]
                 scores = torch.cat(finals, 0)[:len(qids)].tolist()  # (num_examples,)
@@ -863,6 +925,7 @@ def main():
             else:
                 raise NotImplementedError
 
+        model.cache.dump()
         exit()
 
     if training_args.do_eval:

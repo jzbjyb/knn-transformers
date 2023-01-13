@@ -17,9 +17,11 @@
 
 
 import copy
+import os
 import warnings
 from typing import Optional, Tuple, Union, List, Dict, Any
 from operator import itemgetter
+import functools
 
 import numpy as np
 import torch
@@ -1234,6 +1236,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         return_dict: Optional[bool] = None,
         decoder_retrieval_kwargs: Dict[str, Any] = {},
         idxs: Optional[List[str]] = None,
+        decoder_ctx_ids: Optional[np.ndarray] = None,
     ) -> Union[Tuple[torch.FloatTensor], Seq2SeqLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -1341,7 +1344,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             decoder_until_now = torch.cat([decoder_input_ids_previous, decoder_input_ids], -1) if decoder_input_ids_previous is not None else decoder_input_ids
             # (bs, n_ctxs), (bs, n_ctxs, ctx_seq_length)
             decoder_ctx_ids, decoder_ctx_input_ids, decoder_ctx_attention_mask = retriever.retrieve_and_prepare(
-                encoder_until_now, decoder_until_now, decoder_ctx_input_ids, decoder_ctx_attention_mask, topk=ret_topk, use_ctx=False)
+                encoder_until_now, decoder_until_now, decoder_ctx_input_ids, decoder_ctx_attention_mask, decoder_ctx_ids=decoder_ctx_ids, topk=ret_topk, use_ctx=False)
             if past_key_values is not None:  # remove past key values for ctx to use the new decoder_ctx_input_ids
                 past_key_values = tuple((target_pkv, None) for target_pkv, ctx_pkv in past_key_values)
 
@@ -1491,6 +1494,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         if ctx_pred_scores is not None and ctx_pred_scores.dim() == 2:  # dummy dimension of layer and head
             ctx_pred_scores = ctx_pred_scores[..., None, None]
             ctx_gold_scores = ctx_gold_scores[..., None, None]
+
         return FusionSeq2SeqLMOutput(
             loss=loss,
             logits=lm_logits,
@@ -1549,6 +1553,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         decoder_retrieval_kwargs: Dict[str, Any] = {},
         encoder_input_ids=None,
         idxs=None,
+        decoder_ctx_ids=None,
         **kwargs
     ):
 
@@ -1571,7 +1576,9 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             "decoder_head_mask": decoder_head_mask,
             "cross_attn_head_mask": cross_attn_head_mask,
             "use_cache": use_cache,
-            "decoder_retrieval_kwargs": decoder_retrieval_kwargs
+            "decoder_retrieval_kwargs": decoder_retrieval_kwargs,
+            "idxs": idxs,
+            "decoder_ctx_ids": decoder_ctx_ids,
         }
 
     def prepare_decoder_input_ids_from_labels(self, labels: torch.Tensor):
@@ -1784,6 +1791,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            model_inputs['decoder_ctx_ids'] = self.cache.get()
 
             # forward pass to get next token
             outputs = self(
@@ -1796,6 +1804,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             # output retrieval results for knnlm
             if hasattr(self, 'broken_into') and self.broken_into is not None:
                 outputs.decoder_ctx_ids = self.broken_into.idxs_at_knns.cpu().numpy().astype(np.str_)
+            self.cache.save(outputs.decoder_ctx_ids)
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need

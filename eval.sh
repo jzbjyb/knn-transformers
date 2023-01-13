@@ -59,7 +59,7 @@ fi
 max_question_len=128
 max_context_len=128
 generation_prefix_len=0
-use_context=false
+use_context=true
 context_bos=true
 answer_bos=true
 max_eval_samples=1000
@@ -145,5 +145,4 @@ deepspeed train.py \
     --max_eval_samples ${max_eval_samples} \
     --dataloader_num_workers 4 \
     --report_to none \
-    ${model_args} ${setting_extra} \
-    --knnlm
+    ${model_args} ${setting_extra}

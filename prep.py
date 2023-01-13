@@ -525,14 +525,77 @@ def convert_beir_corpus_to_translation(beir_corpus_file: str, out_file: str):
             t = {'translation': {'en': '', 'zh': l['text']}}
             fout.write(json.dumps(t) + '\n')
 
+def compare_logprob(
+    file: str,
+    sys_files: List[str],
+    beir_dir: str,
+    beir_split: str = 'dev'):
+
+    corpus, queries, qrels = GenericDataLoader(
+        data_folder=beir_dir).load(split=beir_split)
+
+    data = torch.load(file, map_location='cpu')
+    sys_datas = [torch.load(f, map_location='cpu') for f in sys_files]
+
+    value_sym = '!!'
+    categories = ['imp', '~imp', 'rel', '~rel', 'imp&rel', '~imp&rel', 'imp&~rel', '~imp&~rel']
+    categories_values = [f'{c}{value_sym}' for c in categories]
+    sys_reports = [{k: [] for k in categories + categories_values} for _ in sys_files]
+
+    for i in range(len(data['labels'])):
+        labels = data['labels'][i]  # (bs, seq_len)
+        mask = labels != -100  # (bs, seq_len)
+        logprobs = data['logprobs'][i]  # (bs, seq_len)
+        probs = logprobs[mask].exp()  # (n_tokens)
+
+        for data_sys, sys_report in zip(sys_datas, sys_reports):
+            qids = data_sys['qids'][i]  # (bs)
+            dids = data_sys['docids'][i]  # (bs, seq_len - 1, n_ctxs) bos doesn't require retrieval
+            dids = torch.cat([torch.full(size=(dids.size(0), 1, dids.size(2)), fill_value=-1).to(dids), dids], 1)  # (bs, seq_len, n_ctxs)
+
+            # convert doc ids to binary relevance
+            rel = []
+            for qid, _dids in zip(qids, dids):
+                rel_dids = torch.tensor([int(k) for k, r in qrels[str(qid.item())].items() if r])
+                rel.append(torch.isin(_dids, rel_dids))  # (seq_len, n_ctxs)
+            rel = torch.stack(rel, 0)  # (bs, seq_len, n_ctxs)
+            rel = rel.any(-1)  # (bs, seq_len)
+            rel = rel[mask]  # (n_tokens)
+
+            # compute prob margin
+            logprobs_sys = data_sys['logprobs'][i]  # (bs, seq_len)
+            probs_sys = logprobs_sys[mask].exp()  # (n_tokens)
+            probs_sys = probs_sys - probs
+            imp = probs_sys >= 0
+
+            # categorize
+            for c in categories:
+                cate_mask = eval(c)
+                sys_report[c].append(cate_mask.float().mean().item())
+                sys_report[f'{c}{value_sym}'].append(probs_sys[cate_mask].float().mean().item())
+
+    # aggregate over batches
+    for resport in sys_reports:
+        for k in resport:
+            resport[k] = np.mean(resport[k])
+
+    print('\t'.join(map(lambda x: '{:>10s}'.format(x), categories)))
+    print('\t'.join(map(lambda x: '{:>10s}'.format(x), categories_values)))
+    print()
+    for sr in sys_reports:
+        print('\t'.join(map(lambda x: '{:>10.4f}'.format(sr[x]), categories)))
+        print('\t'.join(map(lambda x: '{:>10.4f}'.format(sr[x]), categories_values)))
+        print()
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
         'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc',
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
-        'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation', 'convert_fid_to_beir'])
-    parser.add_argument('--inp', type=str, default=None, help='input file')
+        'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
+        'convert_fid_to_beir', 'compare_logprob'])
+    parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
 
@@ -561,21 +624,21 @@ if __name__ == '__main__':
             print(head_idx, np.mean([pwr.get_ids_portion(i, head_idx) for i, pwr in enumerate(pwrs)]))
 
     elif args.task == 'head_analysis':
-        head_analysis(args.inp)
+        head_analysis(args.inp[0])
 
     elif args.task == 'shuffle_evidence':
-        shuffle_evidence(args.inp, args.out)
+        shuffle_evidence(args.inp[0], args.out)
 
     elif args.task == 'retrieval_acc':
-        retrieval_acc(args.inp, format='pt')
+        retrieval_acc(args.inp[0], format='pt')
 
     elif args.task == 'translation_to_beir':
-        translation_file = args.inp
+        translation_file = args.inp[0]
         beir_dir = args.out
         translation_to_beir(translation_file, beir_dir, split='dev', dedup_doc=True)
 
     elif args.task == 'convert_beir_to_fid_format':
-        beir_dir = args.inp
+        beir_dir = args.inp[0]
         out_dir = args.out
         convert_beir_to_fid_format(
             beir_dir,
@@ -587,31 +650,34 @@ if __name__ == '__main__':
             topk=100)
 
     elif args.task == 'use_answer_as_query_in_beir':
-        beir_dir = args.inp
+        beir_dir = args.inp[0]
         out_dir = args.out
         tokenizer = AutoTokenizer.from_pretrained('google/t5-xl-lm-adapt')
         use_answer_as_query_in_beir(beir_dir, out_dir, truncate_to=8, tokenizer=tokenizer)
 
     elif args.task == 'dedup_translation':
-        inp_file = args.inp
+        inp_file = args.inp[0]
         out_file = args.out
         dedup_translation(inp_file, out_file)
 
     elif args.task == 'layerhead':
-        pt_file = args.inp
+        pt_file = args.inp[0]
         layerhead(pt_file)
 
     elif args.task == 'split_ctxs':
-        json_file = args.inp
+        json_file = args.inp[0]
         out_file = args.out
         split_ctxs(json_file, out_file)
 
     elif args.task == 'convert_beir_corpus_to_translation':
-        beir_corpus_file = args.inp
+        beir_corpus_file = args.inp[0]
         out_file = args.out
         convert_beir_corpus_to_translation(beir_corpus_file, out_file)
 
     elif args.task == 'convert_fid_to_beir':
-        fid_file = args.inp
+        fid_file = args.inp[0]
         beir_dir = args.out
         convert_fid_to_beir(fid_file, beir_dir, split='dev')
+
+    elif args.task == 'compare_logprob':
+        compare_logprob(args.inp[0], sys_files=args.inp[1:], beir_dir='data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans')
