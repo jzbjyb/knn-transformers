@@ -21,11 +21,7 @@ class BM25:
     ):
         self.tokenizer = tokenizer
         self.corpus = corpus
-        # build bm25 index
-        index_name = index_name
-        model = BM25Search(index_name=index_name, hostname='localhost', initialize=True, number_of_shards=1)  # TODO: only initialize when necessary
-        model.index(self.corpus)
-        time.sleep(5)
+        # load bm25 index
         model = BM25Search(index_name=index_name, hostname='localhost', initialize=False, number_of_shards=1)
         self.retriever = EvaluateRetrieval(model)
         self.format_func = format_func
@@ -72,7 +68,7 @@ class BM25:
                     queries = decoder_texts
 
             # retrieve
-            results = self.retriever.retrieve(self.corpus, dict(zip(range(len(queries)), queries)))
+            results = self.retriever.retrieve(self.corpus, dict(zip(range(len(queries)), queries)), disable_tqdm=True)
 
             # prepare outputs
             docids: List[str] = []

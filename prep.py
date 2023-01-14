@@ -437,13 +437,13 @@ def convert_beir_to_fid_format(
         examples: List[Dict] = []
         for qid, scores_dict in results.items():
             if add_qrel_as_answer:
-                answer = [clean_text_for_tsv(corpus[did].get(add_qrel_as_answer)) for did, rel in qrels[qid].items() if rel]
+                answer = [corpus[did].get(add_qrel_as_answer) for did, rel in qrels[qid].items() if rel]
             else:
                 answer = beir_data.qid2answer[qid]
             if 'original_text' in beir_data.qid2meta[qid]:  # for wow dataset the query is the answer while the real query is in original_text
-                query = clean_text_for_tsv(beir_data.qid2meta[qid]['original_text'])
+                query = beir_data.qid2meta[qid]['original_text']
             else:
-                query = clean_text_for_tsv(queries[qid])
+                query = queries[qid]
             example = {'question': query, 'id': qid, 'answers': answer, 'ctxs': []}
             scores = sorted(scores_dict.items(), key=lambda item: item[1], reverse=True)[:topk]
             if add_self:
@@ -458,11 +458,11 @@ def convert_beir_to_fid_format(
                         scores[pos] = ori
             for rank in range(len(scores)):
                 did = scores[rank][0]
-                title = clean_text_for_tsv(corpus[did].get('title'))
+                title = corpus[did].get('title')
                 if add_self and did == beir_data.qid2meta[qid]['docid'] and 'context' in beir_data.qid2meta[qid]:  # avoid leaking
-                    text = clean_text_for_tsv(beir_data.qid2meta[qid]['context'])
+                    text = beir_data.qid2meta[qid]['context']
                 else:
-                    text = clean_text_for_tsv(corpus[did].get('text'))
+                    text = corpus[did].get('text')
                 example['ctxs'].append({'id': did, 'title': title, 'text': text})
             examples.append(example)
     os.makedirs(out_dir, exist_ok=True)

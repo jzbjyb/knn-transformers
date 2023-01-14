@@ -22,6 +22,7 @@ import logging
 import os
 import random
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
 from tqdm import tqdm
@@ -40,34 +41,23 @@ from tqdm import trange
 import evaluate
 import transformers
 from transformers import (
-    CONFIG_MAPPING,
     MODEL_FOR_CAUSAL_LM_MAPPING,
-    AutoConfig,
-    AutoModelForCausalLM,
     AutoTokenizer,
     HfArgumentParser,
-    Trainer,
-    TrainingArguments,
-    Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
-    default_data_collator,
-    DataCollatorWithPadding,
-    is_torch_tpu_available,
     set_seed,
 )
 from qa_trainer import QuestionAnsweringSeq2SeqTrainer
-from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.trainer_pt_utils import ShardSampler
-from transformers.utils import check_min_version, send_example_telemetry
-from transformers.utils.versions import require_version
-from transformers.trainer_utils import EvalLoopOutput, EvalPrediction
+from transformers.trainer_utils import EvalPrediction
 
 from beir.datasets.data_loader import GenericDataLoader
+from beir.retrieval.search.lexical import BM25Search
 from deepspeed import checkpointing as ds_checkpointing
 from models.fusion_t5 import FusionT5Config, FusionT5ForConditionalGeneration, FusionSeq2SeqLMOutput
 from models.retriever import BM25
-from knnlm import KNNWrapper, KNNSaver, KEY_TYPE, DIST
+from knnlm import KNNWrapper, KEY_TYPE, DIST
 
 from em_eval import ems
 
@@ -167,6 +157,7 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "An optional input evaluation data file to evaluate the perplexity on (a text file)."},
     )
+    beir_dir: Optional[str] = field(default=None, metadata={"help": "The beir directory"})
     predict_file: Optional[str] = field(default=None)
     max_train_samples: Optional[int] = field(
         default=None,
@@ -216,6 +207,13 @@ class DataTrainingArguments:
 class TrainingArgs(Seq2SeqTrainingArguments):
     extract_attention: bool = field(default=False)
     do_eval_special: str = field(default=None)
+    output_file: Optional[str] = field(default=None)
+
+
+@dataclass
+class KnnlmArguments:
+    dstore_size: int = field(default=None)
+    dstore_dir: str = field(default=None)
 
 
 @dataclass
@@ -371,12 +369,16 @@ class CacheManager:
         self.step = 0
         self.rank = dist.get_rank()
         self.cache_file = f'{cache_file}.{self.rank}' if cache_file else cache_file
-        if self.cache_file and os.path.exists(self.cache_file):
+        if self.use_cache and self.cache_file and os.path.exists(self.cache_file):
             with open(self.cache_file, 'rb') as fin:
                 self.cache = pickle.load(fin)
-                print('cache size', len(self.cache))
+                logger.info(f'Retrieval cache size {len(self.cache)}')
         else:
             self.cache = {}
+
+    @property
+    def use_cache(self):
+        return self.get_cache or self.save_cache
 
     def save(self, val: Any):
         if not self.save_cache:
@@ -392,7 +394,7 @@ class CacheManager:
         return val
 
     def dump(self):
-        if self.cache_file and not os.path.exists(self.cache_file):
+        if self.save_cache and self.cache_file and not os.path.exists(self.cache_file):
             with open(self.cache_file, 'wb') as fout:
                 pickle.dump(self.cache, fout)
 
@@ -402,13 +404,13 @@ def main():
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArgs))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArgs, KnnlmArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_args, knnlm_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, training_args, knnlm_args = parser.parse_args_into_dataclasses()
 
     model_args: ModelArguments
     data_args: DataTrainingArguments
@@ -535,10 +537,8 @@ def main():
 
     if model_args.knnlm:  # load knnlm
         knn_wrapper = KNNWrapper(
-            dstore_size=38089,
-            dstore_dir='checkpoints/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans/t5small/knn',
-            #dstore_size=4687476,
-            #dstore_dir='checkpoints/bioasq/bioasq_test.beir.translation.json/t5small/knn',
+            dstore_size=knnlm_args.dstore_size,
+            dstore_dir=knnlm_args.dstore_dir,
             dimension=model.config.hidden_size,
             knn_sim_func=DIST.l2,
             knn_keytype=KEY_TYPE.last_ffn_input,
@@ -660,7 +660,6 @@ def main():
         'num_beams': 1,
         'decoder_start_token_id': collator.get_real_decoder_start_token_id(),
         'prefix_len': data_args.generation_prefix_len,
-        'output_scores': True,
     }
 
     # Initialize our Trainer
@@ -720,13 +719,23 @@ def main():
             pin_memory=training_args.dataloader_pin_memory)
         # TODO: if there is not enough examples for the last batch the examples at the beginning will be reused
 
-        corpus, queries, qrels = GenericDataLoader(data_folder='data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans').load(split='dev')
-        #corpus, queries, qrels = GenericDataLoader(data_folder='data/bioasq_test.beir').load(split='dev')
+        retrieval_format_func = lambda doc: f'<pad> {data_args.context_prefix}{doc["text"]}' if doc is not None else f'<pad> {data_args.context_prefix}'  # TODO: always use <pad>
+        index_name = 'test'
+        corpus, queries, qrels = GenericDataLoader(data_folder=data_args.beir_dir).load(split='dev')
+
+        if not trainer.is_world_process_zero():
+            dist.barrier()
+        if trainer.is_world_process_zero():  # TODO: only initialize when necessary
+            logger.info("Build BM25 index")
+            BM25Search(index_name=index_name, hostname='localhost', initialize=True, number_of_shards=1).index(corpus)
+            time.sleep(5)
+            dist.barrier()
+
         retriever = BM25(
             tokenizer=tokenizer,
             corpus=corpus,
-            index_name='test',
-            format_func=lambda doc: f'<pad> {data_args.context_prefix}{doc["text"]}' if doc is not None else f'<pad> {data_args.context_prefix}',  # TODO: always use <pad>
+            index_name=index_name,
+            format_func=retrieval_format_func,
             max_length=data_args.max_context_len,
             use_encoder_input_ids=False,  # TODO: debug
             use_decoder_input_ids=True)
@@ -735,12 +744,13 @@ def main():
             'topk': data_args.depth,
             'frequency': 1 if data_args.use_context else 0
         }
-        model.cache = CacheManager(get_cache=True, save_cache=False, cache_file='.cache')
+        model.cache = CacheManager(get_cache=False, save_cache=False, cache_file='.cache')
 
         for step, batch in tqdm(enumerate(dataloader)):
             batch = trainer._prepare_inputs(batch)
 
             # generate
+            gen_outputs = None
             if 'generate' in training_args.do_eval_special:
                 with torch.no_grad():
                     # remove model inputs irrelevant to generation
@@ -760,46 +770,51 @@ def main():
                                 return collator.all_tokens
                             return prefix_ids[batch_id][gen_ids.shape[-1] - 1]
 
-                    # output generation probabilities
-                    output_scores = _gen_kwargs.pop('output_scores', False)
-
                     # generate and use generated outputs to overwrite inputs
                     gen_batch['decoder_retrieval_kwargs'] = decoder_retrieval_kwargs
                     gen_outputs = model.generate(
                         **gen_batch,
                         **_gen_kwargs,
                         prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
-                        output_scores=output_scores,
+                        output_scores=True,
                         return_dict_in_generate=True)
-                    generated_tokens = gen_outputs.sequences
 
-                    batch['decoder_input_ids'] = generated_tokens
-                    batch['decoder_attention_mask'] = torch.ones_like(generated_tokens)
-                    batch['labels'] = collator.get_labels_from_decoder_input_ids(generated_tokens)
+                    if 'rerank' in training_args.do_eval_special:  # use the generated to run evaluation
+                        batch['decoder_input_ids'] = gen_outputs.sequences
+                        batch['decoder_attention_mask'] = torch.ones_like(gen_outputs.sequences)
+                        batch['labels'] = collator.get_labels_from_decoder_input_ids(gen_outputs.sequences)
 
-                    if output_scores:
-                        logits = torch.stack(gen_outputs.scores, 1)  # (bs, seq_len - 1, vocab_size) without bos
-                        logits = torch.cat([logits, torch.zeros(logits.size(0), 1, logits.size(2)).to(logits)], 1)  # (bs, seq_len, vocab_size) with bos
+                    # process scores
+                    scores = torch.stack(gen_outputs.scores, 1)  # (bs, seq_len - 1, vocab_size) without bos
+                    scores = torch.cat([scores, torch.zeros(scores.size(0), 1, scores.size(2)).to(scores)], 1)  # (bs, seq_len, vocab_size) with bos at the end
+                    gen_outputs.scores = scores
+
+                    # process retrieval sequences
                     if gen_outputs.retrieval_sequences is not None:
                         retrieval_sequences = list(filter(lambda x: x is not None, gen_outputs.retrieval_sequences))
                         retrieval_sequences = np.stack(retrieval_sequences, 1) if len(retrieval_sequences) else None  # (bs, <=seq_len, n_ctxs)
+                        gen_outputs.retrieval_sequences = retrieval_sequences
 
+            eval_outputs = None
             if 'rerank' in training_args.do_eval_special:  # compute retrieval attention for reranking
                 with torch.no_grad():
                     eval_outputs = model(**batch)
             elif 'perplexity' in training_args.do_eval_special:  # compute perplexity
-                if 'generate' in training_args.do_eval_special:  # use generated tokens
-                    eval_outputs = FusionSeq2SeqLMOutput(
-                        logits=logits, decoder_ctx_ids=retrieval_sequences)
-                else:
+                if 'generate' not in training_args.do_eval_special:
                     with torch.no_grad():
                         eval_outputs = model(**batch)
             elif 'gradient' in training_args.do_eval_special or 'gradient-batch' in training_args.do_eval_special:  # bp
                 eval_outputs = model(**batch, output_embeddings=True)  # TODO: use deepspeed
+            elif 'generate' == training_args.do_eval_special:
+                pass
             else:
                 raise NotImplementedError
 
-            def rerank(eval_outputs, use_gold: bool = False):
+            def rerank(
+                eval_outputs,
+                gen_outputs,
+                use_gold: bool = False
+            ):
                 # gather
                 ctx_pred_scores = eval_outputs.ctx_gold_scores if use_gold else eval_outputs.ctx_pred_scores
                 ctx_pred_scores = trainer._pad_across_processes(ctx_pred_scores, pad_index=-1e10)  # (batch_size, n_ctx, n_used_layers, n_used_heads)
@@ -811,12 +826,13 @@ def main():
 
             def perplexity(
                 eval_outputs,
+                gen_outputs,
                 evaluate_retrieval: Dict = {'percentiles': [0.25, 0.5, 0.75, 1.0]},
                 output_all: bool = True,
             ):
                 qids = batch['idxs']
                 labels = batch['labels']
-                logits = eval_outputs.logits
+                logits = gen_outputs.scores
                 loss_fct = CrossEntropyLoss(reduction='none', ignore_index=-100)
                 lp = -loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1)).view(*labels.size())  # (batch_size, seq_len)
 
@@ -824,8 +840,8 @@ def main():
                 seqlen = labels.ne(-100).sum(-1)  # (batch_size,)
 
                 dids = accs = None
-                if evaluate_retrieval and eval_outputs.decoder_ctx_ids is not None:
-                    dids = eval_outputs.decoder_ctx_ids  # (bs, seq_len, n_ctxs)
+                if evaluate_retrieval and gen_outputs.retrieval_sequences is not None:
+                    dids = gen_outputs.retrieval_sequences  # (bs, seq_len, n_ctxs)
                     accs: List[List[float]] = []
                     assert len(qids) == len(dids) == len(seqlen)
                     for qid, _dids, sl in zip(qids, dids, seqlen):
@@ -859,7 +875,40 @@ def main():
 
                 return slp, seqlen, accs, qids, lp, labels, dids
 
-            def gradient(eval_outputs, agg: str = 'mean', remove_ctx_dim: bool = False):
+            def generate(
+                eval_outputs,
+                gen_outputs,
+            ):
+                predictions = gen_outputs.sequences
+                labels = batch['labels']
+
+                labels[labels == -100] = tokenizer.pad_token_id
+
+                # skip generation prefix
+                skip_prefix = data_args.generation_prefix_len > 0
+                if skip_prefix:
+                    predictions = predictions[:, 1 + data_args.generation_prefix_len:]  # skip bos + prefix
+                    labels = labels[:, data_args.generation_prefix_len:]  # skip prefix
+
+                predictions: List[str] = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+                labels: List[str] = tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+                # remove answer prefix
+                if skip_prefix:
+                    predictions = [x.strip() for x in predictions]
+                    labels = [x.strip() for x in labels]
+                else:
+                    predictions = [x.strip().lstrip(data_args.answer_prefix).strip() for x in predictions]
+                    labels = [x.strip().lstrip(data_args.answer_prefix).strip() for x in labels]
+
+                return predictions, labels
+
+            def gradient(
+                eval_outputs,
+                gen_outputs,
+                agg: str = 'mean',
+                remove_ctx_dim: bool = False
+            ):
                 eval_outputs.loss.backward()
                 #trainer.deepspeed.backward(eval_outputs.loss)
                 ctx_embeddings = eval_outputs.ctx_embeddings  # (bs, n_ctxs, ctx_seq_length, dim)
@@ -884,13 +933,15 @@ def main():
                 return grad
 
             if 'rerank' in training_args.do_eval_special:
-                finals.append(rerank(eval_outputs))
+                finals.append(rerank(eval_outputs, gen_outputs))
             elif 'perplexity' in training_args.do_eval_special:
-                finals.append(perplexity(eval_outputs))
+                finals.append(perplexity(eval_outputs, gen_outputs))
             elif 'gradient' in training_args.do_eval_special:
-                finals.append(gradient(eval_outputs, agg='mean', remove_ctx_dim=True))
+                finals.append(gradient(eval_outputs, gen_outputs, agg='mean', remove_ctx_dim=True))
             elif 'gradient-batch' in training_args.do_eval_special:
-                finals.append(gradient(eval_outputs, agg='mean', remove_ctx_dim=False))
+                finals.append(gradient(eval_outputs, gen_outputs, agg='mean', remove_ctx_dim=False))
+            elif 'generate' in training_args.do_eval_special:
+                finals.append(generate(eval_outputs, gen_outputs))
             else:
                 raise NotImplementedError
 
@@ -922,6 +973,21 @@ def main():
                     qid2scores[qid].append(score)
                 acc = np.mean([np.argmax(scores) == 0 for qid, scores in qid2scores.items()])
                 print(f'#exampels {len(qid2scores)}, acc {acc}')
+            elif 'generate' in training_args.do_eval_special:
+                predictions, labels = zip(*finals)
+                predictions, labels = sum(predictions, [])[:len(validation_dataset)], sum(labels, [])[:len(validation_dataset)]
+                n_chars_pred = np.sum([len(p) for p in predictions])
+                n_chars_labels = np.sum([len(l) for l in labels])
+                metric_func = evaluate.load('rouge')
+                metrics = metric_func.compute(predictions=predictions, references=labels)
+                with open(os.path.join(training_args.output_dir, training_args.output_file), 'w') as fout:
+                    for example, pred, label in zip(validation_dataset, predictions, labels):
+                        example['output'] = pred
+                        example['gold'] = label
+                        fout.write(json.dumps(example) + '\n')
+                print(f'#examples {len(validation_dataset)}, metric:')
+                print('\t'.join(metrics.keys()) + '\t#chars_pred\t#chars_gold')
+                print('\t'.join(map(str, metrics.values())) + f'\t{n_chars_pred}\t{n_chars_labels}')
             else:
                 raise NotImplementedError
 
