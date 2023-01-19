@@ -22,7 +22,8 @@ debug=false
 
 model=$1  # model to test
 setting=generate
-data=wow
+data=wikisum_test_1k
+output_dir=test
 output_file=test.jsonl
 
 # ------------- hyperparameters -------------
@@ -36,21 +37,76 @@ if [[ ${data} == "wow" ]]; then
     encoder_input_for_context="Given the context, generate the next response."
     context_prefix="Evidence: "
     answer_prefix="Response: "
-    train_file=data/wow/train_neg100_dpr.json
-    val_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans.fid/dev.json
+    max_question_len=128
+    max_context_len=128
+    max_answer_len=128
+    generation_prefix_len=2  # for 'Response:'
+
+    beir_index_name=""
     beir_dir=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans
+    val_file=${beir_dir}.fid/dev.json
+    train_file=${val_file}
     dstore_dir=checkpoints/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans/flant5xl/knn
     dstore_size=38089
     max_eval_samples=1000
-else
-    exit
+
+elif [[ ${data} == "eli5" ]]; then
+    question_prefix=$'Generate a long descriptive answer to the following question:\n'
+    encoder_input_for_context="Generate a long descriptive answer to the following question."
+    context_prefix="Evidence: "
+    answer_prefix="Answer: "
+    max_question_len=128
+    max_context_len=128
+    max_answer_len=128
+    generation_prefix_len=2  # for 'Answer:'
+
+    beir_index_name=""
+    beir_dir=data/eli5/val_astarget_selfprov_evidence.json.beir_dedup
+    val_file=${beir_dir}.fid/dev.json
+    train_file=${val_file}
+    dstore_dir=checkpoints/eli5/val_astarget_selfprov_evidence.json.beir_dedup/flant5xl/knn
+    dstore_size=38089
+    max_eval_samples=100000
+
+elif [[ ${data} == "wikisum" ]]; then
+    question_prefix=$'Generate a paragraph about '
+    encoder_input_for_context="Generate a paragraph."
+    context_prefix="Evidence: "
+    answer_prefix="Paragraph: "
+    max_question_len=128
+    max_context_len=128
+    max_answer_len=128
+    generation_prefix_len=3  # for 'Paragraph:'
+
+    beir_index_name="wikisum"
+    beir_dir=data/wikisum/wikisum_test_beir
+    val_file=${beir_dir}.fid/dev.json
+    train_file=${val_file}
+    dstore_dir=checkpoints/wikisum/wikisum_test_beir/flant5xl/knn
+    dstore_size=38089
+    max_eval_samples=1000
+
+elif [[ ${data} == "wikisum_test_1k" ]]; then
+    question_prefix=$'Generate a paragraph about '
+    encoder_input_for_context="Generate a paragraph."
+    context_prefix="Evidence: "
+    answer_prefix="Paragraph: "
+    max_question_len=128
+    max_context_len=128
+    max_answer_len=128
+    generation_prefix_len=3  # for 'Paragraph:'
+
+    beir_index_name=""
+    beir_dir=data/wikisum/wikisum_test_1k_beir
+    val_file=${beir_dir}.fid/dev.json
+    train_file=${val_file}
+    dstore_dir=checkpoints/wikisum/wikisum_test_1k_beir/flant5xl/knn
+    dstore_size=38089
+    max_eval_samples=1000
+
 fi
 
 # ------------- hyperparameters -------------
-max_question_len=128
-max_context_len=128
-max_answer_len=128
-generation_prefix_len=0
 context_bos=true
 answer_bos=true
 bos_attention=single
@@ -62,8 +118,7 @@ elif [[ ${setting} == "generate_perplexity" ]]; then
     generation_prefix_len=128
     setting_extra="--do_eval_special generate_perplexity --predict_with_generat"
 elif [[ ${setting} == "generate" ]]; then
-    generation_prefix_len=2  # for 'Answer:'
-    setting_extra="--do_eval_special generate --predict_with_generate"
+    setting_extra="--do_eval_special generate_perplexity --predict_with_generate"
 else
     exit
 fi
@@ -79,11 +134,12 @@ deepspeed train.py \
     --train_file ${train_file} \
     --validation_file ${val_file} \
     --beir_dir ${beir_dir} \
+    --beir_index_name "${beir_index_name}" \
     --question_prefix "${question_prefix}" \
     --context_prefix "${context_prefix}" \
     --answer_prefix "${answer_prefix}" \
     --encoder_input_for_context "${encoder_input_for_context}" \
-    --output_dir test \
+    --output_dir ${output_dir} \
     --output_file ${output_file} \
     --remove_unused_columns false \
     --depth ${depth} \

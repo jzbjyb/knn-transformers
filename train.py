@@ -158,6 +158,7 @@ class DataTrainingArguments:
         metadata={"help": "An optional input evaluation data file to evaluate the perplexity on (a text file)."},
     )
     beir_dir: Optional[str] = field(default=None, metadata={"help": "The beir directory"})
+    beir_index_name: Optional[str] = field(default=None, metadata={"help": "Index name"})
     predict_file: Optional[str] = field(default=None)
     max_train_samples: Optional[int] = field(
         default=None,
@@ -720,24 +721,25 @@ def main():
         # TODO: if there is not enough examples for the last batch the examples at the beginning will be reused
 
         retrieval_format_func = lambda doc: f'<pad> {data_args.context_prefix}{doc["text"]}' if doc is not None else f'<pad> {data_args.context_prefix}'  # TODO: always use <pad>
-        index_name = 'test'
         corpus, queries, qrels = GenericDataLoader(data_folder=data_args.beir_dir).load(split='dev')
 
-        if not trainer.is_world_process_zero():
-            dist.barrier()
-        if trainer.is_world_process_zero():  # TODO: only initialize when necessary
-            logger.info("Build BM25 index")
-            BM25Search(index_name=index_name, hostname='localhost', initialize=True, number_of_shards=1).index(corpus)
-            time.sleep(5)
-            dist.barrier()
+        if not data_args.beir_index_name:
+            data_args.beir_index_name = 'test'
+            if not trainer.is_world_process_zero():
+                dist.barrier()
+            if trainer.is_world_process_zero():  # TODO: only initialize when necessary
+                logger.info("Build BM25 index")
+                BM25Search(index_name=data_args.beir_index_name, hostname='localhost', initialize=True, number_of_shards=1).index(corpus)
+                time.sleep(5)
+                dist.barrier()
 
         retriever = BM25(
             tokenizer=tokenizer,
             corpus=corpus,
-            index_name=index_name,
+            index_name=data_args.beir_index_name,
             format_func=retrieval_format_func,
             max_length=data_args.max_context_len,
-            use_encoder_input_ids=False,  # TODO: debug
+            use_encoder_input_ids=True,
             use_decoder_input_ids=True)
         decoder_retrieval_kwargs = {
             'retriever': retriever,
@@ -832,13 +834,35 @@ def main():
             ):
                 qids = batch['idxs']
                 labels = batch['labels']
+                labels[labels == -100] = tokenizer.pad_token_id
+
+                predictions = gen_outputs.sequences
+                labels_of_pred = collator.get_labels_from_decoder_input_ids(predictions)
+                seqlen = labels_of_pred.ne(-100).sum(-1)  # (batch_size,)
+
+                # decode labels and predictions
+                # skip generation prefix
+                skip_prefix = data_args.generation_prefix_len > 0
+                if skip_prefix:
+                    predictions = predictions[:, 1 + data_args.generation_prefix_len:]  # skip bos + prefix
+                    labels = labels[:, data_args.generation_prefix_len:]  # skip prefix
+                predictions: List[str] = tokenizer.batch_decode(predictions, skip_special_tokens=True)
+                labels: List[str] = tokenizer.batch_decode(labels, skip_special_tokens=True)
+                # remove answer prefix
+                if skip_prefix:
+                    predictions = [x.strip() for x in predictions]
+                    labels = [x.strip() for x in labels]
+                else:
+                    predictions = [x.strip().lstrip(data_args.answer_prefix).strip() for x in predictions]
+                    labels = [x.strip().lstrip(data_args.answer_prefix).strip() for x in labels]
+
+                # compute log prob
                 logits = gen_outputs.scores
                 loss_fct = CrossEntropyLoss(reduction='none', ignore_index=-100)
-                lp = -loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1)).view(*labels.size())  # (batch_size, seq_len)
-
+                lp = -loss_fct(logits.view(-1, logits.size(-1)), labels_of_pred.view(-1)).view(*labels_of_pred.size())  # (batch_size, seq_len)
                 slp = lp.sum(-1)  # (batch_size,)
-                seqlen = labels.ne(-100).sum(-1)  # (batch_size,)
 
+                # compute retrieval accuracy
                 dids = accs = None
                 if evaluate_retrieval and gen_outputs.retrieval_sequences is not None:
                     dids = gen_outputs.retrieval_sequences  # (bs, seq_len, n_ctxs)
@@ -856,8 +880,9 @@ def main():
                     accs = trainer._nested_gather(trainer._pad_across_processes(accs, pad_index=0))  # (gathered_batch_size, n_percentiles)
                     if output_all:
                         # (gathered_batch_size, seq_len, n_ctxs)
-                        dids = trainer._nested_gather(trainer._pad_across_processes(torch.tensor(dids.astype(np.int32)).to(labels.device), pad_index=-1))
+                        dids = trainer._nested_gather(trainer._pad_across_processes(torch.tensor(dids.astype(np.int32)).to(labels_of_pred.device), pad_index=-1))
 
+                # aggregate
                 # (gathered_batch_size,)
                 slp = trainer._nested_gather(trainer._pad_across_processes(slp, pad_index=0))
                 # (gathered_batch_size,)
@@ -865,15 +890,15 @@ def main():
 
                 if output_all:
                     # (gathered_batch_size,)
-                    qids = trainer._nested_gather(trainer._pad_across_processes(torch.tensor(qids.astype(np.int32)).to(labels.device), pad_index=-1))
+                    qids = trainer._nested_gather(trainer._pad_across_processes(torch.tensor(qids.astype(np.int32)).to(labels_of_pred.device), pad_index=-1))
                     # (gathered_batch_size, seq_len)
                     lp = trainer._nested_gather(trainer._pad_across_processes(lp, pad_index=0))
                     # (gathered_batch_size, seq_len)
-                    labels = trainer._nested_gather(trainer._pad_across_processes(labels, pad_index=-100))
+                    labels_of_pred = trainer._nested_gather(trainer._pad_across_processes(labels_of_pred, pad_index=-100))
                 else:
-                    qids = lp = labels = None
+                    qids = lp = labels_of_pred = None
 
-                return slp, seqlen, accs, qids, lp, labels, dids
+                return slp, seqlen, accs, qids, lp, labels_of_pred, dids, predictions, labels
 
             def generate(
                 eval_outputs,
@@ -957,13 +982,26 @@ def main():
                 acc = finals.mean(0).item()
                 print(f'#examples {len(finals)}, accuracy {acc}')
             elif 'generate_perplexity' in training_args.do_eval_special:
-                slp, seqlen, accuracy, qids, lp, labels, dids = zip(*finals)
+                slp, seqlen, accuracy, qids, lp, labels_of_pred, dids, predictions, labels = zip(*finals)
                 slp = torch.cat(slp)[:len(validation_dataset)]
                 seqlen = torch.cat(seqlen)[:len(validation_dataset)]
                 accuracy = torch.cat(accuracy, 0)[:len(validation_dataset)].mean(0) if accuracy[0] is not None else None
                 if qids[0] is not None:
-                    torch.save({'labels': labels, 'logprobs': lp, 'docids': dids, 'qids': qids}, os.path.join(training_args.output_dir, 'logprob_label.pt'))
+                    torch.save({'labels': labels_of_pred, 'logprobs': lp, 'docids': dids, 'qids': qids}, os.path.join(training_args.output_dir, 'logprob_label.pt'))
                 print(f'#examples {len(slp)}, #tokens {seqlen.sum().item()}, perplexity: {torch.exp(-slp.sum() / seqlen.sum()).item()}, retrieval accuracy: {accuracy}')
+                predictions, labels = sum(predictions, [])[:len(validation_dataset)], sum(labels, [])[:len(validation_dataset)]
+                n_chars_pred = np.mean([len(p) for p in predictions])
+                n_chars_labels = np.mean([len(l) for l in labels])
+                metric_func = evaluate.load('rouge')
+                metrics = metric_func.compute(predictions=predictions, references=labels)
+                print(f'#examples {len(validation_dataset)}, metric:')
+                print('\t'.join(metrics.keys()) + '\t#chars_pred\t#chars_gold')
+                print('\t'.join(map(str, metrics.values())) + f'\t{n_chars_pred}\t{n_chars_labels}')
+                with open(os.path.join(training_args.output_dir, training_args.output_file), 'w') as fout:
+                    for example, pred, label in zip(validation_dataset, predictions, labels):
+                        example['output'] = pred
+                        example['gold'] = label
+                        fout.write(json.dumps(example) + '\n')
             elif 'perplexity' in training_args.do_eval_special or 'gradient' in training_args.do_eval_special:
                 qids = [example['qid'] for example in validation_dataset]
                 scores = torch.cat(finals, 0)[:len(qids)].tolist()  # (num_examples,)
@@ -976,8 +1014,8 @@ def main():
             elif 'generate' in training_args.do_eval_special:
                 predictions, labels = zip(*finals)
                 predictions, labels = sum(predictions, [])[:len(validation_dataset)], sum(labels, [])[:len(validation_dataset)]
-                n_chars_pred = np.sum([len(p) for p in predictions])
-                n_chars_labels = np.sum([len(l) for l in labels])
+                n_chars_pred = np.mean([len(p) for p in predictions])
+                n_chars_labels = np.mean([len(l) for l in labels])
                 metric_func = evaluate.load('rouge')
                 metrics = metric_func.compute(predictions=predictions, references=labels)
                 with open(os.path.join(training_args.output_dir, training_args.output_file), 'w') as fout:

@@ -4,6 +4,7 @@ import random
 import os
 import json
 import time
+import glob
 from collections import defaultdict
 import csv
 import copy
@@ -297,16 +298,18 @@ def translation_to_beir(
     translation_file: str,
     beir_dir: str,
     split: str = 'dev',
+    dedup_question: bool = False,
     dedup_doc: bool = False):
     qid2dict: Dict[str, Dict] = {}
     did2dict: Dict[str, Dict] = {}
+    question2qid: Dict[str, Dict] = {}
     doc2did: Dict[str, str] = {}
     split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
     with open(translation_file, 'r') as fin:
         for l in fin:
             example = json.loads(l)['translation']
-            question = example['en']
-            answer = example['zh']
+            question = example['en'].strip()
+            answer = example['zh'].strip()
             evidence = example['decoder_prefix'].strip()
             if dedup_doc and evidence in doc2did:
                 did = doc2did[evidence]
@@ -314,8 +317,12 @@ def translation_to_beir(
                 did = f'{str(len(qid2dict) + len(did2dict))}'
                 did2dict[did] = {'_id': did, 'title': '', 'text': evidence}
                 doc2did[evidence] = did
-            qid = f'{str(len(qid2dict) + len(did2dict))}'
-            qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer, 'docid': did}}
+            if dedup_question and question in question2qid:
+                qid = question2qid[question]
+            else:
+                qid = f'{str(len(qid2dict) + len(did2dict))}'
+                qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer, 'docid': did}}
+                question2qid[question] = qid
             split2qiddid[split].append((qid, did))
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
@@ -373,6 +380,14 @@ class BEIRDataset:
     @classmethod
     def get_answer_wow(cls, metadata: Dict) -> List[str]:
         return [metadata['answer']]
+
+    @classmethod
+    def get_answer_eli5(cls, metadata: Dict) -> List[str]:
+        return [metadata['answer']]
+
+    @classmethod
+    def get_answer_wikisum(cls, metadata: Dict) -> List[str]:
+        return [metadata['summary']]
 
     def load_query(self, filename: str):
         qid2meta: Dict[str, Dict] = {}
@@ -588,13 +603,76 @@ def compare_logprob(
         print()
 
 
+def summary_to_beir(
+    file_pattern: str,
+    spm_path: str,
+    beir_dir: str,
+    split: str = 'dev',
+    dedup_doc: bool = True,
+    dedup_question: bool = True,
+    max_num_examples: int = None,
+):
+    import sentencepiece
+    spm = sentencepiece.SentencePieceProcessor()
+    spm.Load(spm_path)
+
+    files = glob.glob(file_pattern)
+
+    qid2dict: Dict[str, Dict] = {}
+    did2dict: Dict[str, Dict] = {}
+    question2qid: Dict[str, Dict] = {}
+    doc2did: Dict[str, str] = {}
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+
+    for file in tqdm(files):
+        data = torch.load(file)
+        for example in data:
+            if 'src_str' in example:
+                docs = example['src_str']
+            else:
+                docs = [spm.decode_ids(doc).strip() for doc in example['src']]
+            question = spm.decode_ids(example['query']).rstrip('<T>').strip()
+            summary = example['tgt_str'].strip()
+
+            if dedup_question and question in question2qid:
+                qid = question2qid[question]
+            else:
+                qid = str(len(qid2dict))
+                qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'summary': summary}}
+                question2qid[question] = qid
+
+            for doc in docs:
+                if dedup_doc and doc in doc2did:
+                    did = doc2did[doc]
+                else:
+                    did = str(len(did2dict))
+                    did2dict[did] = {'_id': did, 'title': '', 'text': doc}
+                    doc2did[doc] = did
+                split2qiddid[split].append((qid, did))
+
+    if max_num_examples and max_num_examples < len(qid2dict.keys()):  # downsample
+        qids = list(qid2dict.keys())
+        random.shuffle(qids)
+        qids = set(qids[:max_num_examples])
+        for qid in list(qid2dict.keys()):
+            if qid not in qids:
+                del qid2dict[qid]
+        split2qiddid[split] = [(qid, did) for qid, did in split2qiddid[split] if qid in qids]
+        dids = set([did for _, did in split2qiddid[split]])
+        for did in list(did2dict.keys()):
+            if did not in dids:
+                del did2dict[did]
+
+    save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
         'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc',
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
-        'convert_fid_to_beir', 'compare_logprob'])
+        'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -635,7 +713,7 @@ if __name__ == '__main__':
     elif args.task == 'translation_to_beir':
         translation_file = args.inp[0]
         beir_dir = args.out
-        translation_to_beir(translation_file, beir_dir, split='dev', dedup_doc=True)
+        translation_to_beir(translation_file, beir_dir, split='dev', dedup_question=True, dedup_doc=True)
 
     elif args.task == 'convert_beir_to_fid_format':
         beir_dir = args.inp[0]
@@ -643,10 +721,10 @@ if __name__ == '__main__':
         convert_beir_to_fid_format(
             beir_dir,
             out_dir,
-            dataset_name='wow',
+            dataset_name='wikisum',
             splits=['dev'],
-            add_self=True,
-            add_self_to_the_first=True,
+            add_self=False,
+            add_self_to_the_first=False,
             topk=100)
 
     elif args.task == 'use_answer_as_query_in_beir':
@@ -681,3 +759,8 @@ if __name__ == '__main__':
 
     elif args.task == 'compare_logprob':
         compare_logprob(args.inp[0], sys_files=args.inp[1:], beir_dir='data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans')
+
+    elif args.task == 'summary_to_beir':
+        file_pattern, spm_path = args.inp
+        beir_dir = args.out
+        summary_to_beir(file_pattern, spm_path, beir_dir, max_num_examples=1000)
