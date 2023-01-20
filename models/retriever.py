@@ -12,20 +12,18 @@ class BM25:
     def __init__(
         self,
         tokenizer: AutoTokenizer,
+        collator,
         corpus: GenericDataLoader,
         index_name: str,
-        format_func: Callable = lambda doc: doc['text'],
-        max_length: int = 256,
         use_encoder_input_ids: bool = False,
         use_decoder_input_ids: bool = True,
     ):
         self.tokenizer = tokenizer
+        self.collator = collator
         self.corpus = corpus
         # load bm25 index
         model = BM25Search(index_name=index_name, hostname='localhost', initialize=False, number_of_shards=1)
         self.retriever = EvaluateRetrieval(model)
-        self.format_func = format_func
-        self.max_length = max_length
         self.use_encoder_input_ids = use_encoder_input_ids
         self.use_decoder_input_ids = use_decoder_input_ids
         assert use_encoder_input_ids or use_decoder_input_ids, 'nothing used as queries'
@@ -75,24 +73,15 @@ class BM25:
             docs: List[str] = []
             for qid, query in enumerate(queries):
                 _docids: List[str] = list(results[qid].keys())[:topk] if qid in results else []
-                _docs = [self.format_func(self.corpus[did]) for did in _docids]
+                _docs = [self.corpus[did]['text'] for did in _docids]
                 if len(_docids) < topk:  # add dummy docs
                     _docids += ['-1'] * (topk - len(_docids))
-                    _docs += [self.format_func(None)] * (topk - len(_docs))
+                    _docs += [''] * (topk - len(_docs))
                 docids.extend(_docids)
                 docs.extend(_docs)
 
-        # TODO: problem with multiple processes?
-        # put ctx on the right to be close to the generation
-        self.tokenizer.padding_side = 'left'
-        ctxs = self.tokenizer(
-            docs,
-            truncation=True,
-            padding=True,
-            max_length=self.max_length,
-            add_special_tokens=False,  # avoid eos
-            return_tensors='pt')
-        self.tokenizer.padding_side = 'right'
+        # tokenize
+        ctxs = self.collator.encode_context(docs)
         input_ids = ctxs.input_ids.view(bs, topk, -1).to(device)  # (batch_size, topk, seq_length)
         attention_mask = ctxs.attention_mask.view(bs, topk, -1).to(device)  # (batch_size, topk, seq_length)
         docids = np.array(docids).reshape(bs, topk)  # (batch_size, topk)

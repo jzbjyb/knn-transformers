@@ -130,6 +130,7 @@ class ModelArguments:
     ctx_attention_loss: Optional[str] = field(default=None)
     bos_attention: Optional[str] = field(default=None)
     ctx_topk: Optional[int] = field(default=0)
+    encode_retrieval_in: Optional[str] = field(default='decoder')
     knnlm: Optional[bool] = field(default=False)
 
     def __post_init__(self):
@@ -226,11 +227,14 @@ class DataCollatorForFusion:
     use_context: bool = True
     context_bos: bool = True  # prepend bos to contexts
     answer_bos: bool = False  # prepend bos to answers
-    encoder_input_for_context: str = None  # the input to encoder that contexts attend to (through cross-attention)
+    encode_retrieval_in: bool = 'decoder'
     max_question_len: int = None
     max_context_len: int = None
     max_answer_len: int = None
+    question_prefix: str = None
     answer_prefix: str = None
+    context_prefix: str = None
+    encoder_input_for_context: str = None  # the input to encoder that contexts attend to (through cross-attention)
     _train: bool = True
 
     def eval(self):
@@ -258,6 +262,37 @@ class DataCollatorForFusion:
         labels.masked_fill_(labels == 0, -100)
         return labels
 
+    def encode_context(self, ctxs: List[str]):
+        decoder_start_token = self.tokenizer.convert_ids_to_tokens([self.model.config.decoder_start_token_id])[0]
+
+        # setting
+        if self.encode_retrieval_in == 'encoder':
+            # normal padding
+            padding_side = 'right'
+            add_special_tokens = True
+            context_bos = ''
+        elif self.encode_retrieval_in == 'decoder':
+            # put ctx on the right to be close to the answer
+            padding_side = 'left'
+            add_special_tokens = False
+            context_bos = f'{decoder_start_token} '
+        else:
+            raise NotImplementedError
+
+        # tokenize
+        # TODO: problem with multiple processes?
+        ori_ps = self.tokenizer.padding_side
+        self.tokenizer.padding_side = padding_side
+        encoded = self.tokenizer(
+            [context_bos + self.context_prefix + ctx for ctx in ctxs],
+            truncation=True,
+            padding=True,
+            max_length=self.max_context_len,
+            add_special_tokens=add_special_tokens,  # avoid eos
+            return_tensors='pt')
+        self.tokenizer.padding_side = ori_ps
+        return encoded
+
     def __call__(
         self,
         examples: List[Dict],
@@ -269,7 +304,7 @@ class DataCollatorForFusion:
 
         # questions
         questions = self.tokenizer(
-            [e['question'] for e in examples],
+            [self.question_prefix + e['question'] for e in examples],
             truncation=True,
             padding=True,
             max_length=self.max_question_len,
@@ -292,26 +327,14 @@ class DataCollatorForFusion:
         bs, n_ctxs = len(examples), len(examples[0]['ctxs'])
         if bs > 1 and len(np.unique([len(e['ctxs']) for e in examples])) > 1:
             raise Exception('num of ctxs is inconsistent')
-        # TODO: problem with multiple processes?
-        # put ctx on the right to be close to the answer
-        self.tokenizer.padding_side = 'left'
-        # add decoder_start_token to ctx
-        dst = f'{decoder_start_token} ' if self.context_bos else ''
-        ctxs = self.tokenizer(
-            [dst + ctx for e in examples for ctx in e['ctxs']],
-            truncation=True,
-            padding=True,
-            max_length=self.max_context_len,
-            add_special_tokens=False,  # avoid eos
-            return_tensors='pt')
-        self.tokenizer.padding_side = 'right'
+        ctxs = self.encode_context([ctx for e in examples for ctx in e['ctxs']])
         decoder_ctx_input_ids = ctxs.input_ids.view(bs, n_ctxs, -1)  # (batch_size, n_ctxs, ctx_seq_length)
         decoder_ctx_attention_mask = ctxs.attention_mask.view(bs, n_ctxs, -1)  # (batch_size, n_ctxs, ctx_seq_length)
 
         # answers
         dst = f'{decoder_start_token} ' if self.answer_bos else ''
         answers = self.tokenizer(
-            [dst + random.choice(e['answers']) for e in examples],
+            [dst + self.answer_prefix + e['answers'] for e in examples],
             truncation=True,
             padding=True,
             max_length=self.max_answer_len,
@@ -470,7 +493,7 @@ def main():
         }
     elif 't5' in model_args.model_name_or_path:
         config_specific_kwargs = {}
-        for key in ['ctx_attention_loss', 'bos_attention', 'ctx_topk']:
+        for key in ['ctx_attention_loss', 'bos_attention', 'ctx_topk', 'encode_retrieval_in']:
             if getattr(model_args, key) is not None:
                 config_specific_kwargs[key] = getattr(model_args, key)
     else:
@@ -594,9 +617,9 @@ def main():
         def format_data_dict(examples: List[Dict]):
             formatted = []
             for example in examples:
-                question = data_args.question_prefix + example['question']
-                ctxs = [data_args.context_prefix + ctx['text'] for ctx in example['ctxs'][:data_args.depth]]
-                answers = [data_args.answer_prefix + (ans[0] if type(ans) is list else ans) for ans in example['answers']]
+                question = example['question']
+                ctxs = [ctx['text'] for ctx in example['ctxs'][:data_args.depth]]
+                answers = [ans[0] if type(ans) is list else ans for ans in example['answers']][0]  # the first alias of the first answer
                 formatted.append({'qid': example['id'], 'question': question, 'ctxs': ctxs, 'answers': answers})
             return formatted
         def compute_metrics(output):
@@ -651,11 +674,15 @@ def main():
         max_question_len=data_args.max_question_len,
         max_context_len=data_args.max_context_len,
         max_answer_len=data_args.max_answer_len,
+        question_prefix=data_args.question_prefix,
         answer_prefix=data_args.answer_prefix,
+        context_prefix=data_args.context_prefix,
         use_context=data_args.use_context,
         context_bos=data_args.context_bos,
         answer_bos=data_args.answer_bos,
-        encoder_input_for_context=data_args.encoder_input_for_context)
+        encoder_input_for_context=data_args.encoder_input_for_context,
+        encode_retrieval_in=model_args.encode_retrieval_in)
+
     gen_kwargs = {
         'max_length': data_args.max_answer_len,
         'num_beams': 1,
@@ -720,7 +747,6 @@ def main():
             pin_memory=training_args.dataloader_pin_memory)
         # TODO: if there is not enough examples for the last batch the examples at the beginning will be reused
 
-        retrieval_format_func = lambda doc: f'<pad> {data_args.context_prefix}{doc["text"]}' if doc is not None else f'<pad> {data_args.context_prefix}'  # TODO: always use <pad>
         corpus, queries, qrels = GenericDataLoader(data_folder=data_args.beir_dir).load(split='dev')
 
         if not data_args.beir_index_name:
@@ -735,10 +761,9 @@ def main():
 
         retriever = BM25(
             tokenizer=tokenizer,
+            collator=collator,
             corpus=corpus,
             index_name=data_args.beir_index_name,
-            format_func=retrieval_format_func,
-            max_length=data_args.max_context_len,
             use_encoder_input_ids=True,
             use_decoder_input_ids=True)
         decoder_retrieval_kwargs = {

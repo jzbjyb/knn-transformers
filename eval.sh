@@ -110,6 +110,7 @@ fi
 context_bos=true
 answer_bos=true
 bos_attention=single
+encode_retrieval_in=encoder
 
 if [[ ${setting} == "perplexity" ]]; then
     max_eval_samples=100000
@@ -151,10 +152,11 @@ deepspeed train.py \
     --context_bos ${context_bos} \
     --answer_bos ${answer_bos} \
     --bos_attention ${bos_attention} \
+    --encode_retrieval_in ${encode_retrieval_in} \
     --do_eval \
     --per_device_eval_batch_size ${batch_size} \
     --max_eval_samples ${max_eval_samples} \
-    --dataloader_num_workers 4 \
+    --dataloader_num_workers 1 \
     --report_to none \
     --dstore_size ${dstore_size} \
     --dstore_dir ${dstore_dir} \

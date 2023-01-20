@@ -71,6 +71,7 @@ class FusionT5Config(T5Config):
         ctx_attention_loss: Dict[str, Any] = None,
         bos_attention: str = None,
         ctx_topk: int = 0,  # num of ctxs used to compute loss or generate outputs
+        encode_retrieval_in: str = 'decoder',  # the place to encode retrieved ctxs
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -90,6 +91,10 @@ class FusionT5Config(T5Config):
         # single: only attend to target bos
         # None: not necessary if ctx is not provided
         self.ctx_topk = ctx_topk
+        self.encode_retrieval_in = encode_retrieval_in
+        assert encode_retrieval_in in {'encoder', 'decoder'}
+        # encoder: encode retrieved ctxs in encoder and rely on cross-attention to use it
+        # decoder: encode retrieved ctxs in decoder (which requires corresponding encode inputs) and rely on self-attention in decoder to use it
 
     @staticmethod
     def parse_ctx_attention_loss(ctx_attention_loss: str = None):  # 'block:8_layer2heads:0,9|12,4_loss:hard_alpha:8'
@@ -493,7 +498,7 @@ class FusionT5LayerCrossAttention(T5LayerCrossAttention):
         output_attentions=False,
     ):
         # no need to compute cross attention between ctx and key_value_states for decoding except the first step
-        run_ctx = past_key_value is None and ctx_hidden_states is not None
+        run_ctx = ctx_hidden_states is not None and past_key_value is None
 
         # layer norm
         normed_hidden_states = self.layer_norm(hidden_states)
@@ -607,6 +612,8 @@ class FusionT5Block(T5Block):
 
             self_attn_past_key_value = past_key_value[:3]
             cross_attn_past_key_value = past_key_value[3:]
+            if cross_attn_past_key_value[0] is None:
+                cross_attn_past_key_value = None
         else:
             self_attn_past_key_value, cross_attn_past_key_value = None, None
 
@@ -1156,6 +1163,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
         self.bos_attention = config.bos_attention
         self.ctx_topk = config.ctx_topk
+        self.encode_retrieval_in = config.encode_retrieval_in
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1272,6 +1280,9 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        if self.encode_retrieval_in == 'encoder':
+            input_ids_for_ctx = attention_mask_for_ctx = None
+
         # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
         if head_mask is not None and decoder_head_mask is None:
             if self.config.num_layers == self.config.num_decoder_layers:
@@ -1302,6 +1313,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
         hidden_states = encoder_outputs[0]
         hidden_states_for_ctx = encoder_outputs[1] if len(encoder_outputs) > 1 else None
+        if self.encode_retrieval_in == 'encoder':
+            hidden_states_for_ctx = None
 
         if self.model_parallel:
             torch.cuda.set_device(self.decoder.first_device)
@@ -1309,6 +1322,42 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         if labels is not None and decoder_input_ids is None and decoder_inputs_embeds is None:
             # get decoder inputs from shifting lm labels to the right
             decoder_input_ids = self._shift_right(labels)
+
+        # retrieval
+        # do not set use_cache=True for loss evaluation # TODO: disable use_cache for loss evaluation
+        in_generation = not self.training and use_cache and decoder_input_ids.size(1) == 1
+        gen_step = (0 if past_key_values is None else past_key_values[0][0][1].size(2)) if in_generation else -1  # zero-based
+        offset = 1 if self.bos_attention == 'single' else 0  # skip bos of targets
+        handle_ret = (decoder_ctx_input_ids is not None and self.has_ret_heads) and (not in_generation or gen_step == offset + self.block_size - 1)
+
+        ret_frequency = decoder_retrieval_kwargs.get('frequency', 0)
+        ret_topk = decoder_retrieval_kwargs.get('topk', 1)
+        retriever = decoder_retrieval_kwargs.get('retriever', None)
+        new_context = False
+        if ret_frequency and in_generation and gen_step % ret_frequency == 0:  # perform retrieval
+            new_context = True
+            encoder_until_now = input_ids
+            decoder_until_now = torch.cat([decoder_input_ids_previous, decoder_input_ids], -1) if decoder_input_ids_previous is not None else decoder_input_ids
+            # (bs, n_ctxs), (bs, n_ctxs, ctx_seq_length), (bs, n_ctxs, ctx_seq_length)
+            decoder_ctx_ids, decoder_ctx_input_ids, decoder_ctx_attention_mask = retriever.retrieve_and_prepare(
+                encoder_until_now, decoder_until_now, decoder_ctx_input_ids, decoder_ctx_attention_mask, decoder_ctx_ids=decoder_ctx_ids, topk=ret_topk, use_ctx=False)
+
+            if self.encode_retrieval_in == 'decoder':  # remove past key and values of ctx-related self attention to use the new retrieval results
+                if past_key_values is not None:
+                    past_key_values = tuple((target_pkv, None) for target_pkv, ctx_pkv in past_key_values)
+            elif self.encode_retrieval_in == 'encoder':  # remove past key and values of cross attention to use the new retrieval results
+                if past_key_values is not None:
+                    past_key_values = tuple((target_pkv[:3] + (None, None), ctx_pkv) for target_pkv, ctx_pkv in past_key_values)
+                batch_size, n_ctxs, ctx_seq_length = decoder_ctx_input_ids.size()
+                # (bs, n_ctxs * ctx_seq_length, dim)
+                ctx_encoder_hidden_states = self.encoder(
+                    input_ids=decoder_ctx_input_ids.view(-1, ctx_seq_length),  # (bs * n_ctxs, ctx_seq_length)
+                    attention_mask=decoder_ctx_attention_mask.view(-1, ctx_seq_length),  # (bs * n_ctxs, ctx_seq_length)
+                    head_mask=head_mask)[0].view(batch_size, n_ctxs * ctx_seq_length, - 1)
+                hidden_states = torch.cat([hidden_states, ctx_encoder_hidden_states], 1)  # (bs, seq_length + n_ctxs * ctx_seq_length, dim)
+                attention_mask = torch.cat([attention_mask, decoder_ctx_attention_mask.view(batch_size, -1)], 1)  # (bs, seq_length + n_ctxs * ctx_seq_length)
+            else:
+                raise NotImplementedError
 
         # Set device for model parallelism
         if self.model_parallel:
@@ -1329,33 +1378,14 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             if decoder_ctx_attention_mask is not None:
                 decoder_ctx_attention_mask = decoder_ctx_attention_mask.to(self.decoder.first_device)
 
-        in_generation = not self.training and use_cache and decoder_input_ids.size(1) == 1  # do not set use_cache=True for loss evaluation # TODO: disable use_cache for loss evaluation
-        gen_step = (0 if past_key_values is None else past_key_values[0][0][1].size(2)) if in_generation else -1  # zero-based
-        offset = 1 if self.bos_attention == 'single' else 0  # skip bos of targets
-        handle_ret = (decoder_ctx_input_ids is not None and self.has_ret_heads) and (not in_generation or gen_step == offset + self.block_size - 1)
-
-        ret_frequency = decoder_retrieval_kwargs.get('frequency', 0)
-        ret_topk = decoder_retrieval_kwargs.get('topk', 1)
-        retriever = decoder_retrieval_kwargs.get('retriever', None)
-        new_context = False
-        if ret_frequency and in_generation and gen_step % ret_frequency == 0:  # perform retrieval
-            new_context = True
-            encoder_until_now = input_ids
-            decoder_until_now = torch.cat([decoder_input_ids_previous, decoder_input_ids], -1) if decoder_input_ids_previous is not None else decoder_input_ids
-            # (bs, n_ctxs), (bs, n_ctxs, ctx_seq_length)
-            decoder_ctx_ids, decoder_ctx_input_ids, decoder_ctx_attention_mask = retriever.retrieve_and_prepare(
-                encoder_until_now, decoder_until_now, decoder_ctx_input_ids, decoder_ctx_attention_mask, decoder_ctx_ids=decoder_ctx_ids, topk=ret_topk, use_ctx=False)
-            if past_key_values is not None:  # remove past key values for ctx to use the new decoder_ctx_input_ids
-                past_key_values = tuple((target_pkv, None) for target_pkv, ctx_pkv in past_key_values)
-
         # Decode
         decoder_outputs = self.decoder(
             input_ids=decoder_input_ids,
             attention_mask=decoder_attention_mask,
             inputs_embeds=decoder_inputs_embeds,
             past_key_values=past_key_values,
-            decoder_ctx_input_ids=decoder_ctx_input_ids,
-            decoder_ctx_attention_mask=decoder_ctx_attention_mask,
+            decoder_ctx_input_ids=decoder_ctx_input_ids if self.encode_retrieval_in == 'decoder' else None,
+            decoder_ctx_attention_mask=decoder_ctx_attention_mask if self.encode_retrieval_in == 'decoder' else None,
             encoder_hidden_states=hidden_states,
             encoder_attention_mask=attention_mask,
             encoder_hidden_states_for_ctx=hidden_states_for_ctx,
