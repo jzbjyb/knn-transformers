@@ -13,14 +13,14 @@ class BM25:
         self,
         tokenizer: AutoTokenizer,
         collator,
-        corpus: GenericDataLoader,
+        dataset: GenericDataLoader,
         index_name: str,
         use_encoder_input_ids: bool = False,
         use_decoder_input_ids: bool = True,
     ):
         self.tokenizer = tokenizer
         self.collator = collator
-        self.corpus = corpus
+        self.corpus, self.queries, self.qrels = dataset
         # load bm25 index
         model = BM25Search(index_name=index_name, hostname='localhost', initialize=False, number_of_shards=1)
         self.retriever = EvaluateRetrieval(model)
@@ -35,8 +35,11 @@ class BM25:
         ctx_input_ids: torch.LongTensor = None,  # (bs, n_ctxs, ctx_seq_len)
         ctx_attention_mask: torch.FloatTensor = None,  # (bs, n_ctxs, ctx_seq_len)
         decoder_ctx_ids: np.ndarray = None,  # (bs, topk)
+        qids: np.ndarray = None,  # (bs,)
         topk: int = 1,
+        max_query_length: int = None,
         use_ctx: bool = False,
+        use_gold: bool = False,
     ):
         if use_ctx:
             return np.zeros((ctx_input_ids.size(0), topk)), ctx_input_ids[:, :topk], ctx_attention_mask[:, :topk]
@@ -51,7 +54,15 @@ class BM25:
 
         if decoder_ctx_ids is not None:  # use doc ids passed in
             docids: List[str] = decoder_ctx_ids.reshape(-1)
-            docs: List[str] = [self.format_func(self.corpus[did]) for did in docids]
+            docs: List[str] = [self.corpus[did]['text'] for did in docids]
+        elif use_gold:  # use qrels annotations to find gold ctxs
+            docids: List[str] = []
+            for qid in qids:
+                rel_dids = [did for did, r in self.qrels[qid].items() if r]
+                rel_dids = np.random.choice(rel_dids, topk, replace=False)
+                assert len(rel_dids) == topk
+                docids.extend(rel_dids)
+            docs: List[str] = [self.corpus[did]['text'] for did in docids]
         else:
             # prepare queries
             queries: List[str] = []
@@ -64,6 +75,21 @@ class BM25:
                     queries = [f'{q} {t}' for q, t in zip(queries, decoder_texts)]
                 else:
                     queries = decoder_texts
+
+            # truncate queries
+            if max_query_length:
+                self.tokenizer.padding_side = 'left'
+                self.tokenizer.truncation_side = 'left'
+                tokenized = self.tokenizer(
+                    queries,
+                    truncation=True,
+                    padding=True,
+                    max_length=max_query_length,
+                    add_special_tokens=False,
+                    return_tensors='pt')['input_ids']
+                self.tokenizer.padding_side = 'right'
+                self.tokenizer.truncation_side = 'right'
+                queries = self.tokenizer.batch_decode(tokenized, skip_special_tokens=True)
 
             # retrieve
             results = self.retriever.retrieve(self.corpus, dict(zip(range(len(queries)), queries)), disable_tqdm=True)

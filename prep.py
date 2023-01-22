@@ -666,13 +666,34 @@ def summary_to_beir(
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
+def compare(file1: str, file2: str):
+    with open(file1) as fin1, open(file2) as fin2:
+        for l in fin1:
+            example1 = json.loads(l)
+            example2 = json.loads(fin2.readline())
+            q = example1['question']
+            c = example1['ctxs'][0]
+            a = example1['gold']
+            assert example1['gold'] == example2['gold']
+            assert example1['question'] == example2['question']
+            o1 = example1['output']
+            o2 = example2['output']
+
+            print('Q->', q)
+            print('C->', c)
+            print('A->', a)
+            print('1->', o1)
+            print('2->', o2)
+            input()
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
         'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc',
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
-        'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir'])
+        'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -764,3 +785,7 @@ if __name__ == '__main__':
         file_pattern, spm_path = args.inp
         beir_dir = args.out
         summary_to_beir(file_pattern, spm_path, beir_dir, max_num_examples=1000)
+
+    elif args.task == 'compare':
+        file1, file2 = args.inp
+        compare(file1, file2)

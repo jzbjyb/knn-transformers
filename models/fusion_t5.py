@@ -1340,7 +1340,15 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             decoder_until_now = torch.cat([decoder_input_ids_previous, decoder_input_ids], -1) if decoder_input_ids_previous is not None else decoder_input_ids
             # (bs, n_ctxs), (bs, n_ctxs, ctx_seq_length), (bs, n_ctxs, ctx_seq_length)
             decoder_ctx_ids, decoder_ctx_input_ids, decoder_ctx_attention_mask = retriever.retrieve_and_prepare(
-                encoder_until_now, decoder_until_now, decoder_ctx_input_ids, decoder_ctx_attention_mask, decoder_ctx_ids=decoder_ctx_ids, topk=ret_topk, use_ctx=False)
+                encoder_until_now,
+                decoder_until_now,
+                decoder_ctx_input_ids,
+                decoder_ctx_attention_mask,
+                decoder_ctx_ids=decoder_ctx_ids,
+                qids=idxs,
+                topk=ret_topk,
+                max_query_length=16,
+                use_gold=False)
 
             if self.encode_retrieval_in == 'decoder':  # remove past key and values of ctx-related self attention to use the new retrieval results
                 if past_key_values is not None:

@@ -762,7 +762,7 @@ def main():
         retriever = BM25(
             tokenizer=tokenizer,
             collator=collator,
-            corpus=corpus,
+            dataset=(corpus, queries, qrels),
             index_name=data_args.beir_index_name,
             use_encoder_input_ids=True,
             use_decoder_input_ids=True)
@@ -854,6 +854,7 @@ def main():
             def perplexity(
                 eval_outputs,
                 gen_outputs,
+                ppl_percentiles: List[float] = [0.25, 0.5, 0.75, 1.0],
                 evaluate_retrieval: Dict = {'percentiles': [0.25, 0.5, 0.75, 1.0]},
                 output_all: bool = True,
             ):
@@ -886,6 +887,26 @@ def main():
                 loss_fct = CrossEntropyLoss(reduction='none', ignore_index=-100)
                 lp = -loss_fct(logits.view(-1, logits.size(-1)), labels_of_pred.view(-1)).view(*labels_of_pred.size())  # (batch_size, seq_len)
                 slp = lp.sum(-1)  # (batch_size,)
+
+                slp_perc = seqlen_perc = None
+                if ppl_percentiles:
+                    slp_perc = []
+                    seqlen_perc = []
+                    assert len(lp) == len(seqlen)
+                    for _lp, sl in zip(lp, seqlen):
+                        slp_perc.append([])
+                        seqlen_perc.append([])
+                        _lp = _lp[:sl]
+                        prev_pt = 0
+                        for pt in ppl_percentiles:
+                            pt = int(len(_lp) * pt)
+                            slp_perc[-1].append(_lp[prev_pt:pt].sum())
+                            seqlen_perc[-1].append(pt - prev_pt)
+                            prev_pt = pt
+                    slp_perc = torch.tensor(slp_perc).to(logits.device)  # (bs, n_percentiles)
+                    seqlen_perc = torch.tensor(seqlen_perc).to(logits.device)  # (bs, n_percentiles)
+                    slp_perc = trainer._nested_gather(trainer._pad_across_processes(slp_perc, pad_index=0))  # (gathered_batch_size, n_percentiles)
+                    seqlen_perc = trainer._nested_gather(trainer._pad_across_processes(seqlen_perc, pad_index=0))  # (gathered_batch_size, n_percentiles)
 
                 # compute retrieval accuracy
                 dids = accs = None
@@ -923,7 +944,7 @@ def main():
                 else:
                     qids = lp = labels_of_pred = None
 
-                return slp, seqlen, accs, qids, lp, labels_of_pred, dids, predictions, labels
+                return slp, seqlen, slp_perc, seqlen_perc, accs, qids, lp, labels_of_pred, dids, predictions, labels
 
             def generate(
                 eval_outputs,
@@ -1007,13 +1028,20 @@ def main():
                 acc = finals.mean(0).item()
                 print(f'#examples {len(finals)}, accuracy {acc}')
             elif 'generate_perplexity' in training_args.do_eval_special:
-                slp, seqlen, accuracy, qids, lp, labels_of_pred, dids, predictions, labels = zip(*finals)
+                slp, seqlen, slp_perc, seqlen_perc, accuracy, qids, lp, labels_of_pred, dids, predictions, labels = zip(*finals)
                 slp = torch.cat(slp)[:len(validation_dataset)]
                 seqlen = torch.cat(seqlen)[:len(validation_dataset)]
                 accuracy = torch.cat(accuracy, 0)[:len(validation_dataset)].mean(0) if accuracy[0] is not None else None
                 if qids[0] is not None:
                     torch.save({'labels': labels_of_pred, 'logprobs': lp, 'docids': dids, 'qids': qids}, os.path.join(training_args.output_dir, 'logprob_label.pt'))
                 print(f'#examples {len(slp)}, #tokens {seqlen.sum().item()}, perplexity: {torch.exp(-slp.sum() / seqlen.sum()).item()}, retrieval accuracy: {accuracy}')
+
+                if slp_perc[0] is not None:
+                    slp_perc = torch.cat(slp_perc)[:len(validation_dataset)]
+                    seqlen_perc = torch.cat(seqlen_perc)[:len(validation_dataset)]
+                    ppl_perc = torch.exp(-slp_perc.sum(0) / seqlen_perc.sum(0))
+                    print(f'perplexity percentile {ppl_perc}')
+
                 predictions, labels = sum(predictions, [])[:len(validation_dataset)], sum(labels, [])[:len(validation_dataset)]
                 n_chars_pred = np.mean([len(p) for p in predictions])
                 n_chars_labels = np.mean([len(l) for l in labels])
