@@ -389,6 +389,10 @@ class BEIRDataset:
     def get_answer_wikisum(cls, metadata: Dict) -> List[str]:
         return [metadata['summary']]
 
+    @classmethod
+    def get_answer_strategyqa(cls, metadata: Dict) -> List[str]:
+        return [metadata['answer']]
+
     def load_query(self, filename: str):
         qid2meta: Dict[str, Dict] = {}
         qid2answer: Dict[str, Any] = {}
@@ -687,13 +691,52 @@ def compare(file1: str, file2: str):
             input()
 
 
+def strategyqa_to_beir(
+    strategyqa_dir: str,
+    beir_dir: str,
+    dedup_question: bool = True,
+    dedup_doc: bool = True,
+):
+    split = 'dev'
+    dev_file = os.path.join(strategyqa_dir, f'data/strategyqa/{split}.json')
+    qid2dict: Dict[str, Dict] = {}
+    did2dict: Dict[str, Dict] = {}
+    question2qid: Dict[str, Dict] = {}
+    doc2did: Dict[str, str] = {}
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    with open(dev_file, 'r') as fin:
+        data = json.load(fin)
+        for example in data:
+            question = example['question'].strip()
+            assert example['answer'] in {True, False}
+            answer = 'yes' if example['answer'] else 'no'
+
+            if dedup_question and question in question2qid:
+                qid = question2qid[question]
+            else:
+                qid = str(len(qid2dict))
+                qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer}}
+                question2qid[question] = qid
+
+            for fact in example['facts']:
+                fact = fact.strip()
+                if dedup_doc and fact in doc2did:
+                    did = doc2did[fact]
+                else:
+                    did = str(len(did2dict))
+                    did2dict[did] = {'_id': did, 'title': '', 'text': fact}
+                    doc2did[fact] = did
+                split2qiddid[split].append((qid, did))
+    save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
         'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc',
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
-        'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare'])
+        'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare', 'strategyqa_to_beir'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -742,7 +785,7 @@ if __name__ == '__main__':
         convert_beir_to_fid_format(
             beir_dir,
             out_dir,
-            dataset_name='wikisum',
+            dataset_name='strategyqa',
             splits=['dev'],
             add_self=False,
             add_self_to_the_first=False,
@@ -789,3 +832,8 @@ if __name__ == '__main__':
     elif args.task == 'compare':
         file1, file2 = args.inp
         compare(file1, file2)
+
+    elif args.task == 'strategyqa_to_beir':
+        strategyqa_dir = args.inp[0]
+        beir_dir = args.out
+        strategyqa_to_beir(strategyqa_dir, beir_dir)

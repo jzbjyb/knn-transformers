@@ -31,12 +31,19 @@ use_context=true
 batch_size=32
 depth=1
 
+context_bos=true
+answer_bos=true
+bos_attention=single
+encode_retrieval_in=encoder
+
 # ------------- data -------------
 if [[ ${data} == "wow" ]]; then
     question_prefix=$'Given the context, generate the next response.\nContext:\n'
     encoder_input_for_context="Given the context, generate the next response."
     context_prefix="Evidence: "
     answer_prefix="Response: "
+    metric=rouge
+    examplars=None
     max_question_len=128
     max_context_len=128
     max_answer_len=128
@@ -55,6 +62,8 @@ elif [[ ${data} == "eli5" ]]; then
     encoder_input_for_context="Generate a long descriptive answer to the following question."
     context_prefix="Evidence: "
     answer_prefix="Answer: "
+    metric=rouge
+    examplars=None
     max_question_len=128
     max_context_len=128
     max_answer_len=128
@@ -73,6 +82,8 @@ elif [[ ${data} == "wikisum" ]]; then
     encoder_input_for_context="Generate a paragraph."
     context_prefix="Evidence: "
     answer_prefix="Paragraph: "
+    metric=rouge
+    examplars=None
     max_question_len=128
     max_context_len=128
     max_answer_len=128
@@ -91,6 +102,8 @@ elif [[ ${data} == "wikisum_test_1k" ]]; then
     encoder_input_for_context="Generate a paragraph."
     context_prefix="Evidence: "
     answer_prefix="Paragraph: "
+    metric=rouge
+    examplars=None
     max_question_len=128
     max_context_len=128
     max_answer_len=128
@@ -104,13 +117,47 @@ elif [[ ${data} == "wikisum_test_1k" ]]; then
     dstore_size=38089
     max_eval_samples=1000
 
-fi
+elif [[ ${data} == "strategyqa_dev" ]]; then
+    question_prefix=$'Answer the following yes/no question by reasoning step-by-step.\n\n'
+    encoder_input_for_context="Answer the following yes/no question by reasoning step-by-step."
+    context_prefix="Evidence: "
+    answer_prefix=""
+    metric=yesno
+    examplars=None
+    max_question_len=128
+    max_context_len=128
+    max_answer_len=128
+    generation_prefix_len=0
 
-# ------------- hyperparameters -------------
-context_bos=true
-answer_bos=true
-bos_attention=single
-encode_retrieval_in=encoder
+    beir_index_name=""
+    beir_dir=data/strategyqa/dev_beir
+    val_file=${beir_dir}.fid/dev.json
+    train_file=${val_file}
+    dstore_dir=checkpoints/strategyqa/dev_beir/flant5xl/knn
+    dstore_size=11240
+    max_eval_samples=229
+
+elif [[ ${data} == "strategyqa_dev_3shot" ]]; then
+    question_prefix=$'Q: Answer the following yes/no question by reasoning step-by-step.\n'
+    encoder_input_for_context="Answer the following yes/no question by reasoning step-by-step."
+    context_prefix="Evidence: "
+    answer_prefix="A: "
+    metric=yesno
+    examplars=strategy_qa_examplars
+    max_question_len=512
+    max_context_len=128
+    max_answer_len=128
+    generation_prefix_len=2
+
+    beir_index_name=""
+    beir_dir=data/strategyqa/dev_beir
+    val_file=${beir_dir}.fid/dev.json
+    train_file=${val_file}
+    dstore_dir=${val_file}
+    dstore_size=38089
+    max_eval_samples=229
+
+fi
 
 if [[ ${setting} == "perplexity" ]]; then
     max_eval_samples=100000
@@ -140,6 +187,8 @@ deepspeed train.py \
     --context_prefix "${context_prefix}" \
     --answer_prefix "${answer_prefix}" \
     --encoder_input_for_context "${encoder_input_for_context}" \
+    --metric ${metric} \
+    --examplars ${examplars} \
     --output_dir ${output_dir} \
     --output_file ${output_file} \
     --remove_unused_columns false \

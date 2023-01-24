@@ -1,3 +1,4 @@
+from typing import List
 import os
 from argparse import Namespace
 import logging
@@ -47,7 +48,7 @@ class StridedTensorCore:
 def _select_strides(lengths, quantiles):
     if lengths.size(0) < 5_000:
         return _get_quantiles(lengths, quantiles)
-    
+
     sample = torch.randint(0, lengths.size(0), size=(2_000,))
 
     return _get_quantiles(lengths[sample], quantiles)
@@ -109,3 +110,51 @@ class StridedTensor(StridedTensorCore):
         assert output == 'packed'
         tensor = tensor[mask]
         return tensor.to(ori_device), lengths.to(ori_device)
+
+
+def yesno_metric(
+    predictions: List[str],
+    references: List[str],
+    anchor_text: str = 'the final answer is',
+):
+    metrics = {
+        'correct': 0,
+        'incorrect': 0,
+        'formaterror': 0,
+    }
+
+    assert len(predictions) == len(references)
+    for pred, ref in zip(predictions, references):
+        ref = ref.lower().strip()
+        pred = pred.strip().lower()
+        if anchor_text not in pred:
+            metrics['formaterror'] += 1
+        else:
+            if ref in pred[pred.find(anchor_text) + len(anchor_text):].strip():
+                metrics['correct'] += 1
+            else:
+                metrics['incorrect'] += 1
+    metrics = {k: v / len(predictions) for k, v in metrics.items()}
+    return metrics
+
+
+def remove_prefix(text: str, prefix: str):
+    if text.startswith(prefix):
+        return text[len(prefix):]
+    return text
+
+
+strategy_qa_examplars = [
+    {
+        'question': 'Do hamsters provide food for any animals?',
+        'answer': 'Hamsters are prey animals. Prey are food for predators. Thus, hamsters provide food for some animals. Therefore, the final answer is yes.',
+    },
+    {
+        'question': ' Could Brooke Shields succeed at University of Pennsylvania?',
+        'answer': 'Brooke Shields went to Princeton University. Princeton University is about as academically rigorous as the University of Pennsylvania. Thus, Brooke Shields could also succeed at the University of Pennsylvania. Therefore, the final answer is yes.',
+    },
+    {
+        'question': "Hydrogen's atomic number squared exceeds number of Spice Girls?",
+        'answer': "Hydrogen has an atomic number of 1. 1 squared is 1. There are 5 Spice Girls. Thus, Hydrogen's atomic number squared is less than 5. Therefore, the final answer is no.",
+    },
+]

@@ -60,6 +60,7 @@ from models.retriever import BM25
 from knnlm import KNNWrapper, KEY_TYPE, DIST
 
 from em_eval import ems
+from utils import yesno_metric, remove_prefix, strategy_qa_examplars
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +204,8 @@ class DataTrainingArguments:
 
     depth: Optional[int] = field(default=20)
     use_target_answer: Optional[bool] = field(default=False)
+    metric: Optional[str] = field(default='rouge')
+    examplars: Optional[str] = field(default='None')
 
 
 @dataclass
@@ -235,6 +238,7 @@ class DataCollatorForFusion:
     answer_prefix: str = None
     context_prefix: str = None
     encoder_input_for_context: str = None  # the input to encoder that contexts attend to (through cross-attention)
+    examplars: List[Dict] = None  # number of few-shot examplars
     _train: bool = True
 
     def eval(self):
@@ -318,8 +322,16 @@ class DataCollatorForFusion:
         qids = np.array([e['qid'] for e in examples])
 
         # questions
+        demo = ''
+        if self.examplars:
+            demo: List[str] = []
+            for el in self.examplars:
+                q, a = el['question'], el['answer']
+                demo.append(f'{self.question_prefix}{q}\n{self.answer_prefix}{a}')
+            demo = '\n\n'.join(demo) + '\n\n'
+
         questions = self.tokenizer(
-            [self.question_prefix + e['question'] for e in examples],
+            [demo + self.question_prefix + e['question'] for e in examples],
             truncation=True,
             padding=True,
             max_length=self.max_question_len,
@@ -664,8 +676,8 @@ def main():
                 decoded_preds = [x.strip() for x in decoded_preds]
                 gold_preds = [x.strip() for x in gold_preds]
             else:
-                decoded_preds = [x.strip().lstrip(data_args.answer_prefix).strip() for x in decoded_preds]
-                gold_preds = [x.strip().lstrip(data_args.answer_prefix).strip() for x in gold_preds]
+                decoded_preds = [remove_prefix(x.strip(), data_args.answer_prefix).strip() for x in decoded_preds]
+                gold_preds = [remove_prefix(x.strip(), data_args.answer_prefix).strip() for x in gold_preds]
             if debug:
                 print(outputs.predictions[:2])
                 print(decoded_preds[:2])
@@ -696,7 +708,8 @@ def main():
         context_bos=data_args.context_bos,
         answer_bos=data_args.answer_bos,
         encoder_input_for_context=data_args.encoder_input_for_context,
-        encode_retrieval_in=model_args.encode_retrieval_in)
+        encode_retrieval_in=model_args.encode_retrieval_in,
+        examplars=eval(data_args.examplars))
 
     gen_kwargs = {
         'max_length': data_args.max_answer_len,
@@ -787,7 +800,9 @@ def main():
             'topk': data_args.depth,
             'frequency': 1 if data_args.use_context else 0,
             'use_gold': False,
-            'joint_encode_retrieval': False,
+            'joint_encode_retrieval': True,
+            'merge_ctx': True,
+            'max_query_length': 16,
         }
         model.cache = CacheManager(get_cache=False, save_cache=False, cache_file='.cache')
 
@@ -900,8 +915,8 @@ def main():
                     predictions = [x.strip() for x in predictions]
                     labels = [x.strip() for x in labels]
                 else:
-                    predictions = [x.strip().lstrip(data_args.answer_prefix).strip() for x in predictions]
-                    labels = [x.strip().lstrip(data_args.answer_prefix).strip() for x in labels]
+                    predictions = [remove_prefix(x.strip(), data_args.answer_prefix).strip() for x in predictions]
+                    labels = [remove_prefix(x.strip(), data_args.answer_prefix).strip() for x in labels]
 
                 # compute log prob
                 logits = gen_outputs.scores
@@ -990,8 +1005,8 @@ def main():
                     predictions = [x.strip() for x in predictions]
                     labels = [x.strip() for x in labels]
                 else:
-                    predictions = [x.strip().lstrip(data_args.answer_prefix).strip() for x in predictions]
-                    labels = [x.strip().lstrip(data_args.answer_prefix).strip() for x in labels]
+                    predictions = [remove_prefix(x.strip(), data_args.answer_prefix).strip() for x in predictions]
+                    labels = [remove_prefix(x.strip(), data_args.answer_prefix).strip() for x in labels]
 
                 return predictions, labels
 
@@ -1066,8 +1081,13 @@ def main():
                 predictions, labels = sum(predictions, [])[:len(validation_dataset)], sum(labels, [])[:len(validation_dataset)]
                 n_chars_pred = np.mean([len(p) for p in predictions])
                 n_chars_labels = np.mean([len(l) for l in labels])
-                metric_func = evaluate.load('rouge')
-                metrics = metric_func.compute(predictions=predictions, references=labels)
+
+                if data_args.metric in {'rouge'}:
+                    metric_func = evaluate.load('rouge')
+                    metrics = metric_func.compute(predictions=predictions, references=labels)
+                elif data_args.metric == 'yesno':
+                    metrics = yesno_metric(predictions=predictions, references=labels)
+
                 print(f'#examples {len(validation_dataset)}, metric:')
                 print('\t'.join(metrics.keys()) + '\t#chars_pred\t#chars_gold')
                 print('\t'.join(map(str, metrics.values())) + f'\t{n_chars_pred}\t{n_chars_labels}')
@@ -1076,6 +1096,7 @@ def main():
                         example['output'] = pred
                         example['gold'] = label
                         fout.write(json.dumps(example) + '\n')
+
             elif 'perplexity' in training_args.do_eval_special or 'gradient' in training_args.do_eval_special:
                 qids = [example['qid'] for example in validation_dataset]
                 scores = torch.cat(finals, 0)[:len(qids)].tolist()  # (num_examples,)

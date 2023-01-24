@@ -44,6 +44,7 @@ class BM25:
         use_ctx: bool = False,
         use_gold: bool = False,
         joint_encode_retrieval: bool = False,
+        merge_ctx: bool = False,
     ):
         if use_ctx:
             return np.zeros((ctx_input_ids.size(0), topk)), ctx_input_ids[:, :topk], ctx_attention_mask[:, :topk]
@@ -66,12 +67,16 @@ class BM25:
             docs: List[str] = [self.corpus[did]['text'] for did in docids]
         elif use_gold:  # use qrels annotations to find gold ctxs
             docids: List[str] = []
+            docs: List[str] = []
             for qid in qids:
                 rel_dids = [did for did, r in self.qrels[qid].items() if r]
-                rel_dids = np.random.choice(rel_dids, topk, replace=False)
-                assert len(rel_dids) == topk
+                rel_docs = [self.corpus[did]['text'] for did in rel_dids]
+                if merge_ctx:
+                    rel_dids = rel_dids[:1]
+                    rel_docs = [' '.join(rel_docs)]
+                assert len(rel_dids) == len(rel_docs) == topk, f'{len(rel_dids)} {len(rel_docs)} {topk}'
                 docids.extend(rel_dids)
-            docs: List[str] = [self.corpus[did]['text'] for did in docids]
+                docs.extend(rel_docs)
         else:
             # prepare queries
             queries: List[str] = []
@@ -121,9 +126,9 @@ class BM25:
             for i in range(bs):
                 for j in range(topk):
                     if self.encode_retrieval_in == 'encoder':
-                        docs[i * topk + j] = f'{docs[i * topk + j]} | {encoder_texts[i]}'
+                        docs[i * topk + j] = f'{docs[i * topk + j]}\n{encoder_texts[i]}'
                     elif self.encode_retrieval_in == 'decoder':
-                        docs[i * topk + j] = f'{docs[i * topk + j]} |'
+                        docs[i * topk + j] = f'{docs[i * topk + j]}\n'
                     else:
                         raise NotImplementedError
             if self.encode_retrieval_in == 'encoder':

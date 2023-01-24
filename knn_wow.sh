@@ -14,11 +14,23 @@
 eval "$(conda shell.bash hook)"
 conda activate knn
 
-output=checkpoints/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans/flant5xl/knn
-train_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans/corpus.jsonl
-validation_file=${train_file}
-source_prefix="Given the context, generate the next response."
-target_prefix="Evidence: "
+data=strategyqa_dev
+
+if [[ ${data} == "wow" ]]; then
+  output=checkpoints/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans/flant5xl/knn
+  train_file=data/wow/val_astarget_selfprov_evidence.json.beir_dedup_ans/corpus.jsonl
+  validation_file=${train_file}
+  source_prefix="Given the context, generate the next response."
+  target_prefix="Evidence: "
+elif [[ ${data} == "strategyqa_dev" ]]; then
+  output=checkpoints/strategyqa/dev_beir/flant5xl/knn
+  train_file=data/strategyqa/dev_beir/corpus.jsonl
+  validation_file=${train_file}
+  source_prefix="Answer the following yes/no question by reasoning step-by-step."
+  target_prefix="Evidence: "
+else
+  exit
+fi
 
 batch_size=32
 max_evi_length=128

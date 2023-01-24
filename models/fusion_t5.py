@@ -1335,8 +1335,13 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         retriever = decoder_retrieval_kwargs.get('retriever', None)
         use_gold = decoder_retrieval_kwargs.get('use_gold', False)
         joint_encode_retrieval = decoder_retrieval_kwargs.get('joint_encode_retrieval', False)
+        merge_ctx = decoder_retrieval_kwargs.get('merge_ctx', False)
+        max_query_length = decoder_retrieval_kwargs.get('max_query_length', None)
         new_context = False
-        if ret_frequency and in_generation and gen_step % ret_frequency == 0:  # perform retrieval
+        perform_retrieval = ret_frequency and in_generation and gen_step % ret_frequency == 0
+        use_decoder_ctx = self.encode_retrieval_in == 'decoder' and not joint_encode_retrieval
+
+        if perform_retrieval:  # perform retrieval
             new_context = True
             encoder_until_now = input_ids
             decoder_until_now = torch.cat([decoder_input_ids_previous, decoder_input_ids], -1) if decoder_input_ids_previous is not None else decoder_input_ids
@@ -1349,11 +1354,11 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                 decoder_ctx_ids=decoder_ctx_ids,
                 qids=idxs,
                 topk=ret_topk,
-                max_query_length=16,
+                max_query_length=max_query_length,
                 use_gold=use_gold,
-                joint_encode_retrieval=joint_encode_retrieval)
+                joint_encode_retrieval=joint_encode_retrieval,
+                merge_ctx=merge_ctx)
 
-            use_decoder_ctx = self.encode_retrieval_in == 'decoder' and not joint_encode_retrieval
             if self.encode_retrieval_in == 'decoder':  # remove past key and values of ctx-related self attention to use the new retrieval results
                 if past_key_values is not None:
                     past_key_values = tuple((target_pkv, None) for target_pkv, ctx_pkv in past_key_values)
