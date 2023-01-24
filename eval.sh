@@ -21,7 +21,7 @@ export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 debug=false
 
 model=$1  # model to test
-setting=generate_perplexity
+setting=generate
 data=wow
 output_dir=test
 output_file=test.jsonl

@@ -15,6 +15,7 @@ class BM25:
         collator,
         dataset: GenericDataLoader,
         index_name: str,
+        encode_retrieval_in: str,
         use_encoder_input_ids: bool = False,
         use_decoder_input_ids: bool = True,
     ):
@@ -24,6 +25,8 @@ class BM25:
         # load bm25 index
         model = BM25Search(index_name=index_name, hostname='localhost', initialize=False, number_of_shards=1)
         self.retriever = EvaluateRetrieval(model)
+        self.encode_retrieval_in = encode_retrieval_in
+        assert encode_retrieval_in in {'encoder', 'decoder'}
         self.use_encoder_input_ids = use_encoder_input_ids
         self.use_decoder_input_ids = use_decoder_input_ids
         assert use_encoder_input_ids or use_decoder_input_ids, 'nothing used as queries'
@@ -40,6 +43,7 @@ class BM25:
         max_query_length: int = None,
         use_ctx: bool = False,
         use_gold: bool = False,
+        joint_encode_retrieval: bool = False,
     ):
         if use_ctx:
             return np.zeros((ctx_input_ids.size(0), topk)), ctx_input_ids[:, :topk], ctx_attention_mask[:, :topk]
@@ -51,6 +55,11 @@ class BM25:
         if self.use_decoder_input_ids and decoder_input_ids is not None:
             device = decoder_input_ids.device
             bs = len(decoder_input_ids)
+
+        if self.use_encoder_input_ids and encoder_input_ids is not None:
+            encoder_texts: List[str] = self.tokenizer.batch_decode(encoder_input_ids, skip_special_tokens=True)
+        if self.use_decoder_input_ids and decoder_input_ids is not None:
+            decoder_texts: List[str] = self.tokenizer.batch_decode(decoder_input_ids, skip_special_tokens=True)
 
         if decoder_ctx_ids is not None:  # use doc ids passed in
             docids: List[str] = decoder_ctx_ids.reshape(-1)
@@ -67,17 +76,18 @@ class BM25:
             # prepare queries
             queries: List[str] = []
             if self.use_encoder_input_ids and encoder_input_ids is not None:
-                queries = self.tokenizer.batch_decode(encoder_input_ids, skip_special_tokens=True)
+                queries = list(encoder_texts)
             if self.use_decoder_input_ids and decoder_input_ids is not None:
-                decoder_texts = self.tokenizer.batch_decode(decoder_input_ids, skip_special_tokens=True)
-                if len(queries):
+                if queries:
                     assert len(queries) == len(decoder_texts), 'inconsistent length'
                     queries = [f'{q} {t}' for q, t in zip(queries, decoder_texts)]
                 else:
-                    queries = decoder_texts
+                    queries = list(decoder_texts)
 
             # truncate queries
             if max_query_length:
+                ori_ps = self.tokenizer.padding_side
+                ori_ts = self.tokenizer.truncation_side
                 self.tokenizer.padding_side = 'left'
                 self.tokenizer.truncation_side = 'left'
                 tokenized = self.tokenizer(
@@ -87,8 +97,8 @@ class BM25:
                     max_length=max_query_length,
                     add_special_tokens=False,
                     return_tensors='pt')['input_ids']
-                self.tokenizer.padding_side = 'right'
-                self.tokenizer.truncation_side = 'right'
+                self.tokenizer.padding_side = ori_ps
+                self.tokenizer.truncation_side = ori_ts
                 queries = self.tokenizer.batch_decode(tokenized, skip_special_tokens=True)
 
             # retrieve
@@ -107,7 +117,28 @@ class BM25:
                 docs.extend(_docs)
 
         # tokenize
-        ctxs = self.collator.encode_context(docs)
+        if joint_encode_retrieval:
+            for i in range(bs):
+                for j in range(topk):
+                    if self.encode_retrieval_in == 'encoder':
+                        docs[i * topk + j] = f'{docs[i * topk + j]} | {encoder_texts[i]}'
+                    elif self.encode_retrieval_in == 'decoder':
+                        docs[i * topk + j] = f'{docs[i * topk + j]} |'
+                    else:
+                        raise NotImplementedError
+            if self.encode_retrieval_in == 'encoder':
+                ctxs = self.collator.encode_context(docs, max_length=self.collator.max_context_len + self.collator.max_question_len)
+            elif self.encode_retrieval_in == 'decoder':
+                ctxs = self.collator.encode_context(docs)
+                assert ctxs.input_ids[:, 0].eq(self.collator.get_real_decoder_start_token_id).all()
+                assert topk == 1
+                #decoder_input_ids = decoder_input_ids[:, 1:]  # skip decoder_start_token
+                ctxs.input_ids = torch.cat([ctxs.input_ids.to(device), decoder_input_ids], 1)
+                ctxs.attention_mask = torch.cat([ctxs.attention_mask.to(device), torch.ones_like(decoder_input_ids).to(ctxs.attention_mask.dtype)], 1)
+            else:
+                raise NotImplementedError
+        else:
+            ctxs = self.collator.encode_context(docs)
         input_ids = ctxs.input_ids.view(bs, topk, -1).to(device)  # (batch_size, topk, seq_length)
         attention_mask = ctxs.attention_mask.view(bs, topk, -1).to(device)  # (batch_size, topk, seq_length)
         docids = np.array(docids).reshape(bs, topk)  # (batch_size, topk)

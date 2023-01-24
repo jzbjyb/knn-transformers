@@ -249,10 +249,15 @@ class DataCollatorForFusion:
             return self._all_tokens
         self._all_tokens = list(self.tokenizer.get_vocab().values())
 
+    @property
     def get_real_decoder_start_token_id(self):
         if not self.answer_bos:  # use the first token of the answer prefix to start generation if bos is not prepended to the answer
             return self.tokenizer.encode(self.answer_prefix)[0]
         return self.model.config.decoder_start_token_id
+
+    @property
+    def get_real_decoder_start_token(self):
+        return self.tokenizer.convert_ids_to_tokens([self.get_real_decoder_start_token_id])[0]
 
     def get_labels_from_decoder_input_ids(self, decoder_input_ids):
         assert self.tokenizer.pad_token_id == 0
@@ -262,19 +267,29 @@ class DataCollatorForFusion:
         labels.masked_fill_(labels == 0, -100)
         return labels
 
-    def encode_context(self, ctxs: List[str]):
-        decoder_start_token = self.tokenizer.convert_ids_to_tokens([self.model.config.decoder_start_token_id])[0]
+    def encode_context(
+        self,
+        ctxs: List[str],
+        max_length: int = None,
+        add_special_tokens: bool = True,
+        add_placeholder: bool = False,
+    ):
+        max_length = max_length or self.max_context_len
+        decoder_start_token = self.get_real_decoder_start_token
+
+        if add_placeholder:
+            ctxs = [f'{ctx} | {self.encoder_input_for_context}' for ctx in ctxs]
 
         # setting
         if self.encode_retrieval_in == 'encoder':
             # normal padding
             padding_side = 'right'
-            add_special_tokens = True
+            add_special_tokens = add_special_tokens and True
             context_bos = ''
         elif self.encode_retrieval_in == 'decoder':
             # put ctx on the right to be close to the answer
             padding_side = 'left'
-            add_special_tokens = False
+            add_special_tokens = add_special_tokens and False
             context_bos = f'{decoder_start_token} '
         else:
             raise NotImplementedError
@@ -287,7 +302,7 @@ class DataCollatorForFusion:
             [context_bos + self.context_prefix + ctx for ctx in ctxs],
             truncation=True,
             padding=True,
-            max_length=self.max_context_len,
+            max_length=max_length,
             add_special_tokens=add_special_tokens,  # avoid eos
             return_tensors='pt')
         self.tokenizer.padding_side = ori_ps
@@ -297,7 +312,7 @@ class DataCollatorForFusion:
         self,
         examples: List[Dict],
         debug: bool = False):
-        decoder_start_token = self.tokenizer.convert_ids_to_tokens([self.model.config.decoder_start_token_id])[0]
+        decoder_start_token = self.get_real_decoder_start_token
 
         # question ids
         qids = np.array([e['qid'] for e in examples])
@@ -686,7 +701,7 @@ def main():
     gen_kwargs = {
         'max_length': data_args.max_answer_len,
         'num_beams': 1,
-        'decoder_start_token_id': collator.get_real_decoder_start_token_id(),
+        'decoder_start_token_id': collator.get_real_decoder_start_token_id,
         'prefix_len': data_args.generation_prefix_len,
     }
 
@@ -764,12 +779,15 @@ def main():
             collator=collator,
             dataset=(corpus, queries, qrels),
             index_name=data_args.beir_index_name,
+            encode_retrieval_in=model_args.encode_retrieval_in,
             use_encoder_input_ids=True,
             use_decoder_input_ids=True)
         decoder_retrieval_kwargs = {
             'retriever': retriever,
             'topk': data_args.depth,
-            'frequency': 1 if data_args.use_context else 0
+            'frequency': 1 if data_args.use_context else 0,
+            'use_gold': False,
+            'joint_encode_retrieval': False,
         }
         model.cache = CacheManager(get_cache=False, save_cache=False, cache_file='.cache')
 
@@ -858,9 +876,10 @@ def main():
                 evaluate_retrieval: Dict = {'percentiles': [0.25, 0.5, 0.75, 1.0]},
                 output_all: bool = True,
             ):
+                pad_token_id = tokenizer.pad_token_id
                 qids = batch['idxs']
                 labels = batch['labels']
-                labels[labels == -100] = tokenizer.pad_token_id
+                labels[labels == -100] = pad_token_id
 
                 predictions = gen_outputs.sequences
                 labels_of_pred = collator.get_labels_from_decoder_input_ids(predictions)
@@ -868,6 +887,8 @@ def main():
 
                 # decode labels and predictions
                 # skip generation prefix
+                predictions = trainer._nested_gather(trainer._pad_across_processes(predictions, pad_index=pad_token_id))  # (gathered_batch_size, seq_len)
+                labels = trainer._nested_gather(trainer._pad_across_processes(labels, pad_index=pad_token_id))  # (gathered_batch_size, seq_len)
                 skip_prefix = data_args.generation_prefix_len > 0
                 if skip_prefix:
                     predictions = predictions[:, 1 + data_args.generation_prefix_len:]  # skip bos + prefix

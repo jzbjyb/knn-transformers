@@ -1333,6 +1333,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         ret_frequency = decoder_retrieval_kwargs.get('frequency', 0)
         ret_topk = decoder_retrieval_kwargs.get('topk', 1)
         retriever = decoder_retrieval_kwargs.get('retriever', None)
+        use_gold = decoder_retrieval_kwargs.get('use_gold', False)
+        joint_encode_retrieval = decoder_retrieval_kwargs.get('joint_encode_retrieval', False)
         new_context = False
         if ret_frequency and in_generation and gen_step % ret_frequency == 0:  # perform retrieval
             new_context = True
@@ -1348,11 +1350,20 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                 qids=idxs,
                 topk=ret_topk,
                 max_query_length=16,
-                use_gold=False)
+                use_gold=use_gold,
+                joint_encode_retrieval=joint_encode_retrieval)
 
+            use_decoder_ctx = self.encode_retrieval_in == 'decoder' and not joint_encode_retrieval
             if self.encode_retrieval_in == 'decoder':  # remove past key and values of ctx-related self attention to use the new retrieval results
                 if past_key_values is not None:
                     past_key_values = tuple((target_pkv, None) for target_pkv, ctx_pkv in past_key_values)
+                if joint_encode_retrieval:
+                    batch_size, n_ctxs, ctx_seq_length = decoder_ctx_input_ids.size()
+                    assert n_ctxs == 1
+                    decoder_input_ids = decoder_ctx_input_ids.squeeze(1)
+                    decoder_attention_mask = decoder_ctx_attention_mask.squeeze(1)
+                    if past_key_values is not None:
+                        past_key_values = None
             elif self.encode_retrieval_in == 'encoder':  # remove past key and values of cross attention to use the new retrieval results
                 if past_key_values is not None:
                     past_key_values = tuple((target_pkv[:3] + (None, None), ctx_pkv) for target_pkv, ctx_pkv in past_key_values)
@@ -1362,8 +1373,12 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                     input_ids=decoder_ctx_input_ids.view(-1, ctx_seq_length),  # (bs * n_ctxs, ctx_seq_length)
                     attention_mask=decoder_ctx_attention_mask.view(-1, ctx_seq_length),  # (bs * n_ctxs, ctx_seq_length)
                     head_mask=head_mask)[0].view(batch_size, n_ctxs * ctx_seq_length, - 1)
-                hidden_states = torch.cat([hidden_states, ctx_encoder_hidden_states], 1)  # (bs, seq_length + n_ctxs * ctx_seq_length, dim)
-                attention_mask = torch.cat([attention_mask, decoder_ctx_attention_mask.view(batch_size, -1)], 1)  # (bs, seq_length + n_ctxs * ctx_seq_length)
+                if not joint_encode_retrieval:
+                    hidden_states = torch.cat([hidden_states, ctx_encoder_hidden_states], 1)  # (bs, seq_length + n_ctxs * ctx_seq_length, dim)
+                    attention_mask = torch.cat([attention_mask, decoder_ctx_attention_mask.view(batch_size, -1)], 1)  # (bs, seq_length + n_ctxs * ctx_seq_length)
+                else:
+                    hidden_states = ctx_encoder_hidden_states  # (bs, n_ctxs * ctx_seq_length, dim)
+                    attention_mask = decoder_ctx_attention_mask  # (bs, n_ctxs * ctx_seq_length)
             else:
                 raise NotImplementedError
 
@@ -1392,12 +1407,12 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             attention_mask=decoder_attention_mask,
             inputs_embeds=decoder_inputs_embeds,
             past_key_values=past_key_values,
-            decoder_ctx_input_ids=decoder_ctx_input_ids if self.encode_retrieval_in == 'decoder' else None,
-            decoder_ctx_attention_mask=decoder_ctx_attention_mask if self.encode_retrieval_in == 'decoder' else None,
+            decoder_ctx_input_ids=decoder_ctx_input_ids if use_decoder_ctx else None,
+            decoder_ctx_attention_mask=decoder_ctx_attention_mask if use_decoder_ctx else None,
             encoder_hidden_states=hidden_states,
             encoder_attention_mask=attention_mask,
-            encoder_hidden_states_for_ctx=hidden_states_for_ctx,
-            encoder_attention_mask_for_ctx=attention_mask_for_ctx,
+            encoder_hidden_states_for_ctx=hidden_states_for_ctx if use_decoder_ctx else None,
+            encoder_attention_mask_for_ctx=attention_mask_for_ctx if use_decoder_ctx else None,
             head_mask=decoder_head_mask,
             cross_attn_head_mask=cross_attn_head_mask,
             use_cache=use_cache,
@@ -1932,30 +1947,49 @@ class GreedySearchEncoderDecoderOutputWithRetrieval(GreedySearchEncoderDecoderOu
 
 
 def prepare(
+    model,
     tokenizer,
-    questions: List[str],
-    answers: List[str],
-    ctxs: List[List[str]],
-    question_max_length: int = 50,
-    answer_max_length: int = 50,
-    ctx_max_length: int = 50,
-    add_to_ctx: str = '<pad> ',
-    add_to_answers: str = 'Answer: ',
-    for_generation: bool = False,
+    questions: List[str] = None,
+    answers: List[str] = None,
+    ctxs: List[List[str]] = None,
+    question_max_length: int = 128,
+    answer_max_length: int = 128,
+    ctx_max_length: int = 128,
+    for_generation: bool = True,
     ctx_to_answer: bool = False):
 
     questions = [
-        'Definition: Given a question, generate a descriptive answer. Question: Who is the president of the US?',
-        'Definition: Given a question, generate a descriptive answer. Question: who lives in the imperial palace in tokyo?'
+        'Given the context, generate the next response.\nContext:\nI love baking! My favorite thing to make is peanut butter cookies. What kind of baked sweets do you like eating or making?',
+        'Given the context, generate the next response.\nContext:\nIve always liked the lucky number 7.\nme too, hindu people used to write 7 with one stroke and it looked like and uppercase J\nhuh strange how different cultures can differ, didnt know it was written like that anywhere.\neven in cultures there are a lot of subcultures, most hindus speak hindi but bengali hindus speak bengali\nyea just shows how each individual society has their own culture and ideas that even the number 7 can change.',
+        'Given the context, generate the next response.\nContext:\nSo true story. I once swam with Manta Ray and it was awesome.',
+        'Answer the following yes/no question by reasoning step-by-step.\n\nIs the language used in Saint Vincent and the Grenadines rooted in English?',
+        'Evidence: The primary language spoken in Saint Vincent and the Grenadines is Vincentian Creole.\nVincentian Creole is English-based, with elements of French, Antillean Creole, and indigenous South American and African languages.\n\nAnswer the following yes/no question by reasoning step-by-step.\n\nIs the language used in Saint Vincent and the Grenadines rooted in English?',
+        'Answer the following yes/no question by reasoning step-by-step.\n\nIs greed the most prevalent of the Seven Deadly Sins?',
+        'Evidence: Greed is a longing for wealth and power.\nWhite collar crime involves businesses stealing money or assets from people.\n5-10% of arrests per 100,000 arrests were for  white collar crime according to Department of Justice statistics.\nGluttony is the overindulgence in food or similar things.\n39.8% of US adults were classified as overweight according to the National Center for Health Statistics.\n\nAnswer the following yes/no question by reasoning step-by-step.\n\nIs greed the most prevalent of the Seven Deadly Sins?'
     ]
     ctxs = [
-        ['Evidence: Frank Xu is the president of the US. Answer '],
-        ['Evidence: The Tokyo Imperial Palace is the primary residence of the Emperor of Japan. Answer ']
+        ['Evidence: baked. Heat is gradually transferred "from the surface of cakes, cookies, and breads to their | Response:'],
+        ['Evidence: As is the case with the European glyph, the Cham and Khmer glyph for 7 also evolved to look like their glyph for 1, though in a different way, so they were also concerned with making their 7 more different. | Response:'],
+        ['Evidence: Mantas are found in warm temperate, subtropical and tropical waters. | Response:'],
+        [''],
+        [''],
+        [''],
+        [''],
     ]
     answers = [
-        'Barack Obama.',
-        'the Imperial Family.'
+        'Evidence: baked. Heat is gradually transferred "from the surface of cakes, cookies, and breads to their | Response:',
+        'Evidence: As is the case with the European glyph, the Cham and Khmer glyph for 7 also evolved to look like their glyph for 1, though in a different way, so they were also concerned with making their 7 more different. | Response:',
+        'Evidence: Mantas are found in warm temperate, subtropical and tropical waters. | Response:',
+        '',
+        '',
+        '',
+        '',
     ]
+
+    idx = [6]
+    questions = [questions[i] for i in idx]
+    ctxs = [ctxs[i] for i in idx]
+    answers = [answers[i] for i in idx]
 
     # question
     questions = tokenizer(
@@ -1970,7 +2004,7 @@ def prepare(
     bs, n_ctxs = len(ctxs), len(ctxs[0])
     tokenizer.padding_side = 'left'  # put ctx on the right to be close to the answer
     ctxs = tokenizer(
-        [add_to_ctx + ctx for ctx in sum(ctxs, [])],
+        ['<pad> ' + ctx for ctx in sum(ctxs, [])],
         truncation=True,
         padding=True,
         max_length=ctx_max_length,
@@ -1983,9 +2017,10 @@ def prepare(
 
     # answers
     answers = tokenizer(
-        [add_to_answers + ans for ans in answers],
+        answers,
         truncation=True,
         padding=True,
+        add_special_tokens=False,
         max_length=answer_max_length,
         return_tensors='pt'
     )
@@ -1993,11 +2028,9 @@ def prepare(
     decoder_attention_mask = answers.attention_mask  # (batch_size, seq_length)
 
     # convert answers to labels
-    assert len(add_to_answers) > 0
     assert tokenizer.pad_token_id == 0
     # remove the added "special" token to the answer to make it labels
-    labels = torch.zeros_like(decoder_input_ids)
-    labels[..., :-1] = decoder_input_ids[..., 1:].clone()
+    labels = answers.input_ids
     labels.masked_fill_(labels == 0, -100)
 
     if ctx_to_answer:  # combine ctxs and answers
@@ -2008,8 +2041,6 @@ def prepare(
     batch = {
         'input_ids': questions.input_ids,
         'attention_mask': questions.attention_mask,
-        'decoder_ctx_input_ids': decoder_ctx_input_ids,
-        'decoder_ctx_attention_mask': decoder_ctx_attention_mask,
     }
 
     if not for_generation:
@@ -2017,4 +2048,34 @@ def prepare(
         batch['decoder_input_ids'] = decoder_input_ids
         batch['decoder_attention_mask'] = decoder_attention_mask
 
-    return batch
+
+    gen_kwargs = {
+        'max_length': 128,
+        'num_beams': 1,
+        'decoder_start_token_id': 0,
+    }
+
+    all_tokens = list(tokenizer.get_vocab().values())
+
+    # prepare prefix function
+    prefix_allowed_tokens_fn = None
+    if True:
+        prefix_ids = labels
+        def prefix_allowed_tokens_fn(batch_id: int, gen_ids: torch.Tensor) -> List[int]:
+            if gen_ids.shape[-1] > len(prefix_ids[batch_id]):
+                return all_tokens
+            return prefix_ids[batch_id][gen_ids.shape[-1] - 1]
+
+    # generate and use generated outputs to overwrite inputs
+    gen_outputs = model.generate(
+        **{k: v.to(model.device) for k, v in batch.items()},
+        **gen_kwargs,
+        prefix_allowed_tokens_fn=prefix_allowed_tokens_fn,
+        output_scores=True,
+        return_dict_in_generate=True)
+
+    print(gen_outputs.sequences)
+    for i in range(len(gen_outputs.sequences)):
+        print('**')
+        print(tokenizer.convert_ids_to_tokens(gen_outputs.sequences[i]))
+        print(tokenizer.decode(gen_outputs.sequences[i]))
