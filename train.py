@@ -803,6 +803,7 @@ def main():
             'joint_encode_retrieval': True,
             'merge_ctx': True,
             'max_query_length': 16,
+            'retrieval_at_beginning': True,
         }
         model.cache = CacheManager(get_cache=False, save_cache=False, cache_file='.cache')
 

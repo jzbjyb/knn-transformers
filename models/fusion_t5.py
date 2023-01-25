@@ -65,6 +65,132 @@ from transformers.generation_utils import GreedySearchOutput, GreedySearchDecode
 logger = logging.get_logger(__name__)
 
 
+def t5_attention_forward(
+    self,
+    hidden_states,
+    mask=None,
+    key_value_states=None,
+    position_bias=None,
+    past_key_value=None,
+    layer_head_mask=None,
+    query_length=None,
+    use_cache=False,
+    output_attentions=False,
+):
+    """
+    Self-attention (if key_value_states is None) or attention over source sentence (provided by key_value_states).
+    """
+    # Input is (batch_size, seq_length, dim)
+    # Mask is (batch_size, key_length) (non-causal) or (batch_size, key_length, key_length)
+    # past_key_value[0] is (batch_size, n_heads, q_len - 1, dim_per_head)
+    batch_size, seq_length = hidden_states.shape[:2]
+
+    real_seq_length = seq_length
+
+    if past_key_value is not None:
+        assert (
+            len(past_key_value) == 2
+        ), f"past_key_value should have 2 past states: keys and values. Got { len(past_key_value)} past states"
+        real_seq_length += past_key_value[0].shape[2] if query_length is None else query_length
+
+    # The only place modified to correct key_length for cross-attention based on past_key_value
+    key_length = real_seq_length if key_value_states is None else (key_value_states.shape[1] if past_key_value is None else past_key_value[0].shape[2])
+
+    def shape(states):
+        """projection"""
+        return states.view(batch_size, -1, self.n_heads, self.key_value_proj_dim).transpose(1, 2)
+
+    def unshape(states):
+        """reshape"""
+        return states.transpose(1, 2).contiguous().view(batch_size, -1, self.inner_dim)
+
+    def project(hidden_states, proj_layer, key_value_states, past_key_value):
+        """projects hidden states correctly to key/query states"""
+        if key_value_states is None:
+            # self-attn
+            # (batch_size, n_heads, seq_length, dim_per_head)
+            hidden_states = shape(proj_layer(hidden_states))
+        elif past_key_value is None:
+            # cross-attn
+            # (batch_size, n_heads, seq_length, dim_per_head)
+            hidden_states = shape(proj_layer(key_value_states))
+
+        if past_key_value is not None:
+            if key_value_states is None:
+                # self-attn
+                # (batch_size, n_heads, key_length, dim_per_head)
+                hidden_states = torch.cat([past_key_value, hidden_states], dim=2)
+            else:
+                # cross-attn
+                hidden_states = past_key_value
+        return hidden_states
+
+    # get query states
+    query_states = shape(self.q(hidden_states))  # (batch_size, n_heads, seq_length, dim_per_head)
+
+    # get key/value states
+    key_states = project(
+        hidden_states, self.k, key_value_states, past_key_value[0] if past_key_value is not None else None
+    )
+    value_states = project(
+        hidden_states, self.v, key_value_states, past_key_value[1] if past_key_value is not None else None
+    )
+
+    # compute scores
+    scores = torch.matmul(
+        query_states, key_states.transpose(3, 2)
+    )  # equivalent of torch.einsum("bnqd,bnkd->bnqk", query_states, key_states), compatible with onnx op>9
+
+    if position_bias is None:
+        if not self.has_relative_attention_bias:
+            position_bias = torch.zeros(
+                (1, self.n_heads, real_seq_length, key_length), device=scores.device, dtype=scores.dtype
+            )
+            if self.gradient_checkpointing and self.training:
+                position_bias.requires_grad = True
+        else:
+            position_bias = self.compute_bias(real_seq_length, key_length, device=scores.device)
+
+        # if key and values are already calculated
+        # we want only the last query position bias
+        if past_key_value is not None:
+            position_bias = position_bias[:, :, -hidden_states.size(1) :, :]
+
+        if mask is not None:
+            position_bias = position_bias + mask  # (batch_size, n_heads, seq_length, key_length)
+
+    if self.pruned_heads:
+        mask = torch.ones(position_bias.shape[1])
+        mask[list(self.pruned_heads)] = 0
+        position_bias_masked = position_bias[:, mask.bool()]
+    else:
+        position_bias_masked = position_bias
+
+    scores += position_bias_masked
+    attn_weights = nn.functional.softmax(scores.float(), dim=-1).type_as(
+        scores
+    )  # (batch_size, n_heads, seq_length, key_length)
+    attn_weights = nn.functional.dropout(
+        attn_weights, p=self.dropout, training=self.training
+    )  # (batch_size, n_heads, seq_length, key_length)
+
+    # Mask heads if we want to
+    if layer_head_mask is not None:
+        attn_weights = attn_weights * layer_head_mask
+
+    attn_output = unshape(torch.matmul(attn_weights, value_states))  # (batch_size, seq_length, dim)
+    attn_output = self.o(attn_output)
+
+    present_key_value_state = (key_states, value_states) if (self.is_decoder and use_cache) else None
+    outputs = (attn_output,) + (present_key_value_state,) + (position_bias,)
+
+    if output_attentions:
+        outputs = outputs + (attn_weights,)
+    return outputs
+
+T5Attention.forward = t5_attention_forward
+
+
 class FusionT5Config(T5Config):
     def __init__(
         self,
@@ -1096,6 +1222,7 @@ class FusionSeq2SeqLMOutput(Seq2SeqLMOutput):
     decoder_ctx_input_ids: Optional[torch.LongTensor] = None
     decoder_ctx_attention_mask: Optional[torch.FloatTensor] = None
     decoder_ctx_ids: Optional[torch.LongTensor] = None
+    cross_attention_mask: Optional[torch.FloatTensor] = None
 
 
 @add_start_docstrings("""T5 Model with a `language modeling` head on top.""", T5_START_DOCSTRING)
@@ -1337,12 +1464,11 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         joint_encode_retrieval = decoder_retrieval_kwargs.get('joint_encode_retrieval', False)
         merge_ctx = decoder_retrieval_kwargs.get('merge_ctx', False)
         max_query_length = decoder_retrieval_kwargs.get('max_query_length', None)
-        new_context = False
-        perform_retrieval = ret_frequency and in_generation and gen_step % ret_frequency == 0
+        retrieval_at_beginning = decoder_retrieval_kwargs.get('retrieval_at_beginning', False)
+        perform_retrieval = ret_frequency and in_generation and (gen_step == 0 if retrieval_at_beginning else gen_step % ret_frequency == 0)
         use_decoder_ctx = self.encode_retrieval_in == 'decoder' and not joint_encode_retrieval
 
         if perform_retrieval:  # perform retrieval
-            new_context = True
             encoder_until_now = input_ids
             decoder_until_now = torch.cat([decoder_input_ids_previous, decoder_input_ids], -1) if decoder_input_ids_previous is not None else decoder_input_ids
             # (bs, n_ctxs), (bs, n_ctxs, ctx_seq_length), (bs, n_ctxs, ctx_seq_length)
@@ -1383,7 +1509,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                     attention_mask = torch.cat([attention_mask, decoder_ctx_attention_mask.view(batch_size, -1)], 1)  # (bs, seq_length + n_ctxs * ctx_seq_length)
                 else:
                     hidden_states = ctx_encoder_hidden_states  # (bs, n_ctxs * ctx_seq_length, dim)
-                    attention_mask = decoder_ctx_attention_mask  # (bs, n_ctxs * ctx_seq_length)
+                    attention_mask = decoder_ctx_attention_mask.view(batch_size, -1)  # (bs, n_ctxs * ctx_seq_length)
             else:
                 raise NotImplementedError
 
@@ -1567,9 +1693,10 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             ctx_gold_scores=ctx_gold_scores,
             ctx_attention_loss=ctx_attention_loss,
             ctx_embeddings=decoder_outputs.ctx_embeddings,
-            decoder_ctx_input_ids=decoder_ctx_input_ids if new_context else None,
-            decoder_ctx_attention_mask=decoder_ctx_attention_mask if new_context else None,
-            decoder_ctx_ids=decoder_ctx_ids if new_context else None)
+            decoder_ctx_input_ids=decoder_ctx_input_ids if perform_retrieval else None,
+            decoder_ctx_attention_mask=decoder_ctx_attention_mask if perform_retrieval else None,
+            decoder_ctx_ids=decoder_ctx_ids if perform_retrieval else None,
+            cross_attention_mask=attention_mask if perform_retrieval else None)
 
     def _prepare_encoder_decoder_kwargs_for_generation(
         self,
@@ -1699,6 +1826,10 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         if type(outputs) is FusionSeq2SeqLMOutput and outputs.decoder_ctx_input_ids is not None:
             model_kwargs['decoder_ctx_input_ids'] = outputs.decoder_ctx_input_ids
             model_kwargs['decoder_ctx_attention_mask'] = outputs.decoder_ctx_attention_mask
+
+        # update attention mask for encoder
+        if type(outputs) is FusionSeq2SeqLMOutput and outputs.cross_attention_mask is not None:
+            model_kwargs['attention_mask'] = outputs.cross_attention_mask
 
         return model_kwargs
 

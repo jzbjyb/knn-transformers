@@ -22,7 +22,7 @@ debug=false
 
 model=$1  # model to test
 setting=generate
-data=wow
+data=strategyqa_dev
 output_dir=test
 output_file=test.jsonl
 
