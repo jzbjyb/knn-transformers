@@ -35,20 +35,14 @@ class BM25:
         self,
         encoder_input_ids: torch.LongTensor = None,  # (bs, encoder_seq_len)
         decoder_input_ids: torch.LongTensor = None,  # (bs, decoder_seq_len)
-        ctx_input_ids: torch.LongTensor = None,  # (bs, n_ctxs, ctx_seq_len)
-        ctx_attention_mask: torch.FloatTensor = None,  # (bs, n_ctxs, ctx_seq_len)
-        decoder_ctx_ids: np.ndarray = None,  # (bs, topk)
+        ctx_ids: np.ndarray = None,  # (bs, topk)
         qids: np.ndarray = None,  # (bs,)
         topk: int = 1,
         max_query_length: int = None,
-        use_ctx: bool = False,
         use_gold: bool = False,
         joint_encode_retrieval: bool = False,
         merge_ctx: bool = False,
     ):
-        if use_ctx:
-            return np.zeros((ctx_input_ids.size(0), topk)), ctx_input_ids[:, :topk], ctx_attention_mask[:, :topk]
-
         device = None
         if self.use_encoder_input_ids and encoder_input_ids is not None:
             device = encoder_input_ids.device
@@ -62,8 +56,8 @@ class BM25:
         if self.use_decoder_input_ids and decoder_input_ids is not None:
             decoder_texts: List[str] = self.tokenizer.batch_decode(decoder_input_ids, skip_special_tokens=True)
 
-        if decoder_ctx_ids is not None:  # use doc ids passed in
-            docids: List[str] = decoder_ctx_ids.reshape(-1)
+        if ctx_ids is not None:  # use doc ids passed in
+            docids: List[str] = ctx_ids.reshape(-1)
             docs: List[str] = [self.corpus[did]['text'] for did in docids]
         elif use_gold:  # use qrels annotations to find gold ctxs
             docids: List[str] = []

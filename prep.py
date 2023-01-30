@@ -692,19 +692,18 @@ def compare(file1: str, file2: str):
 
 
 def strategyqa_to_beir(
-    strategyqa_dir: str,
+    strategyqa_file: str,
     beir_dir: str,
+    split: str = 'dev',
     dedup_question: bool = True,
     dedup_doc: bool = True,
 ):
-    split = 'dev'
-    dev_file = os.path.join(strategyqa_dir, f'data/strategyqa/{split}.json')
     qid2dict: Dict[str, Dict] = {}
     did2dict: Dict[str, Dict] = {}
     question2qid: Dict[str, Dict] = {}
     doc2did: Dict[str, str] = {}
     split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
-    with open(dev_file, 'r') as fin:
+    with open(strategyqa_file, 'r') as fin:
         data = json.load(fin)
         for example in data:
             question = example['question'].strip()
@@ -834,6 +833,6 @@ if __name__ == '__main__':
         compare(file1, file2)
 
     elif args.task == 'strategyqa_to_beir':
-        strategyqa_dir = args.inp[0]
+        strategyqa_file = args.inp[0]
         beir_dir = args.out
-        strategyqa_to_beir(strategyqa_dir, beir_dir)
+        strategyqa_to_beir(strategyqa_file, beir_dir, split='dev')

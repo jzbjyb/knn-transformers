@@ -22,7 +22,7 @@ debug=false
 
 model=$1  # model to test
 setting=generate
-data=strategyqa_dev
+data=strategyqa_train
 output_dir=test
 output_file=test.jsonl
 
@@ -156,6 +156,26 @@ elif [[ ${data} == "strategyqa_dev_3shot" ]]; then
     dstore_dir=${val_file}
     dstore_size=38089
     max_eval_samples=229
+
+elif [[ ${data} == "strategyqa_train" ]]; then
+    question_prefix=$'Answer the following yes/no question by reasoning step-by-step.\n\n'
+    encoder_input_for_context="Answer the following yes/no question by reasoning step-by-step."
+    context_prefix="Evidence: "
+    answer_prefix=""
+    metric=yesno
+    examplars=None
+    max_question_len=128
+    max_context_len=128
+    max_answer_len=128
+    generation_prefix_len=0
+
+    beir_index_name=""
+    beir_dir=data/strategyqa/train_beir
+    val_file=${beir_dir}.fid/dev.json
+    train_file=${val_file}
+    dstore_dir=checkpoints/strategyqa/train_beir/flant5xl/knn
+    dstore_size=11240
+    max_eval_samples=500
 
 fi
 

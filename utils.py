@@ -150,7 +150,7 @@ strategy_qa_examplars = [
         'answer': 'Hamsters are prey animals. Prey are food for predators. Thus, hamsters provide food for some animals. Therefore, the final answer is yes.',
     },
     {
-        'question': ' Could Brooke Shields succeed at University of Pennsylvania?',
+        'question': 'Could Brooke Shields succeed at University of Pennsylvania?',
         'answer': 'Brooke Shields went to Princeton University. Princeton University is about as academically rigorous as the University of Pennsylvania. Thus, Brooke Shields could also succeed at the University of Pennsylvania. Therefore, the final answer is yes.',
     },
     {

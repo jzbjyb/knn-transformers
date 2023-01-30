@@ -803,7 +803,8 @@ def main():
             'joint_encode_retrieval': True,
             'merge_ctx': True,
             'max_query_length': 16,
-            'retrieval_at_beginning': True,
+            'retrieval_at_beginning': False,
+            'look_ahead': 0,
         }
         model.cache = CacheManager(get_cache=False, save_cache=False, cache_file='.cache')
 
@@ -889,7 +890,7 @@ def main():
                 eval_outputs,
                 gen_outputs,
                 ppl_percentiles: List[float] = [0.25, 0.5, 0.75, 1.0],
-                evaluate_retrieval: Dict = {'percentiles': [0.25, 0.5, 0.75, 1.0]},
+                evaluate_retrieval: Dict = {'percentiles': [1, 0.25, 0.5, 0.75, 1.0]},
                 output_all: bool = True,
             ):
                 pad_token_id = tokenizer.pad_token_id
@@ -946,21 +947,36 @@ def main():
                     seqlen_perc = trainer._nested_gather(trainer._pad_across_processes(seqlen_perc, pad_index=0))  # (gathered_batch_size, n_percentiles)
 
                 # compute retrieval accuracy
-                dids = accs = None
+                dids = accs = covers = None
                 if evaluate_retrieval and gen_outputs.retrieval_sequences is not None:
                     dids = gen_outputs.retrieval_sequences  # (bs, seq_len, n_ctxs)
                     accs: List[List[float]] = []
+                    covers: List[List[float]] = []
                     assert len(qids) == len(dids) == len(seqlen)
                     for qid, _dids, sl in zip(qids, dids, seqlen):
                         accs.append([])
+                        covers.append([])
                         rel_dids: List[str] = np.array([d for d, r in qrels[qid].items() if r])
                         rels = np.isin(_dids, rel_dids).any(-1)[:sl.item()]  # (rel_seq_len)
+                        prev_pt = 0
                         for pt in evaluate_retrieval['percentiles']:
-                            pt = int(len(rels) * pt)
-                            acc = rels[:pt].mean()
+                            if type(pt) is int:
+                                pass
+                            elif type(pt) is float:
+                                pt = int(len(rels) * pt)
+                            else:
+                                raise NotImplementedError
+                            if pt <= prev_pt:  # at least one token
+                                pt = prev_pt + 1
+                            acc = rels[prev_pt:pt].mean()
                             accs[-1].append(acc)
+                            cover = len(np.intersect1d(_dids[:pt], rel_dids)) / (len(rel_dids) or 1)
+                            covers[-1].append(cover)
+                            prev_pt = max(min(pt, sl - 1), 0)
                     accs = torch.tensor(accs).to(logits.device)  # (bs, n_percentiles)
                     accs = trainer._nested_gather(trainer._pad_across_processes(accs, pad_index=0))  # (gathered_batch_size, n_percentiles)
+                    covers = torch.tensor(covers).to(logits.device)  # (bs, n_percentiles)
+                    covers = trainer._nested_gather(trainer._pad_across_processes(covers, pad_index=0))  # (gathered_batch_size, n_percentiles)
                     if output_all:
                         # (gathered_batch_size, seq_len, n_ctxs)
                         dids = trainer._nested_gather(trainer._pad_across_processes(torch.tensor(dids.astype(np.int32)).to(labels_of_pred.device), pad_index=-1))
@@ -981,7 +997,7 @@ def main():
                 else:
                     qids = lp = labels_of_pred = None
 
-                return slp, seqlen, slp_perc, seqlen_perc, accs, qids, lp, labels_of_pred, dids, predictions, labels
+                return slp, seqlen, slp_perc, seqlen_perc, accs, covers, qids, lp, labels_of_pred, dids, predictions, labels
 
             def generate(
                 eval_outputs,
@@ -1065,13 +1081,14 @@ def main():
                 acc = finals.mean(0).item()
                 print(f'#examples {len(finals)}, accuracy {acc}')
             elif 'generate_perplexity' in training_args.do_eval_special:
-                slp, seqlen, slp_perc, seqlen_perc, accuracy, qids, lp, labels_of_pred, dids, predictions, labels = zip(*finals)
+                slp, seqlen, slp_perc, seqlen_perc, accuracy, covers, qids, lp, labels_of_pred, dids, predictions, labels = zip(*finals)
                 slp = torch.cat(slp)[:len(validation_dataset)]
                 seqlen = torch.cat(seqlen)[:len(validation_dataset)]
                 accuracy = torch.cat(accuracy, 0)[:len(validation_dataset)].mean(0) if accuracy[0] is not None else None
+                covers = torch.cat(covers, 0)[:len(validation_dataset)].mean(0) if covers[0] is not None else None
                 if qids[0] is not None:
                     torch.save({'labels': labels_of_pred, 'logprobs': lp, 'docids': dids, 'qids': qids}, os.path.join(training_args.output_dir, 'logprob_label.pt'))
-                print(f'#examples {len(slp)}, #tokens {seqlen.sum().item()}, perplexity: {torch.exp(-slp.sum() / seqlen.sum()).item()}, retrieval accuracy: {accuracy}')
+                print(f'#examples {len(slp)}, #tokens {seqlen.sum().item()}, perplexity: {torch.exp(-slp.sum() / seqlen.sum()).item()}, retrieval accuracy: {accuracy}, retrieval coverage: {covers}')
 
                 if slp_perc[0] is not None:
                     slp_perc = torch.cat(slp_perc)[:len(validation_dataset)]

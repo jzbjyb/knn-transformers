@@ -1219,10 +1219,6 @@ class FusionSeq2SeqLMOutput(Seq2SeqLMOutput):
     ctx_pred_scores: Optional[torch.FloatTensor] = None
     ctx_gold_scores: Optional[torch.FloatTensor] = None
     ctx_embeddings: Optional[torch.FloatTensor] = None
-    decoder_ctx_input_ids: Optional[torch.LongTensor] = None
-    decoder_ctx_attention_mask: Optional[torch.FloatTensor] = None
-    decoder_ctx_ids: Optional[torch.LongTensor] = None
-    cross_attention_mask: Optional[torch.FloatTensor] = None
 
 
 @add_start_docstrings("""T5 Model with a `language modeling` head on top.""", T5_START_DOCSTRING)
@@ -1352,7 +1348,6 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         input_ids_for_ctx: Optional[torch.LongTensor] = None,  # (batch_size, n_ctxs, seq_length_for_ctx)
         attention_mask_for_ctx: Optional[torch.FloatTensor] = None,  # (batch_size, n_ctxs, seq_length_for_ctx)
         decoder_input_ids: Optional[torch.LongTensor] = None,
-        decoder_input_ids_previous: Optional[torch.LongTensor] = None,
         decoder_attention_mask: Optional[torch.BoolTensor] = None,
         head_mask: Optional[torch.FloatTensor] = None,
         decoder_head_mask: Optional[torch.FloatTensor] = None,
@@ -1369,9 +1364,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         output_hidden_states: Optional[bool] = None,
         output_embeddings: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        decoder_retrieval_kwargs: Dict[str, Any] = {},
-        idxs: Optional[List[str]] = None,
-        decoder_ctx_ids: Optional[np.ndarray] = None,
+        idxs: Optional[np.ndarray] = None,
+        decoder_retrieval_kwargs: Optional[Dict] = None,
     ) -> Union[Tuple[torch.FloatTensor], Seq2SeqLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
@@ -1408,7 +1402,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if self.encode_retrieval_in == 'encoder':
-            input_ids_for_ctx = attention_mask_for_ctx = None
+            input_ids_for_ctx = attention_mask_for_ctx = decoder_ctx_input_ids = decoder_ctx_attention_mask = None
 
         # FutureWarning: head_mask was separated into two input args - head_mask, decoder_head_mask
         if head_mask is not None and decoder_head_mask is None:
@@ -1457,62 +1451,6 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         offset = 1 if self.bos_attention == 'single' else 0  # skip bos of targets
         handle_ret = (decoder_ctx_input_ids is not None and self.has_ret_heads) and (not in_generation or gen_step == offset + self.block_size - 1)
 
-        ret_frequency = decoder_retrieval_kwargs.get('frequency', 0)
-        ret_topk = decoder_retrieval_kwargs.get('topk', 1)
-        retriever = decoder_retrieval_kwargs.get('retriever', None)
-        use_gold = decoder_retrieval_kwargs.get('use_gold', False)
-        joint_encode_retrieval = decoder_retrieval_kwargs.get('joint_encode_retrieval', False)
-        merge_ctx = decoder_retrieval_kwargs.get('merge_ctx', False)
-        max_query_length = decoder_retrieval_kwargs.get('max_query_length', None)
-        retrieval_at_beginning = decoder_retrieval_kwargs.get('retrieval_at_beginning', False)
-        perform_retrieval = ret_frequency and in_generation and (gen_step == 0 if retrieval_at_beginning else gen_step % ret_frequency == 0)
-        use_decoder_ctx = self.encode_retrieval_in == 'decoder' and not joint_encode_retrieval
-
-        if perform_retrieval:  # perform retrieval
-            encoder_until_now = input_ids
-            decoder_until_now = torch.cat([decoder_input_ids_previous, decoder_input_ids], -1) if decoder_input_ids_previous is not None else decoder_input_ids
-            # (bs, n_ctxs), (bs, n_ctxs, ctx_seq_length), (bs, n_ctxs, ctx_seq_length)
-            decoder_ctx_ids, decoder_ctx_input_ids, decoder_ctx_attention_mask = retriever.retrieve_and_prepare(
-                encoder_until_now,
-                decoder_until_now,
-                decoder_ctx_input_ids,
-                decoder_ctx_attention_mask,
-                decoder_ctx_ids=decoder_ctx_ids,
-                qids=idxs,
-                topk=ret_topk,
-                max_query_length=max_query_length,
-                use_gold=use_gold,
-                joint_encode_retrieval=joint_encode_retrieval,
-                merge_ctx=merge_ctx)
-
-            if self.encode_retrieval_in == 'decoder':  # remove past key and values of ctx-related self attention to use the new retrieval results
-                if past_key_values is not None:
-                    past_key_values = tuple((target_pkv, None) for target_pkv, ctx_pkv in past_key_values)
-                if joint_encode_retrieval:
-                    batch_size, n_ctxs, ctx_seq_length = decoder_ctx_input_ids.size()
-                    assert n_ctxs == 1
-                    decoder_input_ids = decoder_ctx_input_ids.squeeze(1)
-                    decoder_attention_mask = decoder_ctx_attention_mask.squeeze(1)
-                    if past_key_values is not None:
-                        past_key_values = None
-            elif self.encode_retrieval_in == 'encoder':  # remove past key and values of cross attention to use the new retrieval results
-                if past_key_values is not None:
-                    past_key_values = tuple((target_pkv[:3] + (None, None), ctx_pkv) for target_pkv, ctx_pkv in past_key_values)
-                batch_size, n_ctxs, ctx_seq_length = decoder_ctx_input_ids.size()
-                # (bs, n_ctxs * ctx_seq_length, dim)
-                ctx_encoder_hidden_states = self.encoder(
-                    input_ids=decoder_ctx_input_ids.view(-1, ctx_seq_length),  # (bs * n_ctxs, ctx_seq_length)
-                    attention_mask=decoder_ctx_attention_mask.view(-1, ctx_seq_length),  # (bs * n_ctxs, ctx_seq_length)
-                    head_mask=head_mask)[0].view(batch_size, n_ctxs * ctx_seq_length, - 1)
-                if not joint_encode_retrieval:
-                    hidden_states = torch.cat([hidden_states, ctx_encoder_hidden_states], 1)  # (bs, seq_length + n_ctxs * ctx_seq_length, dim)
-                    attention_mask = torch.cat([attention_mask, decoder_ctx_attention_mask.view(batch_size, -1)], 1)  # (bs, seq_length + n_ctxs * ctx_seq_length)
-                else:
-                    hidden_states = ctx_encoder_hidden_states  # (bs, n_ctxs * ctx_seq_length, dim)
-                    attention_mask = decoder_ctx_attention_mask.view(batch_size, -1)  # (bs, n_ctxs * ctx_seq_length)
-            else:
-                raise NotImplementedError
-
         # Set device for model parallelism
         if self.model_parallel:
             torch.cuda.set_device(self.decoder.first_device)
@@ -1538,12 +1476,12 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             attention_mask=decoder_attention_mask,
             inputs_embeds=decoder_inputs_embeds,
             past_key_values=past_key_values,
-            decoder_ctx_input_ids=decoder_ctx_input_ids if use_decoder_ctx else None,
-            decoder_ctx_attention_mask=decoder_ctx_attention_mask if use_decoder_ctx else None,
+            decoder_ctx_input_ids=decoder_ctx_input_ids,
+            decoder_ctx_attention_mask=decoder_ctx_attention_mask,
             encoder_hidden_states=hidden_states,
             encoder_attention_mask=attention_mask,
-            encoder_hidden_states_for_ctx=hidden_states_for_ctx if use_decoder_ctx else None,
-            encoder_attention_mask_for_ctx=attention_mask_for_ctx if use_decoder_ctx else None,
+            encoder_hidden_states_for_ctx=hidden_states_for_ctx,
+            encoder_attention_mask_for_ctx=attention_mask_for_ctx,
             head_mask=decoder_head_mask,
             cross_attn_head_mask=cross_attn_head_mask,
             use_cache=use_cache,
@@ -1692,11 +1630,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             ctx_pred_scores=ctx_pred_scores,
             ctx_gold_scores=ctx_gold_scores,
             ctx_attention_loss=ctx_attention_loss,
-            ctx_embeddings=decoder_outputs.ctx_embeddings,
-            decoder_ctx_input_ids=decoder_ctx_input_ids if perform_retrieval else None,
-            decoder_ctx_attention_mask=decoder_ctx_attention_mask if perform_retrieval else None,
-            decoder_ctx_ids=decoder_ctx_ids if perform_retrieval else None,
-            cross_attention_mask=attention_mask if perform_retrieval else None)
+            ctx_embeddings=decoder_outputs.ctx_embeddings)
 
     def _prepare_encoder_decoder_kwargs_for_generation(
         self,
@@ -1726,6 +1660,8 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
     def prepare_inputs_for_generation(
         self,
         input_ids,
+        decoder_input_ids=None,
+        decoder_attention_mask=None,
         decoder_ctx_input_ids=None,
         past=None,
         attention_mask=None,
@@ -1735,23 +1671,16 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         cross_attn_head_mask=None,
         use_cache=None,
         encoder_outputs=None,
-        decoder_retrieval_kwargs: Dict[str, Any] = {},
-        encoder_input_ids=None,
-        idxs=None,
-        decoder_ctx_ids=None,
         **kwargs
     ):
-
-        # cut decoder_input_ids if past is used
-        previous_input_ids = None
-        if past is not None:
-            previous_input_ids = input_ids[:, :-1]
+        if decoder_input_ids is not None:  # decoder_input_ids is a special field for reencoding in decoder
+            input_ids = decoder_input_ids
+        elif past is not None:  # cut decoder_input_ids if past is used
             input_ids = input_ids[:, -1:]
 
         return {
-            "input_ids": encoder_input_ids,
             "decoder_input_ids": input_ids,
-            "decoder_input_ids_previous": previous_input_ids,
+            "decoder_attention_mask": decoder_attention_mask,
             "past_key_values": past,
             "encoder_outputs": encoder_outputs,
             "attention_mask": attention_mask,
@@ -1761,9 +1690,6 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
             "decoder_head_mask": decoder_head_mask,
             "cross_attn_head_mask": cross_attn_head_mask,
             "use_cache": use_cache,
-            "decoder_retrieval_kwargs": decoder_retrieval_kwargs,
-            "idxs": idxs,
-            "decoder_ctx_ids": decoder_ctx_ids,
         }
 
     def prepare_decoder_input_ids_from_labels(self, labels: torch.Tensor):
@@ -1821,15 +1747,6 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                 model_kwargs["attention_mask"] = torch.cat(
                     [attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=-1
                 )
-
-        # update context
-        if type(outputs) is FusionSeq2SeqLMOutput and outputs.decoder_ctx_input_ids is not None:
-            model_kwargs['decoder_ctx_input_ids'] = outputs.decoder_ctx_input_ids
-            model_kwargs['decoder_ctx_attention_mask'] = outputs.decoder_ctx_attention_mask
-
-        # update attention mask for encoder
-        if type(outputs) is FusionSeq2SeqLMOutput and outputs.cross_attention_mask is not None:
-            model_kwargs['attention_mask'] = outputs.cross_attention_mask
 
         return model_kwargs
 
@@ -1966,7 +1883,28 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
         # keep track of which sequences are already finished
         unfinished_sequences = input_ids.new(input_ids.shape[0]).fill_(1)
 
+        # retrieval kwargs
+        decoder_retrieval_kwargs = model_kwargs.get('decoder_retrieval_kwargs', {})
+        ret_frequency = decoder_retrieval_kwargs.get('frequency', 0)
+        ret_topk = decoder_retrieval_kwargs.get('topk', 1)
+        retriever = decoder_retrieval_kwargs.get('retriever', None)
+        use_gold = decoder_retrieval_kwargs.get('use_gold', False)
+        joint_encode_retrieval = decoder_retrieval_kwargs.get('joint_encode_retrieval', False)
+        merge_ctx = decoder_retrieval_kwargs.get('merge_ctx', False)
+        max_query_length = decoder_retrieval_kwargs.get('max_query_length', None)
+        retrieval_at_beginning = decoder_retrieval_kwargs.get('retrieval_at_beginning', False)
+        look_ahead = decoder_retrieval_kwargs.get('look_ahead', 0)
+        look_ahead_remain = None
+        look_ahead_cache = {}
+
         this_peer_finished = False  # used by synced_gpus only
+        ctx_ids = None  # keep track of retrieved ctxs
+        ori_hidden_states = model_kwargs['encoder_outputs'][0]
+        ori_attention_mask = model_kwargs['attention_mask']
+        encoder_input_ids = model_kwargs['encoder_input_ids']
+        qids = model_kwargs['idxs']
+        head_mask = model_kwargs.get('head_mask', None)
+
         while True:
             if synced_gpus:
                 # Under synced_gpus the `forward` call must continue until all gpus complete their sequence.
@@ -1978,9 +1916,86 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                 if this_peer_finished_flag.item() == 0.0:
                     break
 
+            gen_step = input_ids.size(1) - 1  # don't count bos
+            perform_retrieval = ret_frequency and (gen_step == 0 if retrieval_at_beginning else gen_step % ret_frequency == 0) or look_ahead_remain is not None
+            ctx_ids = self.cache.get() or ctx_ids
+
+            if perform_retrieval:
+                if look_ahead_remain is None:  # not in looking ahead
+                    look_ahead_remain = look_ahead
+
+                if look_ahead_remain == 0:  # finish looking ahead
+                    look_ahead_remain = None
+                else:
+                    if look_ahead_remain == look_ahead:  # start looking ahead, stash current states
+                        look_ahead_cache = {k: v for k, v in model_kwargs.items()}
+                        look_ahead_cache['input_ids'] = input_ids
+                        look_ahead_cache['unfinished_sequences'] = unfinished_sequences
+                    perform_retrieval = False
+                    look_ahead_remain -= 1
+
+            if perform_retrieval:  # retrieve and modify related args
+                # retrieval
+                # (bs, n_ctxs), (bs, n_ctxs, ctx_seq_length), (bs, n_ctxs, ctx_seq_length)
+                ctx_ids, ctx_input_ids, ctx_attention_mask = retriever.retrieve_and_prepare(
+                    encoder_input_ids=encoder_input_ids,
+                    decoder_input_ids=input_ids,
+                    ctx_ids=None,  # TODO: add an argument
+                    qids=qids,
+                    topk=ret_topk,
+                    max_query_length=max_query_length,
+                    use_gold=use_gold,
+                    joint_encode_retrieval=joint_encode_retrieval,
+                    merge_ctx=merge_ctx)
+
+                # revert back if neededå
+                if look_ahead > 0:
+                    input_ids = look_ahead_cache.pop('input_ids')
+                    unfinished_sequences = look_ahead_cache.pop('unfinished_sequences')
+                    model_kwargs = look_ahead_cache
+                    look_ahead_cache = {}
+
+                # modify related args
+                past_key_values = model_kwargs.get('past', None)
+                if self.encode_retrieval_in == 'decoder':
+                    if joint_encode_retrieval:
+                        batch_size, n_ctxs, ctx_seq_length = ctx_input_ids.size()
+                        assert n_ctxs == 1
+                        assert ret_frequency == 1, 'ret_frequency > 1 is not impletemed'
+                        model_kwargs['decoder_input_ids'] = ctx_input_ids.squeeze(1)
+                        model_kwargs['decoder_attention_mask'] = ctx_attention_mask.squeeze(1)
+                        if past_key_values is not None:  # remove all cache
+                            past_key_values = None
+                    else:
+                        model_kwargs['decoder_ctx_input_ids'] = ctx_input_ids
+                        model_kwargs['decoder_ctx_attention_mask'] = ctx_attention_mask
+                        if past_key_values is not None:  # remove ctx-related cache
+                            past_key_values = tuple((target_pkv, None) for target_pkv, ctx_pkv in past_key_values)
+
+                elif self.encode_retrieval_in == 'encoder':
+                    if past_key_values is not None:  # remove cross-attention cache
+                        past_key_values = tuple((target_pkv[:3] + (None, None), ctx_pkv) for target_pkv, ctx_pkv in past_key_values)
+                    # encode retrieval with encoder
+                    batch_size, n_ctxs, ctx_seq_length = ctx_input_ids.size()
+                    # (bs, n_ctxs * ctx_seq_length, dim)
+                    ctx_encoder_hidden_states = self.encoder(
+                        input_ids=ctx_input_ids.view(-1, ctx_seq_length),  # (bs * n_ctxs, ctx_seq_length)
+                        attention_mask=ctx_attention_mask.view(-1, ctx_seq_length),  # (bs * n_ctxs, ctx_seq_length)
+                        head_mask=head_mask)[0].view(batch_size, n_ctxs * ctx_seq_length, - 1)
+                    if joint_encode_retrieval:
+                        hidden_states = ctx_encoder_hidden_states  # (bs, n_ctxs * ctx_seq_length, dim)
+                        attention_mask = ctx_attention_mask.view(batch_size, -1)  # (bs, n_ctxs * ctx_seq_length)
+                    else:
+                        hidden_states = torch.cat([ori_hidden_states, ctx_encoder_hidden_states], 1)  # (bs, seq_length + n_ctxs * ctx_seq_length, dim)
+                        attention_mask = torch.cat([ori_attention_mask, ctx_attention_mask.view(batch_size, -1)], 1)  # (bs, seq_length + n_ctxs * ctx_seq_length)
+                    model_kwargs['encoder_outputs']['last_hidden_state'] = hidden_states
+                    model_kwargs['attention_mask'] = attention_mask
+                else:
+                    raise NotImplementedError
+                model_kwargs['past'] = past_key_values
+
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-            model_inputs['decoder_ctx_ids'] = self.cache.get()
 
             # forward pass to get next token
             outputs = self(
@@ -1989,23 +2004,23 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
             )
+            not_in_look_ahead = look_ahead_remain is None
 
             # output retrieval results for knnlm
             if hasattr(self, 'broken_into') and self.broken_into is not None:
-                outputs.decoder_ctx_ids = self.broken_into.idxs_at_knns.cpu().numpy().astype(np.str_)
-            self.cache.save(outputs.decoder_ctx_ids)
+                ctx_ids = self.broken_into.idxs_at_knns.cpu().numpy().astype(np.str_)
+            self.cache.save(ctx_ids)
 
             if synced_gpus and this_peer_finished:
                 continue  # don't waste resources running the code we don't need
 
-            next_token_logits = outputs.logits[:, -1, :]
-
             # pre-process distribution
+            next_token_logits = outputs.logits[:, -1, :]
             next_tokens_scores = logits_processor(input_ids, next_token_logits)
 
             # Store scores, attentions and hidden_states when required
-            if return_dict_in_generate:
-                retrieval_sequences += (outputs.decoder_ctx_ids,)
+            if return_dict_in_generate and not_in_look_ahead:
+                retrieval_sequences += (ctx_ids,)
                 if output_scores:
                     scores += (next_token_logits,)  # use the original logits
                 if output_attentions:
@@ -2043,7 +2058,7 @@ class FusionT5ForConditionalGeneration(FusionT5PreTrainedModel):  # TODO: multip
 
             # stop when each sentence is finished, or if we exceed the maximum length
             if unfinished_sequences.max() == 0 or stopping_criteria(input_ids, scores):
-                if not synced_gpus:
+                if not synced_gpus and not_in_look_ahead:
                     break
                 else:
                     this_peer_finished = True
