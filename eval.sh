@@ -21,13 +21,13 @@ export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 debug=false
 
 model=$1  # model to test
-setting=generate
-data=strategyqa_train
+setting=generate_perplexity
+data=lawmt_test
 output_dir=test
 output_file=test.jsonl
 
 # ------------- hyperparameters -------------
-use_context=true
+use_context=false
 batch_size=32
 depth=1
 
@@ -176,6 +176,46 @@ elif [[ ${data} == "strategyqa_train" ]]; then
     dstore_dir=checkpoints/strategyqa/train_beir/flant5xl/knn
     dstore_size=11240
     max_eval_samples=500
+
+elif [[ ${data} == "wiki103_test" ]]; then
+    question_prefix=""
+    encoder_input_for_context=""
+    context_prefix="Evidence: "
+    answer_prefix=""
+    metric=rouge
+    examplars=None
+    max_question_len=1024
+    max_context_len=1024
+    max_answer_len=1024
+    generation_prefix_len=0
+
+    beir_index_name=""
+    beir_dir=data/wiki103_512/test_beir
+    val_file=${beir_dir}.fid/dev.json
+    train_file=${val_file}
+    dstore_dir=checkpoints/wiki103_512/test_beir/flant5xl/knn
+    dstore_size=11240
+    max_eval_samples=235
+
+elif [[ ${data} == "lawmt_test" ]]; then
+    question_prefix=""
+    encoder_input_for_context=""
+    context_prefix="Evidence: "
+    answer_prefix=""
+    metric=rouge
+    examplars=None
+    max_question_len=1024
+    max_context_len=1024
+    max_answer_len=1024
+    generation_prefix_len=0
+
+    beir_index_name=""
+    beir_dir=data/lawmt/test_beir
+    val_file=${beir_dir}.fid/dev.json
+    train_file=${val_file}
+    dstore_dir=checkpoints/lawmt/test_beir/flant5xl/knn
+    dstore_size=11240
+    max_eval_samples=109
 
 fi
 

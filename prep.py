@@ -393,6 +393,10 @@ class BEIRDataset:
     def get_answer_strategyqa(cls, metadata: Dict) -> List[str]:
         return [metadata['answer']]
 
+    @classmethod
+    def get_answer_wiki103(cls, metadata: Dict) -> List[str]:
+        return [metadata['continue']]
+
     def load_query(self, filename: str):
         qid2meta: Dict[str, Dict] = {}
         qid2answer: Dict[str, Any] = {}
@@ -729,13 +733,47 @@ def strategyqa_to_beir(
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
+def tsv_to_beir(
+    tsv_file: str,
+    beir_dir: str,
+    split: str = 'dev',
+    dedup_question: bool = True,
+    dedup_doc: bool = True
+):
+    qid2dict: Dict[str, Dict] = {}
+    did2dict: Dict[str, Dict] = {}
+    question2qid: Dict[str, Dict] = {}
+    doc2did: Dict[str, str] = {}
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    with open(tsv_file, 'r') as fin:
+        for l in fin:
+            context, continual = l.rstrip('\n').split('\t')
+
+            if dedup_question and context in question2qid:
+                qid = question2qid[context]
+            else:
+                qid = str(len(qid2dict))
+                qid2dict[qid] = {'_id': qid, 'text': context, 'metadata': {'continue': continual}}
+                question2qid[context] = qid
+
+            if dedup_doc and continual in doc2did:
+                did = doc2did[continual]
+            else:
+                did = str(len(did2dict))
+                did2dict[did] = {'_id': did, 'title': '', 'text': continual}
+                doc2did[continual] = did
+            split2qiddid[split].append((qid, did))
+
+    save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
         'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc',
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
-        'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare', 'strategyqa_to_beir'])
+        'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare', 'strategyqa_to_beir', 'tsv_to_beir'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -784,7 +822,7 @@ if __name__ == '__main__':
         convert_beir_to_fid_format(
             beir_dir,
             out_dir,
-            dataset_name='strategyqa',
+            dataset_name='wiki103',
             splits=['dev'],
             add_self=False,
             add_self_to_the_first=False,
@@ -836,3 +874,8 @@ if __name__ == '__main__':
         strategyqa_file = args.inp[0]
         beir_dir = args.out
         strategyqa_to_beir(strategyqa_file, beir_dir, split='dev')
+
+    elif args.task == 'tsv_to_beir':
+        tsv_file = args.inp[0]
+        beir_dir = args.out
+        tsv_to_beir(tsv_file, beir_dir, split='dev')
