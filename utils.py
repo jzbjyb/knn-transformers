@@ -157,4 +157,16 @@ strategy_qa_examplars = [
         'question': "Hydrogen's atomic number squared exceeds number of Spice Girls?",
         'answer': "Hydrogen has an atomic number of 1. 1 squared is 1. There are 5 Spice Girls. Thus, Hydrogen's atomic number squared is less than 5. Therefore, the final answer is no.",
     },
+    {
+        'question': "Is it common to see frost during some college commencements?",
+        'answer': "College commencement ceremonies can happen in December, May, and June. December is in the winter, so there can be frost. Thus, there could be frost at some commencements. Therefore, the final answer is yes.",
+    },
+    {
+        'question': "Could a llama birth twice during War in Vietnam (1945-46)?",
+        'answer': "The War in Vietnam was 6 months. The gestation period for a llama is 11 months, which is more than 6 months. Thus, a llama could not give birth twice during the War in Vietnam. Therefore, the final answer is no.",
+    },
+    {
+        'question': "Would a pear sink in water?",
+        'answer': "The density of a pear is about 0.6g/cm3, which is less than water. Objects less dense than water float. Thus, a pear would float. Therefore, the final answer is no.",
+    }
 ]

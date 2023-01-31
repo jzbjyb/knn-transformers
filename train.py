@@ -798,7 +798,7 @@ def main():
         decoder_retrieval_kwargs = {
             'retriever': retriever,
             'topk': data_args.depth,
-            'frequency': 1 if data_args.use_context else 0,
+            'frequency': 16 if data_args.use_context else 0,
             'use_gold': False,
             'joint_encode_retrieval': True,
             'merge_ctx': True,

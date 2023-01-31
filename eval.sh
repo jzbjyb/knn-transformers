@@ -21,13 +21,13 @@ export WANDB_API_KEY=9caada2c257feff1b6e6a519ad378be3994bc06a
 debug=false
 
 model=$1  # model to test
-setting=generate_perplexity
-data=lawmt_test
+setting=generate
+data=strategyqa_train
 output_dir=test
 output_file=test.jsonl
 
 # ------------- hyperparameters -------------
-use_context=false
+use_context=true
 batch_size=32
 depth=1
 
@@ -168,6 +168,27 @@ elif [[ ${data} == "strategyqa_train" ]]; then
     max_context_len=128
     max_answer_len=128
     generation_prefix_len=0
+
+    beir_index_name=""
+    beir_dir=data/strategyqa/train_beir
+    val_file=${beir_dir}.fid/dev.json
+    train_file=${val_file}
+    dstore_dir=checkpoints/strategyqa/train_beir/flant5xl/knn
+    dstore_size=11240
+    max_eval_samples=500
+
+elif [[ ${data} == "strategyqa_train_3shot" ]]; then
+    #question_prefix=$'Q: Answer the following yes/no question by reasoning step-by-step.\n'
+    question_prefix="Q: "
+    encoder_input_for_context="Answer the following yes/no question by reasoning step-by-step."
+    context_prefix="Evidence: "
+    answer_prefix="A: "
+    metric=yesno
+    examplars=strategy_qa_examplars
+    max_question_len=512
+    max_context_len=128
+    max_answer_len=128
+    generation_prefix_len=2
 
     beir_index_name=""
     beir_dir=data/strategyqa/train_beir

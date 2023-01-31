@@ -11,11 +11,11 @@ from beir.retrieval.search.lexical import BM25Search
 class BM25:
     def __init__(
         self,
-        tokenizer: AutoTokenizer,
-        collator,
-        dataset: GenericDataLoader,
-        index_name: str,
-        encode_retrieval_in: str,
+        tokenizer: AutoTokenizer = None,
+        collator = None,
+        dataset: GenericDataLoader = None,
+        index_name: str = None,
+        encode_retrieval_in: str = 'encoder',
         use_encoder_input_ids: bool = False,
         use_decoder_input_ids: bool = True,
     ):
@@ -35,6 +35,8 @@ class BM25:
         self,
         encoder_input_ids: torch.LongTensor = None,  # (bs, encoder_seq_len)
         decoder_input_ids: torch.LongTensor = None,  # (bs, decoder_seq_len)
+        encoder_texts: List[str] = None,  # (bs, encoder_seq_len)
+        decoder_texts: List[str] = None,  # (bs, encoder_seq_len)
         ctx_ids: np.ndarray = None,  # (bs, topk)
         qids: np.ndarray = None,  # (bs,)
         topk: int = 1,
@@ -46,15 +48,18 @@ class BM25:
         device = None
         if self.use_encoder_input_ids and encoder_input_ids is not None:
             device = encoder_input_ids.device
-            bs = len(encoder_input_ids)
         if self.use_decoder_input_ids and decoder_input_ids is not None:
             device = decoder_input_ids.device
-            bs = len(decoder_input_ids)
 
         if self.use_encoder_input_ids and encoder_input_ids is not None:
             encoder_texts: List[str] = self.tokenizer.batch_decode(encoder_input_ids, skip_special_tokens=True)
         if self.use_decoder_input_ids and decoder_input_ids is not None:
             decoder_texts: List[str] = self.tokenizer.batch_decode(decoder_input_ids, skip_special_tokens=True)
+
+        if encoder_texts is not None:
+            bs = len(encoder_texts)
+        if decoder_texts is not None:
+            bs = len(decoder_texts)
 
         if ctx_ids is not None:  # use doc ids passed in
             docids: List[str] = ctx_ids.reshape(-1)
@@ -74,9 +79,9 @@ class BM25:
         else:
             # prepare queries
             queries: List[str] = []
-            if self.use_encoder_input_ids and encoder_input_ids is not None:
+            if self.use_encoder_input_ids and encoder_texts is not None:
                 queries = list(encoder_texts)
-            if self.use_decoder_input_ids and decoder_input_ids is not None:
+            if self.use_decoder_input_ids and decoder_texts is not None:
                 if queries:
                     assert len(queries) == len(decoder_texts), 'inconsistent length'
                     queries = [f'{q} {t}' for q, t in zip(queries, decoder_texts)]
@@ -114,6 +119,11 @@ class BM25:
                     _docs += [''] * (topk - len(_docs))
                 docids.extend(_docids)
                 docs.extend(_docs)
+
+        if device is None:
+            docids = np.array(docids).reshape(bs, topk)  # (batch_size, topk)
+            docs = np.array(docs).reshape(bs, topk)  # (batch_size, topk)
+            return docids, docs
 
         # tokenize
         if joint_encode_retrieval:

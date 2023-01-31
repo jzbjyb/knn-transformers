@@ -680,19 +680,21 @@ def compare(file1: str, file2: str):
             example1 = json.loads(l)
             example2 = json.loads(fin2.readline())
             q = example1['question']
-            c = example1['ctxs'][0]
-            a = example1['gold']
-            assert example1['gold'] == example2['gold']
+            c = example1['ctxs'][0] if 'ctxs' in example1 else example1['references']
+            a = example1['gold'] if 'gold' in example1 else example1['answer']
+            a2 = example2['gold'] if 'gold' in example2 else example2['answer']
+            assert a == a2
             assert example1['question'] == example2['question']
             o1 = example1['output']
             o2 = example2['output']
 
-            print('Q->', q)
-            print('C->', c)
-            print('A->', a)
-            print('1->', o1)
-            print('2->', o2)
-            input()
+            if o1 != o2:
+                print('Q->', q)
+                print('C->', c)
+                print('A->', a)
+                print('1->', o1)
+                print('2->', o2)
+                input()
 
 
 def strategyqa_to_beir(
@@ -766,6 +768,65 @@ def tsv_to_beir(
 
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
+def eval(
+    jsonl_file: str,
+    anchor_text: str = 'So the answer is',
+    retrieval_percentiles: List[Union[int, float]] = [1, 0.25, 0.5, 0.75, 1.0],
+    beir_dir: str = None,
+):
+    if beir_dir is not None:
+        corpus, queries, qrels = GenericDataLoader(data_folder=beir_dir).load(split='dev')
+
+    correct = incorrect = wrongformat = total = 0
+    ret_accs: List[List[float]] = []
+    ret_covers: List[List[float]] = []
+    lens: List[int] = []
+    with open(jsonl_file, 'r') as fin:
+        for l in fin:
+            total += 1
+            l = json.loads(l)
+            qid = l['qid']
+            ans = l['answer']
+            pred = l['output'].split('\n', 1)[0].strip()
+            ret_dids = np.array(l['retrieval'], dtype=np.str_)
+            lens.append(len(pred))
+
+            # yes/no
+            position = pred.find(anchor_text)
+            if position == -1:
+                wrongformat += 1
+            elif ans.strip().lower() in pred[position + len(anchor_text):].strip().lower():
+                correct += 1
+            else:
+                incorrect += 1
+
+            # retrieval
+            ret_accs.append([])
+            ret_covers.append([])
+            if ret_dids is not None:
+                ret_seq_len = len(ret_dids)
+                rel_dids: List[str] = np.array([d for d, r in qrels[qid].items() if r])
+                rels = np.isin(ret_dids, rel_dids).any(-1)  # (ret_seq_len)
+                prev_pt = 0
+                for pt in retrieval_percentiles:
+                    if type(pt) is int:
+                        pass
+                    elif type(pt) is float:
+                        pt = int(ret_seq_len * pt)
+                    else:
+                        raise NotImplementedError
+                    if pt <= prev_pt:  # at least one token
+                        pt = prev_pt + 1
+                    ret_accs[-1].append(rels[prev_pt:pt].mean())
+                    ret_covers[-1].append(len(np.intersect1d(ret_dids[:pt].reshape(-1), rel_dids)) / (len(rel_dids) or 1))
+                    prev_pt = max(min(pt, ret_seq_len - 1), 0)
+
+    ret_accs = np.array(ret_accs, dtype=float).mean(0)
+    ret_covers = np.array(ret_covers, dtype=float).mean(0)
+    print('correct\tincorrect\twrongformat\tlen')
+    print(f'{correct / total }\t{incorrect / total}\t{wrongformat / total}\t{np.mean(lens)}')
+    print('retrieval acc\tcoverage')
+    print(f'{ret_accs}\t{ret_covers}')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -773,7 +834,8 @@ if __name__ == '__main__':
         'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc',
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
-        'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare', 'strategyqa_to_beir', 'tsv_to_beir'])
+        'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare',
+        'strategyqa_to_beir', 'tsv_to_beir', 'eval'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -879,3 +941,7 @@ if __name__ == '__main__':
         tsv_file = args.inp[0]
         beir_dir = args.out
         tsv_to_beir(tsv_file, beir_dir, split='dev')
+
+    elif args.task == 'eval':
+        jsonl_file = args.inp[0]
+        eval(jsonl_file, beir_dir='data/strategyqa/dev_beir')
