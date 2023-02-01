@@ -85,7 +85,8 @@ class QueryAgent:
         queries: List[str],
         params: Dict[str, Any],
     ) -> List[Tuple[str, str]]:
-        tosleep = max(5, len(queries) * 2)  # sleep at least 5 secs
+        tosleep = 3
+        expbf = 1.5
         while True:
             try:
                 responses = openai.Completion.create(
@@ -99,8 +100,7 @@ class QueryAgent:
             except openai.error.RateLimitError:  # TODO: make it exponential?
                 logging.info(f'sleep {tosleep}')
                 time.sleep(tosleep)
-        if self.model.startswith('code-'):
-            time.sleep(tosleep)
+                tosleep = tosleep ** expbf
         return generations
 
     def prompt(
@@ -179,8 +179,10 @@ class QueryAgent:
                     if self.final_stop_sym in cont:
                         cont = cont.split(self.final_stop_sym, 1)[0]
                         reason = 'stop'
+                    if len(cont) <= 0 and self.max_generation_len - max_gen_len > 0:  # TODO: why empty string are generated?
+                        cont += ' '
                     continues[i] = (cont, reason)
-                    min_cont_len = min(min_cont_len, 0)  # TODO: how to know the number of tokens generated?
+                    min_cont_len = min(min_cont_len, len(cont.split()))  # TODO: split is not the same tokenization
                 max_gen_len += min_cont_len
             else:
                 raise NotImplementedError

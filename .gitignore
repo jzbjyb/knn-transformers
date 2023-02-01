@@ -178,3 +178,4 @@ checkpoints
 data
 slurm
 .vscode
+openai_keys.sh
