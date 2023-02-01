@@ -85,7 +85,7 @@ class QueryAgent:
         queries: List[str],
         params: Dict[str, Any],
     ) -> List[Tuple[str, str]]:
-        tosleep = max(5, len(queries))  # sleep at least 5 secs
+        tosleep = max(5, len(queries) * 2)  # sleep at least 5 secs
         while True:
             try:
                 responses = openai.Completion.create(
@@ -169,27 +169,18 @@ class QueryAgent:
                     [q.format(use_ctx=True) for i, q in queries],
                     params={'max_tokens': self.max_generation_len - max_gen_len, 'stop': self.ret_boundary})
                 # used to collect the generation with ret_boundary
-                #continues_ = self.complete(
-                #    [q.format(use_ctx=True) for i, q in queries],
-                #    params={'max_tokens': self.max_generation_len - max_gen_len, 'stop': self.final_stop_sym})
-                #assert len(continues) == len(continues_)
                 min_cont_len = 100000
                 for i, (cont, reason) in enumerate(continues):
-                    #cont_ = continues_[i][0]
                     if reason == 'stop' and self.final_stop_sym not in cont:  # fake stop
-                        #if not cont_.startswith(cont):  # TODO: why
                         assert len(self.ret_boundary) == 1
                         cont += self.ret_boundary[0]
-                        #else:
-                        #    assert cont_.startswith(cont) and len(cont_) >= len(cont), f'{self.max_generation_len - max_gen_len} | {cont} | {cont_}'
-                        #    cont = cont_[:len(cont) + self.boundary_len]
                         reason = 'boundary'
                         assert len(cont) > 0, 'empty generation will cause dead lock'
                     if self.final_stop_sym in cont:
                         cont = cont.split(self.final_stop_sym, 1)[0]
                         reason = 'stop'
                     continues[i] = (cont, reason)
-                    min_cont_len = min(min_cont_len, len(cont))
+                    min_cont_len = min(min_cont_len, 0)  # TODO: how to know the number of tokens generated?
                 max_gen_len += min_cont_len
             else:
                 raise NotImplementedError

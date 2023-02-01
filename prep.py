@@ -674,7 +674,7 @@ def summary_to_beir(
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
-def compare(file1: str, file2: str):
+def compare(file1: str, file2: str, only_show_diff: bool = False):
     with open(file1) as fin1, open(file2) as fin2:
         for l in fin1:
             example1 = json.loads(l)
@@ -688,7 +688,7 @@ def compare(file1: str, file2: str):
             o1 = example1['output']
             o2 = example2['output']
 
-            if o1 != o2:
+            if not only_show_diff or o1 != o2:
                 print('Q->', q)
                 print('C->', c)
                 print('A->', a)
@@ -930,7 +930,7 @@ if __name__ == '__main__':
 
     elif args.task == 'compare':
         file1, file2 = args.inp
-        compare(file1, file2)
+        compare(file1, file2, only_show_diff=True)
 
     elif args.task == 'strategyqa_to_beir':
         strategyqa_file = args.inp[0]
