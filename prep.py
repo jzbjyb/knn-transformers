@@ -8,6 +8,7 @@ import glob
 from collections import defaultdict
 import csv
 import copy
+import evaluate
 from tqdm import tqdm
 import numpy as np
 import torch
@@ -394,6 +395,12 @@ class BEIRDataset:
         return [metadata['answer']]
 
     @classmethod
+    def get_answer_strategyqa_cot(cls, metadata: Dict) -> List[str]:
+        a = metadata['answer']
+        cot = metadata['cot']
+        return [f'{cot} Therefore, the final answer is {a}.']
+
+    @classmethod
     def get_answer_wiki103(cls, metadata: Dict) -> List[str]:
         return [metadata['continue']]
 
@@ -700,15 +707,25 @@ def compare(file1: str, file2: str, only_show_diff: bool = False):
 def strategyqa_to_beir(
     strategyqa_file: str,
     beir_dir: str,
+    prompt_file: str = None,
     split: str = 'dev',
     dedup_question: bool = True,
     dedup_doc: bool = True,
 ):
+    question2cot: Dict[str, str] = {}
+    if prompt_file:
+        with open(prompt_file, 'r') as fin:
+            for l in fin:
+                question, answer, cot = l.rstrip('\n').split('\t')
+                question, answer, cot = question.strip(), answer.strip(), cot.strip()
+                question2cot[question] = cot
+
     qid2dict: Dict[str, Dict] = {}
     did2dict: Dict[str, Dict] = {}
     question2qid: Dict[str, Dict] = {}
     doc2did: Dict[str, str] = {}
     split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+
     with open(strategyqa_file, 'r') as fin:
         data = json.load(fin)
         for example in data:
@@ -720,7 +737,8 @@ def strategyqa_to_beir(
                 qid = question2qid[question]
             else:
                 qid = str(len(qid2dict))
-                qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer}}
+                cot = question2cot[question] if prompt_file else None
+                qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer, 'cot': cot}}
                 question2qid[question] = qid
 
             for fact in example['facts']:
@@ -732,6 +750,10 @@ def strategyqa_to_beir(
                     did2dict[did] = {'_id': did, 'title': '', 'text': fact}
                     doc2did[fact] = did
                 split2qiddid[split].append((qid, did))
+
+        if prompt_file:
+            assert len(qid2dict) == len(question2cot), '#rationales != #examples'
+
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
@@ -777,25 +799,38 @@ def eval(
     if beir_dir is not None:
         corpus, queries, qrels = GenericDataLoader(data_folder=beir_dir).load(split='dev')
 
+    metric_func = evaluate.load('rouge')
+
     correct = incorrect = wrongformat = total = 0
     ret_accs: List[List[float]] = []
     ret_covers: List[List[float]] = []
-    lens: List[int] = []
+    predictions: List[str] = []
+    references: List[str] = []
     with open(jsonl_file, 'r') as fin:
         for l in fin:
             total += 1
             l = json.loads(l)
             qid = l['qid']
-            ans = l['answer']
-            pred = l['output'].split('\n', 1)[0].strip()
-            ret_dids = np.array(l['retrieval'], dtype=np.str_)
-            lens.append(len(pred))
+            question = l['question']
+            ref = l['gold_output']
+            pred = l['output'].split('\n\n', 1)[0].strip()
+            yesno_ans = l['answer']
+            if anchor_text in yesno_ans:
+                yesno_ans = yesno_ans[yesno_ans.find(anchor_text) + len(anchor_text):].strip()[:-1].strip().lower()
+            assert yesno_ans in {'yes', 'no'}
+
+            references.append(ref)
+            predictions.append(pred)
+            if 'retrieval' in l and l['retrieval']:
+                ret_dids = np.array(l['retrieval'], dtype=np.str_)
+            else:
+                ret_dids = np.array([['placeholder']], dtype=np.str_)
 
             # yes/no
             position = pred.find(anchor_text)
             if position == -1:
                 wrongformat += 1
-            elif ans.strip().lower() in pred[position + len(anchor_text):].strip().lower():
+            elif yesno_ans in pred[position + len(anchor_text):].strip().lower():
                 correct += 1
             else:
                 incorrect += 1
@@ -821,12 +856,20 @@ def eval(
                     ret_covers[-1].append(len(np.intersect1d(ret_dids[:pt].reshape(-1), rel_dids)) / (len(rel_dids) or 1))
                     prev_pt = max(min(pt, ret_seq_len - 1), 0)
 
+        # rouge
+        metrics = metric_func.compute(predictions=predictions, references=references)
+
     ret_accs = np.array(ret_accs, dtype=float).mean(0)
     ret_covers = np.array(ret_covers, dtype=float).mean(0)
-    print('correct\tincorrect\twrongformat\tlen')
-    print(f'{correct / total }\t{incorrect / total}\t{wrongformat / total}\t{np.mean(lens)}')
+    format_list = lambda arr: ', '.join(map(lambda x: '{:.3f}'.format(x), arr.tolist()))
+    print('correct\tincorrect\twrongformat')
+    print(f'{correct / total}\t{incorrect / total}\t{wrongformat / total}')
+    print('\t'.join(metrics.keys()))
+    print('\t'.join(map(str, metrics.values())))
+    print('#pred\t#gold')
+    print(f'{np.mean([len(p) for p in predictions])}\t{np.mean([len(r) for r in references])}')
     print('retrieval acc\tcoverage')
-    print(f'{ret_accs}\t{ret_covers}')
+    print(f'{format_list(ret_accs)}\t{format_list(ret_covers)}')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -884,7 +927,7 @@ if __name__ == '__main__':
         convert_beir_to_fid_format(
             beir_dir,
             out_dir,
-            dataset_name='wiki103',
+            dataset_name='strategyqa_cot',
             splits=['dev'],
             add_self=False,
             add_self_to_the_first=False,
@@ -934,8 +977,10 @@ if __name__ == '__main__':
 
     elif args.task == 'strategyqa_to_beir':
         strategyqa_file = args.inp[0]
+        if len(args.inp) > 1:
+            prompt_file = args.inp[1]
         beir_dir = args.out
-        strategyqa_to_beir(strategyqa_file, beir_dir, split='dev')
+        strategyqa_to_beir(strategyqa_file, beir_dir, prompt_file=prompt_file, split='dev')
 
     elif args.task == 'tsv_to_beir':
         tsv_file = args.inp[0]
@@ -944,4 +989,6 @@ if __name__ == '__main__':
 
     elif args.task == 'eval':
         jsonl_file = args.inp[0]
-        eval(jsonl_file, beir_dir='data/strategyqa/dev_beir')
+        eval(jsonl_file,
+            anchor_text='So the final answer is:',
+            beir_dir='data/strategyqa/train_cot_beir')

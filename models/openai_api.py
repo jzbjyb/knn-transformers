@@ -41,18 +41,17 @@ class QueryAgent:
     def __init__(
         self,
         model: str = 'code-davinci-002',
+        max_generation_len: int = 128,
         retrieval_kwargs: Dict[str, Any] = {},
     ):
         self.model = model
 
         # generation args
-        self.final_stop_sym = '\n'
-        self.max_generation_len = 128
+        self.final_stop_sym = '\n\n'
+        self.max_generation_len = max_generation_len
         self.temperature = 0
         assert self.temperature == 0, f'do not support sampling'
         self.top_p = 0
-        self.boundary_len = 1
-        assert len(self.final_stop_sym) == self.boundary_len, f'do not support boundary with {self.boundary_len} chars'
 
         # retrieval args
         self.retriever = retrieval_kwargs.get('retriever', None)
@@ -61,8 +60,6 @@ class QueryAgent:
         self.use_gold = retrieval_kwargs.get('use_gold', False)
         if self.ret_boundary:  # otherwise cannot decide when to finally stop
             assert self.final_stop_sym not in self.ret_boundary
-            for rb in self.ret_boundary:
-                assert len(rb) == self.boundary_len, f'do not support boundary with {self.boundary_len} chars'
 
         self.look_ahead_steps = retrieval_kwargs.get('look_ahead_steps', 0)
         self.look_ahead_boundary = retrieval_kwargs.get('look_ahead_boundary', 0)
@@ -94,13 +91,14 @@ class QueryAgent:
                     prompt=queries,
                     temperature=self.temperature,
                     top_p=self.top_p,
+                    logprobs=0,
                     **params)
                 generations = [(r['text'], r['finish_reason']) for r in responses['choices']]
                 break
             except openai.error.RateLimitError:  # TODO: make it exponential?
                 logging.info(f'sleep {tosleep}')
                 time.sleep(tosleep)
-                tosleep = tosleep ** expbf
+                tosleep = tosleep * expbf
         return generations
 
     def prompt(
@@ -131,7 +129,8 @@ class QueryAgent:
         queries: List[Tuple[int, Prompt]] = [(i, q) for i, q in enumerate(queries)]  # to query
         max_gen_len = 0
 
-        while len(queries) and max_gen_len < self.max_generation_len:
+        # -1 is for a bug of openai API that it only returns max_generation_len - 1 tokens
+        while len(queries) and max_gen_len < self.max_generation_len - 1:
             # retrieve
             look_aheads: List[str] = [''] * len(queries)
             if self.look_ahead_steps:  # generate a fixed number tokens for retrieval
@@ -211,13 +210,12 @@ class BaseDataset:
             use_answer: bool = False,
         ):
             q = example['question']
+            cot = example['cot']
             a = example['answer']
 
-            query = f'Q: {q}'
+            query = self.input_template(q)
             if use_answer:
-                query = f'{query}\nA: {a}'
-            else:
-                query = f'{query}\nA:'
+                query += self.output_template(cot, a)
             return query
 
         # demo
@@ -235,34 +233,81 @@ class BaseDataset:
         self.dataset = self.dataset.map(_format_for_dataset)
 
 class StrategyQA(BaseDataset):
-    examplers: List[Dict] = [
+    cot_examplers: List[Dict] = [
         {
             'question': 'Do hamsters provide food for any animals?',
-            'answer': 'Hamsters are prey animals. Prey are food for predators. Thus, hamsters provide food for some animals. So the answer is yes.',
+            'cot': 'Hamsters are prey animals. Prey are food for predators. Thus, hamsters provide food for some animals.',
+            'answer': 'yes',
         },
         {
             'question': 'Could Brooke Shields succeed at University of Pennsylvania?',
-            'answer': 'Brooke Shields went to Princeton University. Princeton University is about as academically rigorous as the University of Pennsylvania. Thus, Brooke Shields could also succeed at the University of Pennsylvania. So the answer is yes.',
+            'cot': 'Brooke Shields went to Princeton University. Princeton University is about as academically rigorous as the University of Pennsylvania. Thus, Brooke Shields could also succeed at the University of Pennsylvania.',
+            'answer': 'yes',
         },
         {
             'question': "Yes or no: Hydrogen's atomic number squared exceeds number of Spice Girls?",
-            'answer': "Hydrogen has an atomic number of 1. 1 squared is 1. There are 5 Spice Girls. Thus, Hydrogen's atomic number squared is less than 5. So the answer is no.",
+            'cot': "Hydrogen has an atomic number of 1. 1 squared is 1. There are 5 Spice Girls. Thus, Hydrogen's atomic number squared is less than 5.",
+            'answer': 'no',
         },
         {
             'question': "Yes or no: Is it common to see frost during some college commencements?",
-            'answer': "College commencement ceremonies can happen in December, May, and June. December is in the winter, so there can be frost. Thus, there could be frost at some commencements. So the answer is yes.",
+            'cot': "College commencement ceremonies can happen in December, May, and June. December is in the winter, so there can be frost. Thus, there could be frost at some commencements.",
+            'answer': 'yes',
         },
         {
             'question': "Yes or no: Could a llama birth twice during War in Vietnam (1945-46)?",
-            'answer': "The War in Vietnam was 6 months. The gestation period for a llama is 11 months, which is more than 6 months. Thus, a llama could not give birth twice during the War in Vietnam. So the answer is no.",
+            'cot': "The War in Vietnam was 6 months. The gestation period for a llama is 11 months, which is more than 6 months. Thus, a llama could not give birth twice during the War in Vietnam.",
+            'answer': 'no',
         },
         {
             'question': "Yes or no: Would a pear sink in water?",
-            'answer': "The density of a pear is about 0.6g/cm^3, which is less than water. Objects less dense than water float. Thus, a pear would float. So the answer is no.",
+            'cot': "The density of a pear is about 0.6g/cm^3, which is less than water. Objects less dense than water float. Thus, a pear would float.",
+            'answer': 'no',
         }
     ]
+    cot_input_template = lambda self, ques: f'Q: {ques}\nA:'
+    cot_output_template = lambda self, cot, ans: f'{cot} So the answer is {ans}.'
 
-    def __init__(self, beir_dir: str):
+    sa_examplers: List[Dict] = [
+        {
+            'question': 'Do hamsters provide food for any animals?',
+            'cot': 'Follow up: What types of animal are hamsters?\nIntermediate answer: Hamsters are prey animals.\nFollow up: Do prey provide food for any other animals?\nIntermediate answer: Prey are food for predators.',
+            'answer': 'yes',
+        },
+        {
+            'question': 'Could Brooke Shields succeed at University of Pennsylvania?',
+            'cot': 'Follow up: What college did Brooke Shields go to?\nIntermediate answer: Brooke Shields went to Princeton University.\nFollow up: Out of all colleges in the US, how is Princeton University ranked?\nIntermediate answer: Princeton is ranked as the number 1 national college by US news.\nFollow up: Out of all colleges in the US, how is University of Pennsylvania ranked?\nIntermediate answer: University of Pennsylvania is ranked as number 6 national college by US news.\nFollow up: Is the ranking of University of Pennsylvania similar to Princeton University?\nIntermediate answer: Princeton University is about as academically rigorous as the University of Pennsylvania. Thus, Brooke Shields could also succeed at the University of Pennsylvania.',
+            'answer': 'yes',
+        },
+        {
+            'question': "Hydrogen's atomic number squared exceeds number of Spice Girls?",
+            'cot': "Follow up: What is the atomic number of hydrogen?\nIntermediate answer: Hydrogen has an atomic number of 1.\nFollow up: How many people are in the Spice Girls band?\nIntermediate answer: There are 5 Spice Girls.\nFollow up: Is the square of 1 greater than 5?\nIntermediate answer: 1 squared is 1. Thus, Hydrogen's atomic number squared is less than 5.",
+            'answer': 'no',
+        },
+        {
+            'question': "Is it common to see frost during some college commencements?",
+            'cot': "Follow up: What seasons can you expect see frost?\nIntermediate answer: Frost usually can be seen in the winter.\nFollow up: What months do college commencements occur?\nIntermediate answer: College commencement ceremonies can happen in December, May, and June.\nFollow up: Do any of December, May, and June occur during winter?\nIntermediate answer: December is in the winter, so there can be frost. Thus, there could be frost at some commencements.",
+            'answer': 'yes',
+        },
+        {
+            'question': "Could a llama birth twice during War in Vietnam (1945-46)?",
+            'cot': "Follow up: How long did the Vietnam war last?\nIntermediate answer: The War in Vietnam was 6 months.\nFollow up: How long is llama gestational period?\nIntermediate answer: The gestation period for a llama is 11 months.\nFollow up: What is 2 times 11 months?\nIntermediate answer: 2 times 11 months is 22 months.\nFollow up: Is 6 months longer than 22 months?\nIntermediate answer: 6 months is not longer than 22 months.",
+            'answer': 'no',
+        },
+        {
+            'question': "Would a pear sink in water?",
+            'cot': "Follow up: What is the density of a pear?\nIntermediate answer: The density of a pear is about 0.59 g/cm^3.\nFollow up: What is the density of water?\nIntermediate answer: The density of water is about 1 g/cm^3.\nFollow up: Is 0.59 g/cm^3 greater than 1 g/cm^3?\nIntermediate answer: 0.59 g/cm^3 is not greater than 1 g/cm^3? Thus, a pear would float.",
+            'answer': 'no',
+        }
+    ]
+    sa_input_template = lambda self, ques: f'Question: {ques}\n'
+    sa_output_template = lambda self, cot, ans: f'{cot}\nSo the final answer is: {ans}.'
+
+    def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
+        assert prompt_type in {'cot', 'sa'}
+        self.input_template = getattr(self, f'{prompt_type}_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplers = getattr(self, f'{prompt_type}_examplers')
         self.dataset = self.load_data(beir_dir)
 
     def load_data(self, beir_dir: str):
@@ -273,12 +318,18 @@ class StrategyQA(BaseDataset):
             for l in fin:
                 example = json.loads(l)
                 qid = example['_id']
+                question = example['text']
+                cot = example['metadata']['cot']
+                ans = example['metadata']['answer']
                 rel_dids = [did for did, rel in qrels[qid].items() if rel]
                 rel_docs = [corpus[did]['text'] for did in rel_dids]
+                output = self.output_template(cot, ans)
                 dataset.append({
                     'qid': qid,
-                    'question': example['text'],
-                    'answer': example['metadata']['answer'],
+                    'question': question,
+                    'cot': cot,
+                    'answer': ans,
+                    'gold_output': output,
                     'references': rel_docs,
                 })
         return Dataset.from_list(dataset)
@@ -295,6 +346,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--max_num_examples', type=int, default=None)
     parser.add_argument('--fewshot', type=int, default=6)
+    parser.add_argument('--max_generation_len', type=int, default=128)
 
     parser.add_argument('--seed', type=int, default=2022)
     args = parser.parse_args()
@@ -303,7 +355,7 @@ if __name__ == '__main__':
 
     # load data
     if args.dataset == 'strategyqa':
-        data = StrategyQA(args.input)
+        data = StrategyQA(args.input, prompt_type='sa')
         data.format(fewshot=args.fewshot)
     else:
         raise NotImplementedError
@@ -338,15 +390,18 @@ if __name__ == '__main__':
         'retriever': retriever,
         'topk': 1,
         'frequency': 0,
-        'boundary': ['.'],
+        'boundary': [],
         'use_gold': False,
         'max_query_length': 16,
         'retrieval_at_beginning': False,
         'look_ahead_steps': 0,
-        'look_ahead_boundary': ['.', '\n'],
-        'only_use_look_ahead': True,
+        'look_ahead_boundary': [],
+        'only_use_look_ahead': False,
     }
-    qagent = QueryAgent(model=args.model, retrieval_kwargs=retrieval_kwargs)
+    qagent = QueryAgent(
+        model=args.model,
+        max_generation_len=args.max_generation_len,
+        retrieval_kwargs=retrieval_kwargs)
 
     # query
     if os.path.dirname(args.output):

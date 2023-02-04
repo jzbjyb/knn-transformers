@@ -127,6 +127,9 @@ def yesno_metric(
     for pred, ref in zip(predictions, references):
         ref = ref.lower().strip()
         pred = pred.strip().lower()
+        if anchor_text in ref:
+            ref = ref[ref.find(anchor_text) + len(anchor_text):].strip()[:-1]
+            assert ref in {'yes', 'no'}
         if anchor_text not in pred:
             metrics['formaterror'] += 1
         else:

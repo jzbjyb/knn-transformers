@@ -798,7 +798,7 @@ def main():
         decoder_retrieval_kwargs = {
             'retriever': retriever,
             'topk': data_args.depth,
-            'frequency': 16 if data_args.use_context else 0,
+            'frequency': 1 if data_args.use_context else 0,
             'use_gold': False,
             'joint_encode_retrieval': True,
             'merge_ctx': True,
@@ -1100,11 +1100,16 @@ def main():
                 n_chars_pred = np.mean([len(p) for p in predictions])
                 n_chars_labels = np.mean([len(l) for l in labels])
 
-                if data_args.metric in {'rouge'}:
-                    metric_func = evaluate.load('rouge')
-                    metrics = metric_func.compute(predictions=predictions, references=labels)
-                elif data_args.metric == 'yesno':
-                    metrics = yesno_metric(predictions=predictions, references=labels)
+                metrics = {}
+                data_args.metric = data_args.metric.split(',')
+                for dam in data_args.metric:
+                    if dam in {'rouge'}:
+                        metric_func = evaluate.load('rouge')
+                        metrics.update(metric_func.compute(predictions=predictions, references=labels))
+                    elif dam == 'yesno':
+                        metrics.update(yesno_metric(predictions=predictions, references=labels))
+                    else:
+                        raise NotImplementedError
 
                 print(f'#examples {len(validation_dataset)}, metric:')
                 print('\t'.join(metrics.keys()) + '\t#chars_pred\t#chars_gold')
