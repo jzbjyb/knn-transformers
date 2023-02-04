@@ -829,6 +829,8 @@ def eval(
             # yes/no
             position = pred.find(anchor_text)
             if position == -1:
+                #print(json.dumps(l, indent=True))
+                #input()
                 wrongformat += 1
             elif yesno_ans in pred[position + len(anchor_text):].strip().lower():
                 correct += 1

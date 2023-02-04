@@ -19,23 +19,41 @@ from .retriever import BM25
 
 logging.basicConfig(level=logging.INFO)
 
-class Prompt:
-    def __init__(self, demo: List[str] = [], ctx: str = '', case: str = ''):
+class CtxPrompt:
+    ctx_position = 'before_case'
+
+    def __init__(self, demo: List["CtxPrompt"] = [], ctx: str = None, case: str = None):
         self.demo = demo
         self.ctx = ctx
         self.case = case
 
     @classmethod
     def from_dict(cls, adict):
+        adict = dict(adict)
+        if 'demo' in adict:
+            adict['demo'] = [cls.from_dict(d) for d in adict['demo']]
         return cls(**{k: adict[k] for k in ['demo', 'ctx', 'case'] if k in adict})
 
-    def __str__(self):
-        return '\n\n'.join(self.demo) + '\n\n' + 'Evidence: ' + self.ctx + '\n' + self.case
-
     def format(self, use_ctx: bool = False):
+        demo_formatted: List[str] = [d.format(use_ctx=use_ctx) for d in self.demo]
+        use_ctx = use_ctx and self.ctx
         if use_ctx:
-            return '\n\n'.join(self.demo) + '\n\n' + 'Evidence: ' + self.ctx + '\n' + self.case
-        return '\n\n'.join(self.demo) + '\n\n' + self.case
+            if self.ctx_position == 'begin':
+                if len(demo_formatted):
+                    return 'Evidence: ' + self.ctx + '\n\n' + '\n\n'.join(demo_formatted) + '\n\n' + self.case
+                else:
+                    return 'Evidence: ' + self.ctx + '\n' + self.case
+            elif self.ctx_position == 'before_case':
+                if len(demo_formatted):
+                    return '\n\n'.join(demo_formatted) + '\n\n' + 'Evidence: ' + self.ctx + '\n' + self.case
+                else:
+                    return 'Evidence: ' + self.ctx + '\n' + self.case
+            else:
+                raise NotImplementedError
+        if len(demo_formatted):
+            return '\n\n'.join(demo_formatted) + '\n\n' + self.case
+        else:
+            return self.case
 
 class QueryAgent:
     def __init__(
@@ -103,7 +121,7 @@ class QueryAgent:
 
     def prompt(
         self,
-        queries: List[Prompt],
+        queries: List[CtxPrompt],
     ):
         if self.use_retrieval:
             if self.use_gold:  # directly generate all with gold context
@@ -121,12 +139,12 @@ class QueryAgent:
 
     def ret_prompt(
         self,
-        queries: List[Prompt],
+        queries: List[CtxPrompt],
     ):
         batch_size = len(queries)
         final_retrievals: List[List[List[str]]] = [[] for _ in range(len(queries))]  # (bs, n_ret_steps, ret_topk)
         final_outputs: List[str] = [''] * len(queries)
-        queries: List[Tuple[int, Prompt]] = [(i, q) for i, q in enumerate(queries)]  # to query
+        queries: List[Tuple[int, CtxPrompt]] = [(i, q) for i, q in enumerate(queries)]  # to query
         max_gen_len = 0
 
         # -1 is for a bug of openai API that it only returns max_generation_len - 1 tokens
@@ -219,7 +237,10 @@ class BaseDataset:
             return query
 
         # demo
-        demo = [_format(self.examplers[i], use_answer=True) for i in range(fewshot)] if fewshot else []
+        demo = [{
+            'case': _format(self.examplers[i], use_answer=True),
+            'ctx': ' '.join(self.examplers[i]['ctx']) if 'ctx' in self.examplers[i] else None,
+        } for i in range(fewshot)] if fewshot else []
 
         def _format_for_dataset(example):
             # case
@@ -236,32 +257,45 @@ class StrategyQA(BaseDataset):
     cot_examplers: List[Dict] = [
         {
             'question': 'Do hamsters provide food for any animals?',
-            'cot': 'Hamsters are prey animals. Prey are food for predators. Thus, hamsters provide food for some animals.',
+            'cot': ('Hamsters are prey animals. '
+                'Prey are food for predators. '
+                'Thus, hamsters provide food for some animals.'),
             'answer': 'yes',
         },
         {
             'question': 'Could Brooke Shields succeed at University of Pennsylvania?',
-            'cot': 'Brooke Shields went to Princeton University. Princeton University is about as academically rigorous as the University of Pennsylvania. Thus, Brooke Shields could also succeed at the University of Pennsylvania.',
+            'cot': ('Brooke Shields went to Princeton University. '
+                'Princeton University is about as academically rigorous as the University of Pennsylvania. '
+                'Thus, Brooke Shields could also succeed at the University of Pennsylvania.'),
             'answer': 'yes',
         },
         {
             'question': "Yes or no: Hydrogen's atomic number squared exceeds number of Spice Girls?",
-            'cot': "Hydrogen has an atomic number of 1. 1 squared is 1. There are 5 Spice Girls. Thus, Hydrogen's atomic number squared is less than 5.",
+            'cot': ("Hydrogen has an atomic number of 1. "
+                "1 squared is 1. "
+                "There are 5 Spice Girls. "
+                "Thus, Hydrogen's atomic number squared is less than 5."),
             'answer': 'no',
         },
         {
             'question': "Yes or no: Is it common to see frost during some college commencements?",
-            'cot': "College commencement ceremonies can happen in December, May, and June. December is in the winter, so there can be frost. Thus, there could be frost at some commencements.",
+            'cot': ("College commencement ceremonies can happen in December, May, and June. "
+                "December is in the winter, so there can be frost. "
+                "Thus, there could be frost at some commencements."),
             'answer': 'yes',
         },
         {
             'question': "Yes or no: Could a llama birth twice during War in Vietnam (1945-46)?",
-            'cot': "The War in Vietnam was 6 months. The gestation period for a llama is 11 months, which is more than 6 months. Thus, a llama could not give birth twice during the War in Vietnam.",
+            'cot': ("The War in Vietnam was 6 months. "
+                "The gestation period for a llama is 11 months, which is more than 6 months. "
+                "Thus, a llama could not give birth twice during the War in Vietnam."),
             'answer': 'no',
         },
         {
             'question': "Yes or no: Would a pear sink in water?",
-            'cot': "The density of a pear is about 0.6g/cm^3, which is less than water. Objects less dense than water float. Thus, a pear would float.",
+            'cot': ("The density of a pear is about 0.6g/cm^3, which is less than water. "
+                "Objects less dense than water float. "
+                "Thus, a pear would float."),
             'answer': 'no',
         }
     ]
@@ -271,40 +305,148 @@ class StrategyQA(BaseDataset):
     sa_examplers: List[Dict] = [
         {
             'question': 'Do hamsters provide food for any animals?',
-            'cot': 'Follow up: What types of animal are hamsters?\nIntermediate answer: Hamsters are prey animals.\nFollow up: Do prey provide food for any other animals?\nIntermediate answer: Prey are food for predators.',
+            'cot': ('Follow up: What types of animal are hamsters?\n'
+                'Intermediate answer: Hamsters are prey animals.\n'
+                'Follow up: Do prey provide food for any other animals?\n'
+                'Intermediate answer: Prey are food for predators.'),
             'answer': 'yes',
         },
         {
             'question': 'Could Brooke Shields succeed at University of Pennsylvania?',
-            'cot': 'Follow up: What college did Brooke Shields go to?\nIntermediate answer: Brooke Shields went to Princeton University.\nFollow up: Out of all colleges in the US, how is Princeton University ranked?\nIntermediate answer: Princeton is ranked as the number 1 national college by US news.\nFollow up: Out of all colleges in the US, how is University of Pennsylvania ranked?\nIntermediate answer: University of Pennsylvania is ranked as number 6 national college by US news.\nFollow up: Is the ranking of University of Pennsylvania similar to Princeton University?\nIntermediate answer: Princeton University is about as academically rigorous as the University of Pennsylvania. Thus, Brooke Shields could also succeed at the University of Pennsylvania.',
+            'cot': ('Follow up: What college did Brooke Shields go to?\n'
+                'Intermediate answer: Brooke Shields went to Princeton University.\n'
+                'Follow up: Out of all colleges in the US, how is Princeton University ranked?\n'
+                'Intermediate answer: Princeton is ranked as the number 1 national college by US news.\n'
+                'Follow up: Out of all colleges in the US, how is University of Pennsylvania ranked?\n'
+                'Intermediate answer: University of Pennsylvania is ranked as number 6 national college by US news.\n'
+                'Follow up: Is the ranking of University of Pennsylvania similar to Princeton University?\n'
+                'Intermediate answer: Princeton University is about as academically rigorous as the University of Pennsylvania. Thus, Brooke Shields could also succeed at the University of Pennsylvania.'),
             'answer': 'yes',
         },
         {
             'question': "Hydrogen's atomic number squared exceeds number of Spice Girls?",
-            'cot': "Follow up: What is the atomic number of hydrogen?\nIntermediate answer: Hydrogen has an atomic number of 1.\nFollow up: How many people are in the Spice Girls band?\nIntermediate answer: There are 5 Spice Girls.\nFollow up: Is the square of 1 greater than 5?\nIntermediate answer: 1 squared is 1. Thus, Hydrogen's atomic number squared is less than 5.",
+            'cot': ('Follow up: What is the atomic number of hydrogen?\n'
+                'Intermediate answer: Hydrogen has an atomic number of 1.\n'
+                'Follow up: How many people are in the Spice Girls band?\n'
+                'Intermediate answer: There are 5 Spice Girls.\n'
+                'Follow up: Is the square of 1 greater than 5?\n'
+                "Intermediate answer: 1 squared is 1. Thus, Hydrogen's atomic number squared is less than 5."),
             'answer': 'no',
         },
         {
             'question': "Is it common to see frost during some college commencements?",
-            'cot': "Follow up: What seasons can you expect see frost?\nIntermediate answer: Frost usually can be seen in the winter.\nFollow up: What months do college commencements occur?\nIntermediate answer: College commencement ceremonies can happen in December, May, and June.\nFollow up: Do any of December, May, and June occur during winter?\nIntermediate answer: December is in the winter, so there can be frost. Thus, there could be frost at some commencements.",
+            'cot': ('Follow up: What seasons can you expect see frost?\n'
+                'Intermediate answer: Frost usually can be seen in the winter.\n'
+                'Follow up: What months do college commencements occur?\n'
+                'Intermediate answer: College commencement ceremonies can happen in December, May, and June.\n'
+                'Follow up: Do any of December, May, and June occur during winter?\n'
+                'Intermediate answer: December is in the winter, so there can be frost. Thus, there could be frost at some commencements.'),
             'answer': 'yes',
         },
         {
             'question': "Could a llama birth twice during War in Vietnam (1945-46)?",
-            'cot': "Follow up: How long did the Vietnam war last?\nIntermediate answer: The War in Vietnam was 6 months.\nFollow up: How long is llama gestational period?\nIntermediate answer: The gestation period for a llama is 11 months.\nFollow up: What is 2 times 11 months?\nIntermediate answer: 2 times 11 months is 22 months.\nFollow up: Is 6 months longer than 22 months?\nIntermediate answer: 6 months is not longer than 22 months.",
+            'cot': ('Follow up: How long did the Vietnam war last?\n'
+                'Intermediate answer: The War in Vietnam was 6 months.\n'
+                'Follow up: How long is llama gestational period?\n'
+                'Intermediate answer: The gestation period for a llama is 11 months.\n'
+                'Follow up: What is 2 times 11 months?\n'
+                'Intermediate answer: 2 times 11 months is 22 months.\n'
+                'Follow up: Is 6 months longer than 22 months?\n'
+                'Intermediate answer: 6 months is not longer than 22 months.'),
             'answer': 'no',
         },
         {
             'question': "Would a pear sink in water?",
-            'cot': "Follow up: What is the density of a pear?\nIntermediate answer: The density of a pear is about 0.59 g/cm^3.\nFollow up: What is the density of water?\nIntermediate answer: The density of water is about 1 g/cm^3.\nFollow up: Is 0.59 g/cm^3 greater than 1 g/cm^3?\nIntermediate answer: 0.59 g/cm^3 is not greater than 1 g/cm^3? Thus, a pear would float.",
+            'cot': ('Follow up: What is the density of a pear?\n'
+                'Intermediate answer: The density of a pear is about 0.59 g/cm^3.\n'
+                'Follow up: What is the density of water?\n'
+                'Intermediate answer: The density of water is about 1 g/cm^3.\n'
+                'Follow up: Is 0.59 g/cm^3 greater than 1 g/cm^3?\n'
+                'Intermediate answer: 0.59 g/cm^3 is not greater than 1 g/cm^3? Thus, a pear would float.'),
+            'answer': 'no',
+        }
+    ]
+    sa_ctx_examplers: List[Dict] = [
+        {
+            'question': 'Do hamsters provide food for any animals?',
+            'ctx': ["Hamsters are prey animals.",
+                "Prey animals provide food for predators."],
+            'cot': ('Follow up: What types of animal are hamsters?\n'
+                'Hamsters are prey animals.\n'
+                'Follow up: Do prey provide food for any other animals?\n'
+                'Prey are food for predators.'),
+            'answer': 'yes',
+        },
+        {
+            'question': 'Could Brooke Shields succeed at University of Pennsylvania?',
+            'ctx': ["Brooke Shields graduated from Princeton University.",
+                "Princeton is ranked as the number 1 national college by US news.",
+                "University of Pennsylvania is ranked as number 6 national college by US news.",
+                "Princeton only admits around 6 percent of applicants as of 2018.",
+                "University of Pennsylvania accepts around 9% of applicants as of 2018."],
+            'cot': ('Follow up: What college did Brooke Shields go to?\n'
+                'Brooke Shields went to Princeton University.\n'
+                'Follow up: How is Princeton University ranked?\n'
+                'Princeton is ranked as the number 1 national college by US news.\n'
+                'Follow up: How is University of Pennsylvania ranked?\n'
+                'University of Pennsylvania is ranked as number 6 national college by US news.\n'
+                'Princeton University is about as academically rigorous as the University of Pennsylvania. Thus, Brooke Shields could also succeed at the University of Pennsylvania.'),
+            'answer': 'yes',
+        },
+        {
+            'question': "Hydrogen's atomic number squared exceeds number of Spice Girls?",
+            'ctx': ["Hydrogen is the first element and has an atomic number of one.",
+                "To square a number, you multiply it by itself.",
+                "The Spice Girls has five members."],
+            'cot': ('Follow up: What is the atomic number of hydrogen?\n'
+                'Hydrogen has an atomic number of 1.\n'
+                'Follow up: How many people are in the Spice Girls band?\n'
+                'There are 5 Spice Girls.\n'
+                "1 squared is 1. Thus, Hydrogen's atomic number squared is less than 5."),
+            'answer': 'no',
+        },
+        {
+            'question': "Is it common to see frost during some college commencements?",
+            'ctx': ["College commencement ceremonies often happen during the months of December, May, and sometimes June.",
+                "Frost isn't uncommon to see during the month of December, as it is the winter."],
+            'cot': ('Follow up: What seasons can you expect see frost?\n'
+                'Frost usually can be seen in the winter.\n'
+                'Follow up: What months do college commencements occur?\n'
+                'College commencement ceremonies can happen in December, May, and June.\n'
+                'December is in the winter, so there can be frost. Thus, there could be frost at some commencements.'),
+            'answer': 'yes',
+        },
+        {
+            'question': "Could a llama birth twice during War in Vietnam (1945-46)?",
+            'ctx': ["The War in Vietnam (1945-46) lasted around 6 months.",
+                "The gestation period for a llama is 11 months."],
+            'cot': ('Follow up: How long did the Vietnam war last?\n'
+                'The War in Vietnam was 6 months.\n'
+                'Follow up: How long is llama gestational period?\n'
+                'The gestation period for a llama is 11 months.\n'
+                '2 times 11 months is 22 months. 6 months is not longer than 22 months.'),
+            'answer': 'no',
+        },
+        {
+            'question': "Would a pear sink in water?",
+            'ctx': ["The density of a raw pear is about 0.59 g/cm^3.",
+                "The density of water is about 1 g/cm^3.",
+                "Objects only sink if they are denser than the surrounding fluid."],
+            'cot': ('Follow up: What is the density of a pear?\n'
+                'The density of a pear is about 0.59 g/cm^3.\n'
+                'Follow up: What is the density of water?\n'
+                'The density of water is about 1 g/cm^3.\n'
+                '0.59 g/cm^3 is not greater than 1 g/cm^3? Thus, a pear would float.'),
             'answer': 'no',
         }
     ]
     sa_input_template = lambda self, ques: f'Question: {ques}\n'
     sa_output_template = lambda self, cot, ans: f'{cot}\nSo the final answer is: {ans}.'
+    sa_ctx_input_template = sa_input_template
+    sa_ctx_output_template = sa_output_template
 
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'sa'}
+        assert prompt_type in {'cot', 'sa', 'sa_ctx'}
         self.input_template = getattr(self, f'{prompt_type}_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
         self.examplers = getattr(self, f'{prompt_type}_examplers')
@@ -337,7 +479,7 @@ class StrategyQA(BaseDataset):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa'])
-    parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002'])
+    parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003'])
     parser.add_argument('--input', type=str, default='.')
     parser.add_argument('--output', type=str, default='.')
     parser.add_argument('--shard_id', type=int, default=0)
@@ -355,7 +497,7 @@ if __name__ == '__main__':
 
     # load data
     if args.dataset == 'strategyqa':
-        data = StrategyQA(args.input, prompt_type='sa')
+        data = StrategyQA(args.input, prompt_type='sa_ctx')
         data.format(fewshot=args.fewshot)
     else:
         raise NotImplementedError
@@ -389,7 +531,7 @@ if __name__ == '__main__':
     retrieval_kwargs = {
         'retriever': retriever,
         'topk': 1,
-        'frequency': 0,
+        'frequency': 16,
         'boundary': [],
         'use_gold': False,
         'max_query_length': 16,
@@ -410,7 +552,7 @@ if __name__ == '__main__':
     with tqdm(total=len(data)) as pbar, open(args.output, 'w') as fout:
         for b in range(0, len(data), args.batch_size):
             batch = data.select(range(b, min(b + args.batch_size, len(data))))
-            prompts = [Prompt.from_dict(example) for example in batch]
+            prompts = [CtxPrompt.from_dict(example) for example in batch]
             generations, retrievals = qagent.prompt(prompts)
             retrievals = retrievals or [None] * len(generations)
             for example, generation, retrieval in zip(batch, generations, retrievals):
