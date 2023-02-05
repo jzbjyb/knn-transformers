@@ -8,9 +8,15 @@ num_shards=${#keys[@]}
 
 output=$1
 max_generation_len=256
-batch_size=4
+batch_size=1
 max_num_examples=250
 
+# build index
+OPENAI_API_KEY=${keys[0]} python -m models.openai_api \
+    --input data/strategyqa/train_cot_beir \
+    --build_index
+
+# query api
 if [[ ${debug} == "true" ]]; then
     okey="${keys[0]}"
     OPENAI_API_KEY=${okey} python -m models.openai_api \
