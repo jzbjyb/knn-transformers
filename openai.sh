@@ -8,7 +8,7 @@ num_shards=${#keys[@]}
 
 output=$1
 max_generation_len=256
-batch_size=1
+batch_size=8
 max_num_examples=250
 
 # build index

@@ -9,6 +9,7 @@ from collections import defaultdict
 import csv
 import copy
 import evaluate
+import re
 from tqdm import tqdm
 import numpy as np
 import torch
@@ -687,21 +688,29 @@ def compare(file1: str, file2: str, only_show_diff: bool = False):
             example1 = json.loads(l)
             example2 = json.loads(fin2.readline())
             q = example1['question']
-            c = example1['ctxs'][0] if 'ctxs' in example1 else example1['references']
-            a = example1['gold'] if 'gold' in example1 else example1['answer']
-            a2 = example2['gold'] if 'gold' in example2 else example2['answer']
-            assert a == a2
+            c = example1['ctxs'] if 'ctxs' in example1 else example1['references']
+            a = example1['gold_output'] if 'gold_output' in example1 else example1['answer']
+            a2 = example2['gold_output'] if 'gold_output' in example2 else example2['answer']
+            assert a == a2, f'{example1}\n{example2}'
             assert example1['question'] == example2['question']
             o1 = example1['output']
             o2 = example2['output']
+            r1 = example1['retrieval']
+            r2 = example2['retrieval']
 
             if not only_show_diff or o1 != o2:
                 print('Q->', q)
                 print('C->', c)
                 print('A->', a)
+                print('')
+
+                print('1->', r1)
                 print('1->', o1)
+                print('')
+
+                print('2->', r2)
                 print('2->', o2)
-                input()
+                input('')
 
 
 def strategyqa_to_beir(
@@ -794,6 +803,7 @@ def eval(
     jsonl_file: str,
     anchor_text: str = 'So the answer is',
     retrieval_percentiles: List[Union[int, float]] = [1, 0.25, 0.5, 0.75, 1.0],
+    remove_followup: Tuple[str, str] = ('Follow up:', '?'),
     beir_dir: str = None,
 ):
     if beir_dir is not None:
@@ -805,6 +815,7 @@ def eval(
     ret_accs: List[List[float]] = []
     ret_covers: List[List[float]] = []
     predictions: List[str] = []
+    followups: List[str] = []
     references: List[str] = []
     with open(jsonl_file, 'r') as fin:
         for l in fin:
@@ -814,6 +825,12 @@ def eval(
             question = l['question']
             ref = l['gold_output']
             pred = l['output'].split('\n\n', 1)[0].strip()
+            if remove_followup:
+                raw_pred = pred
+                rms, rme = remove_followup
+                pred = re.sub(f'{rms}[^\{rme}]*\{rme}', '', raw_pred)
+                fu = ' '.join(re.findall(f'{rms}[^\{rme}]*\{rme}', raw_pred))
+                followups.append(fu)
             yesno_ans = l['answer']
             if anchor_text in yesno_ans:
                 yesno_ans = yesno_ans[yesno_ans.find(anchor_text) + len(anchor_text):].strip()[:-1].strip().lower()
@@ -822,15 +839,13 @@ def eval(
             references.append(ref)
             predictions.append(pred)
             if 'retrieval' in l and l['retrieval']:
-                ret_dids = np.array(l['retrieval'], dtype=np.str_)
+                ret_dids = np.array([r if type(r[0]) is str else r[0] for r in l['retrieval']], dtype=np.str_)
             else:
                 ret_dids = np.array([['placeholder']], dtype=np.str_)
 
             # yes/no
             position = pred.find(anchor_text)
             if position == -1:
-                #print(json.dumps(l, indent=True))
-                #input()
                 wrongformat += 1
             elif yesno_ans in pred[position + len(anchor_text):].strip().lower():
                 correct += 1
@@ -860,16 +875,29 @@ def eval(
 
         # rouge
         metrics = metric_func.compute(predictions=predictions, references=references)
+        if remove_followup:
+            metrics_followup = metric_func.compute(predictions=followups, references=references)
 
     ret_accs = np.array(ret_accs, dtype=float).mean(0)
     ret_covers = np.array(ret_covers, dtype=float).mean(0)
     format_list = lambda arr: ', '.join(map(lambda x: '{:.3f}'.format(x), arr.tolist()))
     print('correct\tincorrect\twrongformat')
     print(f'{correct / total}\t{incorrect / total}\t{wrongformat / total}')
+    print('')
+
     print('\t'.join(metrics.keys()))
     print('\t'.join(map(str, metrics.values())))
     print('#pred\t#gold')
     print(f'{np.mean([len(p) for p in predictions])}\t{np.mean([len(r) for r in references])}')
+    print('')
+
+    if remove_followup:
+        print('\t'.join(metrics_followup.keys()))
+        print('\t'.join(map(str, metrics_followup.values())))
+        print('#pred\t#gold')
+        print(f'{np.mean([len(p) for p in followups])}\t{np.mean([len(r) for r in references])}')
+        print('')
+
     print('retrieval acc\tcoverage')
     print(f'{format_list(ret_accs)}\t{format_list(ret_covers)}')
 
