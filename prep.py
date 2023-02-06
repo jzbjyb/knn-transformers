@@ -829,8 +829,9 @@ def eval(
             # yes/no
             position = pred.find(anchor_text)
             if position == -1:
-                #print(json.dumps(l, indent=True))
-                #input()
+                print(anchor_text)
+                print(pred)
+                input()
                 wrongformat += 1
             elif yesno_ans in pred[position + len(anchor_text):].strip().lower():
                 correct += 1
@@ -992,5 +993,5 @@ if __name__ == '__main__':
     elif args.task == 'eval':
         jsonl_file = args.inp[0]
         eval(jsonl_file,
-            anchor_text='So the final answer is:',
-            beir_dir='data/strategyqa/train_cot_beir')
+            anchor_text='answer is',
+            beir_dir='/projects/metis1/users/zhengbaj/exp/knn-transformers/data/strategyqa/train_cot_beir')

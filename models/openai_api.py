@@ -65,11 +65,11 @@ class QueryAgent:
         self.model = model
 
         # generation args
-        self.final_stop_sym = '\n\n'
+        self.final_stop_sym = 'Question:'
         self.max_generation_len = max_generation_len
         self.temperature = 0
         assert self.temperature == 0, f'do not support sampling'
-        self.top_p = 0
+        self.top_p = 1
 
         # retrieval args
         self.retriever = retrieval_kwargs.get('retriever', None)
@@ -111,9 +111,15 @@ class QueryAgent:
                     top_p=self.top_p,
                     logprobs=0,
                     **params)
-                generations = [(r['text'], r['finish_reason']) for r in responses['choices']]
+                if 'openai' in openai.api_base:
+                    # GPT3 api
+                    generations = [(r['text'], r['finish_reason']) for r in responses['choices']]
+                else:
+                    # OPT API
+                    generations = [(r['text'], r['logprobs']['finish_reason']) for r in responses['choices']]
+
                 break
-            except openai.error.RateLimitError:  # TODO: make it exponential?
+            except openai.error.RateLimitError:
                 logging.info(f'sleep {tosleep}')
                 time.sleep(tosleep)
                 tosleep = tosleep * expbf
@@ -445,8 +451,80 @@ class StrategyQA(BaseDataset):
     sa_ctx_input_template = sa_input_template
     sa_ctx_output_template = sa_output_template
 
+    sa_ctx_nofollow_examplers: List[Dict] = [
+        {
+            'question': 'Do hamsters provide food for any animals?',
+            'ctx': ["Hamsters are prey animals.",
+                "Prey animals provide food for predators."],
+            'cot': (
+                'Hamsters are prey animals.\n'
+                'Prey are food for predators.'),
+            'answer': 'yes',
+        },
+        {
+            'question': 'Could Brooke Shields succeed at University of Pennsylvania?',
+            'ctx': ["Brooke Shields graduated from Princeton University.",
+                "Princeton is ranked as the number 1 national college by US news.",
+                "University of Pennsylvania is ranked as number 6 national college by US news.",
+                "Princeton only admits around 6 percent of applicants as of 2018.",
+                "University of Pennsylvania accepts around 9% of applicants as of 2018."],
+            'cot': (
+                'Brooke Shields went to Princeton University.\n'
+                'Princeton is ranked as the number 1 national college by US news.\n'
+                'University of Pennsylvania is ranked as number 6 national college by US news.\n'
+                'Princeton University is about as academically rigorous as the University of Pennsylvania. Thus, Brooke Shields could also succeed at the University of Pennsylvania.'),
+            'answer': 'yes',
+        },
+        {
+            'question': "Hydrogen's atomic number squared exceeds number of Spice Girls?",
+            'ctx': ["Hydrogen is the first element and has an atomic number of one.",
+                "To square a number, you multiply it by itself.",
+                "The Spice Girls has five members."],
+            'cot': (
+                'Hydrogen has an atomic number of 1.\n'
+                'There are 5 Spice Girls.\n'
+                "1 squared is 1. Thus, Hydrogen's atomic number squared is less than 5."),
+            'answer': 'no',
+        },
+        {
+            'question': "Is it common to see frost during some college commencements?",
+            'ctx': ["College commencement ceremonies often happen during the months of December, May, and sometimes June.",
+                "Frost isn't uncommon to see during the month of December, as it is the winter."],
+            'cot': (
+                'Frost usually can be seen in the winter.\n'
+                'College commencement ceremonies can happen in December, May, and June.\n'
+                'December is in the winter, so there can be frost. Thus, there could be frost at some commencements.'),
+            'answer': 'yes',
+        },
+        {
+            'question': "Could a llama birth twice during War in Vietnam (1945-46)?",
+            'ctx': ["The War in Vietnam (1945-46) lasted around 6 months.",
+                "The gestation period for a llama is 11 months."],
+            'cot': (
+                'The War in Vietnam was 6 months.\n'
+                'The gestation period for a llama is 11 months.\n'
+                '2 times 11 months is 22 months. 6 months is not longer than 22 months.'),
+            'answer': 'no',
+        },
+        {
+            'question': "Would a pear sink in water?",
+            'ctx': ["The density of a raw pear is about 0.59 g/cm^3.",
+                "The density of water is about 1 g/cm^3.",
+                "Objects only sink if they are denser than the surrounding fluid."],
+            'cot': (
+                'The density of a pear is about 0.59 g/cm^3.\n'
+                'The density of water is about 1 g/cm^3.\n'
+                '0.59 g/cm^3 is not greater than 1 g/cm^3? Thus, a pear would float.'),
+            'answer': 'no',
+        }
+    ]
+
+    sa_ctx_nofollow_input_template = sa_input_template
+    sa_ctx_nofollow_output_template = sa_output_template
+
+
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'sa', 'sa_ctx'}
+        assert prompt_type in {'cot', 'sa', 'sa_ctx', 'sa_ctx_nofollow'}
         self.input_template = getattr(self, f'{prompt_type}_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
         self.examplers = getattr(self, f'{prompt_type}_examplers')
@@ -497,7 +575,7 @@ if __name__ == '__main__':
 
     # load data
     if args.dataset == 'strategyqa':
-        data = StrategyQA(args.input, prompt_type='sa_ctx')
+        data = StrategyQA(args.input, prompt_type='sa')
         data.format(fewshot=args.fewshot)
     else:
         raise NotImplementedError
@@ -528,10 +606,16 @@ if __name__ == '__main__':
         dataset=(corpus, queries, qrels),
         index_name=index_name,
         use_decoder_input_ids=True)
+
+    # no ret: freq 0, boundary [], use gold false
+    # gold ret: freq 0, boundary [], use gold true
+    # ret once: freq 0, boundary [], use gold false, retrieval_at_beginning': True
+    # ret every 16 tokens: freq 16, boundary [], use gold false
+
     retrieval_kwargs = {
         'retriever': retriever,
         'topk': 1,
-        'frequency': 16,
+        'frequency': 0,
         'boundary': [],
         'use_gold': False,
         'max_query_length': 16,
