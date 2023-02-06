@@ -83,6 +83,9 @@ class QueryAgent:
         self.look_ahead_boundary = retrieval_kwargs.get('look_ahead_boundary', 0)
         self.max_query_length = retrieval_kwargs.get('max_query_length', None)
         self.only_use_look_ahead = retrieval_kwargs.get('only_use_look_ahead', False)
+        self.retrieval_trigers = retrieval_kwargs.get('retrieval_trigers', [])
+        for rts, rte in self.retrieval_trigers:
+            assert rte in self.ret_boundary, 'end of retrieval trigers must be used as boundary'
 
         self.ret_topk = retrieval_kwargs.get('topk', 1)
 
@@ -100,6 +103,8 @@ class QueryAgent:
         queries: List[str],
         params: Dict[str, Any],
     ) -> List[Tuple[str, str]]:
+        if 'max_tokens' in params:  # TODO: opt doesn't have this bug
+            params['max_tokens'] = max(2, params['max_tokens'])  # openai returns nothing if set to 1
         tosleep = 3
         expbf = 1.5
         while True:
@@ -153,8 +158,8 @@ class QueryAgent:
         queries: List[Tuple[int, CtxPrompt]] = [(i, q) for i, q in enumerate(queries)]  # to query
         max_gen_len = 0
 
-        # -1 is for a bug of openai API that it only returns max_generation_len - 1 tokens
-        while len(queries) and max_gen_len < self.max_generation_len - 1:
+        generate_queries: List[str] = []
+        while len(queries) and max_gen_len < self.max_generation_len:
             # retrieve
             look_aheads: List[str] = [''] * len(queries)
             if self.look_ahead_steps:  # generate a fixed number tokens for retrieval
@@ -169,17 +174,32 @@ class QueryAgent:
                 look_aheads = [cont for cont, _ in continues]
             assert len(look_aheads) == len(queries)
 
-            # (bs, ret_topk) * 2
-            ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
-                decoder_texts=[
-                    (q.case + lh) if self.only_use_look_ahead else q.case
-                    for (i, q), lh in zip(queries, look_aheads)],
-                topk=self.ret_topk,
-                max_query_length=self.max_query_length)
-            for _i, (i, q) in enumerate(queries):
-                final_retrievals[i].append(ctx_ids[_i].tolist())
-                assert self.ret_topk == 1
-                q.ctx = ctx_texts[_i][0]
+            # send queries to index
+            if generate_queries:  # some queries might be None which means no queries are generated
+                queries_to_issue = [gq for gq in generate_queries if gq]
+            else:
+                queries_to_issue = [(q.case + lh) if self.only_use_look_ahead else q.case
+                    for (i, q), lh in zip(queries, look_aheads)]
+            if queries_to_issue:
+                # (bs, ret_topk) * 2
+                ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
+                    decoder_texts=queries_to_issue,
+                    topk=self.ret_topk,
+                    max_query_length=self.max_query_length)
+                idx = -1
+                for _i, (i, q) in enumerate(queries):
+                    assert self.ret_topk == 1
+                    if generate_queries:
+                        if generate_queries[_i]:
+                            idx += 1
+                            ret_id, ret_text = ctx_ids[idx].tolist(), ctx_texts[idx][0]
+                            final_retrievals[i].append(ret_id)
+                            q.ctx = ret_text
+                    else:
+                        ret_id, ret_text = ctx_ids[_i].tolist(), ctx_texts[_i][0]
+                        final_retrievals[i].append(ret_id)
+                        q.ctx = ret_text
+            generate_queries = []
 
             # complete
             if self.ret_frequency:
@@ -194,16 +214,26 @@ class QueryAgent:
                 # used to collect the generation with ret_boundary
                 min_cont_len = 100000
                 for i, (cont, reason) in enumerate(continues):
-                    if reason == 'stop' and self.final_stop_sym not in cont:  # fake stop
+                    if reason == 'stop' and self.final_stop_sym not in cont:  # stop at ret_boundary
                         assert len(self.ret_boundary) == 1
                         cont += self.ret_boundary[0]
                         reason = 'boundary'
                         assert len(cont) > 0, 'empty generation will cause dead lock'
+                        if self.retrieval_trigers:  # extract queries from generation
+                            assert len(self.retrieval_trigers) == 1
+                            # TODO: check if it stops at retrieval trigers
+                            ret_tri_start = self.retrieval_trigers[0][0]
+                            ret_start = cont.find(ret_tri_start)
+                            if ret_start != -1:
+                                generate_queries.append(cont[ret_start + len(ret_tri_start):].strip())
+                            else:
+                                generate_queries.append(None)
+                    else:
+                        if self.retrieval_trigers:
+                            generate_queries.append(None)
                     if self.final_stop_sym in cont:
                         cont = cont.split(self.final_stop_sym, 1)[0]
                         reason = 'stop'
-                    if len(cont) <= 0 and self.max_generation_len - max_gen_len > 0:  # TODO: why empty string are generated?
-                        cont += ' '
                     continues[i] = (cont, reason)
                     min_cont_len = min(min_cont_len, len(cont.split()))  # TODO: split is not the same tokenization
                 max_gen_len += min_cont_len
@@ -212,13 +242,18 @@ class QueryAgent:
 
             # decide whether to continue
             new_queries = []
-            for (i, query), (cont, reason) in zip(queries, continues):
+            new_generate_queries = []
+            assert len(queries) == len(continues)
+            if self.retrieval_trigers:
+                assert len(queries) == len(generate_queries)
+            for _i, ((i, query), (cont, reason)) in enumerate(zip(queries, continues)):
                 final_outputs[i] += cont
                 if reason == 'stop':
                     pass
                 elif reason in {'length', 'boundary'}:
                     query.case += cont
                     new_queries.append((i, query))
+                    new_generate_queries.append(generate_queries[_i])
                 else:
                     raise ValueError
             queries = new_queries
@@ -568,6 +603,7 @@ if __name__ == '__main__':
     parser.add_argument('--fewshot', type=int, default=6)
     parser.add_argument('--max_generation_len', type=int, default=128)
 
+    parser.add_argument('--build_index', action='store_true')
     parser.add_argument('--seed', type=int, default=2022)
     args = parser.parse_args()
     random.seed(args.seed)
@@ -596,8 +632,10 @@ if __name__ == '__main__':
     # load retrieval corpus and index
     index_name = 'test'
     corpus, queries, qrels = GenericDataLoader(data_folder=args.input).load(split='dev')
-    BM25Search(index_name=index_name, hostname='localhost', initialize=True, number_of_shards=1).index(corpus)
-    time.sleep(5)
+    if args.build_index:
+        BM25Search(index_name=index_name, hostname='localhost', initialize=True, number_of_shards=1).index(corpus)
+        time.sleep(5)
+        exit()
 
     # retrieval kwargs
     tokenizer = AutoTokenizer.from_pretrained('google/flan-t5-xl')
@@ -616,13 +654,14 @@ if __name__ == '__main__':
         'retriever': retriever,
         'topk': 1,
         'frequency': 0,
-        'boundary': [],
+        'boundary': ['?'],
         'use_gold': False,
         'max_query_length': 16,
         'retrieval_at_beginning': False,
         'look_ahead_steps': 0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
+        'retrieval_trigers': [('Follow up:', '?')],
     }
     qagent = QueryAgent(
         model=args.model,
