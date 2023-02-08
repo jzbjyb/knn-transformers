@@ -2,7 +2,6 @@ from typing import List, Dict, Any, Tuple
 from operator import itemgetter
 import argparse
 import random
-from collections import namedtuple
 import numpy as np
 import logging
 from tqdm import tqdm
@@ -10,7 +9,7 @@ import os
 import time
 import json
 import copy
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, GPT2TokenizerFast
 from datasets import load_dataset, Dataset
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.search.lexical import BM25Search
@@ -22,17 +21,36 @@ logging.basicConfig(level=logging.INFO)
 class CtxPrompt:
     ctx_position = 'before_case'
 
-    def __init__(self, demo: List["CtxPrompt"] = [], ctx: str = None, case: str = None):
+    def __init__(
+        self,
+        demo: List["CtxPrompt"] = [],
+        ctx: str = None,
+        ctxs: List[Tuple[str, str]] = [],
+        case: str = None,
+        qid: str = None,
+    ):
         self.demo = demo
+        self.did = None
         self.ctx = ctx
+        self.ctxs = ctxs
+        self.ctxs_idx = 0
         self.case = case
+        self.qid = qid
 
     @classmethod
     def from_dict(cls, adict):
         adict = dict(adict)
         if 'demo' in adict:
             adict['demo'] = [cls.from_dict(d) for d in adict['demo']]
-        return cls(**{k: adict[k] for k in ['demo', 'ctx', 'case'] if k in adict})
+        return cls(**{k: adict[k] for k in ['demo', 'ctx', 'ctxs', 'case', 'qid'] if k in adict})
+
+    def change_ctx(self):
+        assert len(self.ctxs)
+        if self.ctxs_idx >= len(self.ctxs):
+            return self.did, self.ctx
+        self.did, self.ctx = self.ctxs[self.ctxs_idx]
+        self.ctxs_idx += 1
+        return self.did, self.ctx
 
     def format(self, use_ctx: bool = False):
         demo_formatted: List[str] = [d.format(use_ctx=use_ctx) for d in self.demo]
@@ -61,8 +79,10 @@ class QueryAgent:
         model: str = 'code-davinci-002',
         max_generation_len: int = 128,
         retrieval_kwargs: Dict[str, Any] = {},
+        tokenizer: AutoTokenizer = None
     ):
         self.model = model
+        self.tokenizer = tokenizer
 
         # generation args
         self.final_stop_sym = 'Question:'
@@ -86,6 +106,7 @@ class QueryAgent:
         self.retrieval_trigers = retrieval_kwargs.get('retrieval_trigers', [])
         for rts, rte in self.retrieval_trigers:
             assert rte in self.ret_boundary, 'end of retrieval trigers must be used as boundary'
+        self.use_gold_iterative = retrieval_kwargs.get('use_gold_iterative', False)
 
         self.ret_topk = retrieval_kwargs.get('topk', 1)
 
@@ -102,10 +123,12 @@ class QueryAgent:
         self,
         queries: List[str],
         params: Dict[str, Any],
+        max_num_req_per_min: int = 5,
     ) -> List[Tuple[str, str]]:
         if 'max_tokens' in params:  # TODO: opt doesn't have this bug
             params['max_tokens'] = max(2, params['max_tokens'])  # openai returns nothing if set to 1
-        tosleep = 3
+        min_sleep = 60 / max_num_req_per_min
+        add_sleep = 3
         expbf = 1.5
         while True:
             try:
@@ -114,7 +137,6 @@ class QueryAgent:
                     prompt=queries,
                     temperature=self.temperature,
                     top_p=self.top_p,
-                    logprobs=0,
                     **params)
                 if 'openai' in openai.api_base:
                     # GPT3 api
@@ -123,10 +145,11 @@ class QueryAgent:
                     # OPT API
                     generations = [(r['text'], r['logprobs']['finish_reason']) for r in responses['choices']]
                 break
-            except openai.error.RateLimitError:
-                logging.info(f'sleep {tosleep}')
-                time.sleep(tosleep)
-                tosleep = tosleep * expbf
+            except openai.error.RateLimitError:  # TODO: make it exponential?
+                logging.info(f'sleep {add_sleep + min_sleep}')
+                time.sleep(add_sleep + min_sleep)
+                add_sleep = add_sleep * expbf
+        time.sleep(min_sleep)
         return generations
 
     def prompt(
@@ -175,6 +198,7 @@ class QueryAgent:
 
             # send queries to index
             if generate_queries:  # some queries might be None which means no queries are generated
+                assert len(generate_queries) == len(queries)
                 queries_to_issue = [gq for gq in generate_queries if gq]
             else:
                 queries_to_issue = [(q.case + lh) if self.only_use_look_ahead else q.case
@@ -187,15 +211,18 @@ class QueryAgent:
                     max_query_length=self.max_query_length)
                 idx = -1
                 for _i, (i, q) in enumerate(queries):
-                    assert self.ret_topk == 1
                     if generate_queries:
                         if generate_queries[_i]:
                             idx += 1
-                            ret_id, ret_text = ctx_ids[idx].tolist(), ctx_texts[idx][0]
+                            if self.use_gold_iterative:
+                                ret_id, ret_text = q.change_ctx()
+                                ret_id = [ret_id]
+                            else:
+                                ret_id, ret_text = ctx_ids[idx].tolist(), ' '.join(ctx_texts[idx])
                             final_retrievals[i].append(ret_id)
                             q.ctx = ret_text
                     else:
-                        ret_id, ret_text = ctx_ids[_i].tolist(), ctx_texts[_i][0]
+                        ret_id, ret_text = ctx_ids[_i].tolist(), ' '.join(ctx_texts[_i])
                         final_retrievals[i].append(ret_id)
                         q.ctx = ret_text
             generate_queries = []
@@ -234,7 +261,7 @@ class QueryAgent:
                         cont = cont.split(self.final_stop_sym, 1)[0]
                         reason = 'stop'
                     continues[i] = (cont, reason)
-                    min_cont_len = min(min_cont_len, len(cont.split()))  # TODO: split is not the same tokenization
+                    min_cont_len = min(min_cont_len, len(self.tokenizer.tokenize(cont)))
                 max_gen_len += min_cont_len
             else:
                 raise NotImplementedError
@@ -252,10 +279,12 @@ class QueryAgent:
                 elif reason in {'length', 'boundary'}:
                     query.case += cont
                     new_queries.append((i, query))
-                    new_generate_queries.append(generate_queries[_i])
+                    if self.retrieval_trigers:
+                        new_generate_queries.append(generate_queries[_i])
                 else:
                     raise ValueError
             queries = new_queries
+            generate_queries = new_generate_queries
         return final_outputs, final_retrievals
 
 class BaseDataset:
@@ -279,16 +308,17 @@ class BaseDataset:
         # demo
         demo = [{
             'case': _format(self.examplers[i], use_answer=True),
-            'ctx': ' '.join(self.examplers[i]['ctx']) if 'ctx' in self.examplers[i] else None,
+            'ctx': ' '.join(self.examplers[i]['ctxs']) if 'ctxs' in self.examplers[i] else None,  # demo use all ctx concatenated
+            'ctxs': [(None, ctx) for ctx in self.examplers[i]['ctxs']] if 'ctxs' in self.examplers[i] else [],  # ctx id is none
         } for i in range(fewshot)] if fewshot else []
 
         def _format_for_dataset(example):
             # case
             case = _format(example, use_answer=False)
             # ctx
-            ctx = ' '.join(example['references']) if 'references' in example else None
+            ctxs = example['ctxs'] if 'ctxs' in example else []
             example['demo'] = demo
-            example['ctx'] = ctx
+            example['ctxs'] = ctxs
             example['case'] = case
             return example
         self.dataset = self.dataset.map(_format_for_dataset)
@@ -409,7 +439,7 @@ class StrategyQA(BaseDataset):
     sa_ctx_examplers: List[Dict] = [
         {
             'question': 'Do hamsters provide food for any animals?',
-            'ctx': ["Hamsters are prey animals.",
+            'ctxs': ["Hamsters are prey animals.",
                 "Prey animals provide food for predators."],
             'cot': ('Follow up: What types of animal are hamsters?\n'
                 'Hamsters are prey animals.\n'
@@ -419,7 +449,7 @@ class StrategyQA(BaseDataset):
         },
         {
             'question': 'Could Brooke Shields succeed at University of Pennsylvania?',
-            'ctx': ["Brooke Shields graduated from Princeton University.",
+            'ctxs': ["Brooke Shields graduated from Princeton University.",
                 "Princeton is ranked as the number 1 national college by US news.",
                 "University of Pennsylvania is ranked as number 6 national college by US news.",
                 "Princeton only admits around 6 percent of applicants as of 2018.",
@@ -435,7 +465,7 @@ class StrategyQA(BaseDataset):
         },
         {
             'question': "Hydrogen's atomic number squared exceeds number of Spice Girls?",
-            'ctx': ["Hydrogen is the first element and has an atomic number of one.",
+            'ctxs': ["Hydrogen is the first element and has an atomic number of one.",
                 "To square a number, you multiply it by itself.",
                 "The Spice Girls has five members."],
             'cot': ('Follow up: What is the atomic number of hydrogen?\n'
@@ -447,7 +477,7 @@ class StrategyQA(BaseDataset):
         },
         {
             'question': "Is it common to see frost during some college commencements?",
-            'ctx': ["College commencement ceremonies often happen during the months of December, May, and sometimes June.",
+            'ctxs': ["College commencement ceremonies often happen during the months of December, May, and sometimes June.",
                 "Frost isn't uncommon to see during the month of December, as it is the winter."],
             'cot': ('Follow up: What seasons can you expect see frost?\n'
                 'Frost usually can be seen in the winter.\n'
@@ -458,7 +488,7 @@ class StrategyQA(BaseDataset):
         },
         {
             'question': "Could a llama birth twice during War in Vietnam (1945-46)?",
-            'ctx': ["The War in Vietnam (1945-46) lasted around 6 months.",
+            'ctxs': ["The War in Vietnam (1945-46) lasted around 6 months.",
                 "The gestation period for a llama is 11 months."],
             'cot': ('Follow up: How long did the Vietnam war last?\n'
                 'The War in Vietnam was 6 months.\n'
@@ -469,7 +499,7 @@ class StrategyQA(BaseDataset):
         },
         {
             'question': "Would a pear sink in water?",
-            'ctx': ["The density of a raw pear is about 0.59 g/cm^3.",
+            'ctxs': ["The density of a raw pear is about 0.59 g/cm^3.",
                 "The density of water is about 1 g/cm^3.",
                 "Objects only sink if they are denser than the surrounding fluid."],
             'cot': ('Follow up: What is the density of a pear?\n'
@@ -576,7 +606,7 @@ class StrategyQA(BaseDataset):
                 cot = example['metadata']['cot']
                 ans = example['metadata']['answer']
                 rel_dids = [did for did, rel in qrels[qid].items() if rel]
-                rel_docs = [corpus[did]['text'] for did in rel_dids]
+                ctxs = [(did, corpus[did]['text']) for did in rel_dids]
                 output = self.output_template(cot, ans)
                 dataset.append({
                     'qid': qid,
@@ -584,7 +614,7 @@ class StrategyQA(BaseDataset):
                     'cot': cot,
                     'answer': ans,
                     'gold_output': output,
-                    'references': rel_docs,
+                    'ctxs': ctxs,
                 })
         return Dataset.from_list(dataset)
 
@@ -637,9 +667,10 @@ if __name__ == '__main__':
         exit()
 
     # retrieval kwargs
-    tokenizer = AutoTokenizer.from_pretrained('google/flan-t5-xl')
+    ret_tokenizer = AutoTokenizer.from_pretrained('google/flan-t5-xl')
+    prompt_tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
     retriever = BM25(
-        tokenizer=tokenizer,
+        tokenizer=ret_tokenizer,
         dataset=(corpus, queries, qrels),
         index_name=index_name,
         use_decoder_input_ids=True)
@@ -655,6 +686,7 @@ if __name__ == '__main__':
         'frequency': 0,
         'boundary': [],
         'use_gold': False,
+        'use_gold_iterative': False,
         'max_query_length': 16,
         'retrieval_at_beginning': False,
         'look_ahead_steps': 0,
@@ -664,6 +696,7 @@ if __name__ == '__main__':
     }
     qagent = QueryAgent(
         model=args.model,
+        tokenizer=prompt_tokenizer,
         max_generation_len=args.max_generation_len,
         retrieval_kwargs=retrieval_kwargs)
 
