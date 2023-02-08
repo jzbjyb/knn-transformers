@@ -122,7 +122,6 @@ class QueryAgent:
                 else:
                     # OPT API
                     generations = [(r['text'], r['logprobs']['finish_reason']) for r in responses['choices']]
-
                 break
             except openai.error.RateLimitError:
                 logging.info(f'sleep {tosleep}')
@@ -654,7 +653,7 @@ if __name__ == '__main__':
         'retriever': retriever,
         'topk': 1,
         'frequency': 0,
-        'boundary': ['?'],
+        'boundary': [],
         'use_gold': False,
         'max_query_length': 16,
         'retrieval_at_beginning': False,
