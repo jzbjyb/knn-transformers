@@ -6,6 +6,7 @@ import numpy as np
 import logging
 from tqdm import tqdm
 import os
+import re
 import time
 import json
 import copy
@@ -36,9 +37,12 @@ class CtxPrompt:
         self.ctxs_idx = 0
         self.case = case
         self.qid = qid
+        self.ind = 0
 
     @staticmethod
-    def get_append_retrieval(ret_to_append: str):
+    def get_append_retrieval(ret_to_append: str, index: int = None):
+        if index is not None:
+            return f'Reference {index}: {ret_to_append}\n'
         return f'Reference: {ret_to_append}\n'
 
     @classmethod
@@ -56,8 +60,19 @@ class CtxPrompt:
         self.ctxs_idx += 1
         return self.did, self.ctx
 
-    def append_retrieval(self, ret_to_append):
-        self.case += self.get_append_retrieval(ret_to_append)
+    def append_retrieval(self, ret_to_append: str, add_index: bool = False):
+        self.case += self.get_append_retrieval(ret_to_append, index=self.ind if add_index else None)
+        self.ind = (self.ind + 1) if add_index else self.ind
+
+    def update_retrieval(self, ret: str, dedup: bool = True):
+        if self.ctx is None:
+            self.ctx = ret
+        else:
+            if dedup:
+                if ret.lower() not in self.ctx.lower():
+                    self.ctx += ' ' + ret
+            else:
+                self.ctx += ' ' + ret
 
     def format(self, use_ctx: bool = False):
         demo_formatted: List[str] = [d.format(use_ctx=use_ctx) for d in self.demo]
@@ -85,10 +100,12 @@ class ApiReturn:
 
     def __init__(
         self,
+        prompt: str,
         text: str,
         tokens: List[str] = [],
         finish_reason: str = 'stop',
     ):
+        self.prompt = prompt
         self.text = text
         self.tokens = tokens
         self.finish_reason = finish_reason
@@ -174,9 +191,10 @@ class QueryAgent:
                     logprobs=0,
                     **params)
                 generations = [ApiReturn(
+                    prompt=q,
                     text=r['text'],
                     tokens=r['logprobs']['tokens'],
-                    finish_reason=r['finish_reason']) for r in responses['choices']]
+                    finish_reason=r['finish_reason']) for r, q in zip(responses['choices'], queries)]
                 if debug:
                     print(queries[0])
                     print('-->', generations[0].text)
@@ -198,14 +216,14 @@ class QueryAgent:
                 outputs = list(map(lambda x: x.text, self.complete(
                     [q.format(use_ctx=True) for q in queries],
                     params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym})))
-                return outputs, None
+                return outputs, None, None
             else:
                 return self.ret_prompt(queries)
         else:  # directly generate all without gold context
             outputs = list(map(lambda x: x.text, self.complete(
                 [q.format(use_ctx=False) for q in queries],
                 params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym})))
-            return outputs, None
+            return outputs, None, None
 
     def ret_prompt(
         self,
@@ -214,6 +232,7 @@ class QueryAgent:
         batch_size = len(queries)
         final_retrievals: List[List[List[str]]] = [[] for _ in range(len(queries))]  # (bs, n_ret_steps, ret_topk)
         final_outputs: List[str] = [''] * len(queries)
+        traces: List[List[Tuple[str, str]]] = [[] for _ in range(len(queries))]
         queries: List[Tuple[int, CtxPrompt]] = [(i, q) for i, q in enumerate(queries)]  # to query
         max_gen_len = 0
 
@@ -258,18 +277,17 @@ class QueryAgent:
                                 ret_id, ret_text = ctx_ids[idx].tolist(), ' '.join(ctx_texts[idx])
                             final_retrievals[i].append(ret_id)
                             if self.append_retrieval:
-                               q.append_retrieval(ret_text)
+                               q.append_retrieval(ret_text, add_index=False)
                             else:
-                                q.ctx = ret_text
+                                q.update_retrieval(ret_text)
                     else:
                         ret_id, ret_text = ctx_ids[_i].tolist(), ' '.join(ctx_texts[_i])
                         if self.append_retrieval:
-                            #pass  # no retrieval at the beginning
                             final_retrievals[i].append(ret_id)
-                            q.append_retrieval(ret_text)
+                            q.append_retrieval(ret_text, add_index=False)
                         else:
                             final_retrievals[i].append(ret_id)
-                            q.ctx = ret_text
+                            q.update_retrieval(ret_text)
             generate_queries = []
 
             # complete
@@ -298,9 +316,9 @@ class QueryAgent:
                             assert len(self.retrieval_trigers) == 1
                             # TODO: check if it stops at retrieval trigers
                             ret_tri_start = self.retrieval_trigers[0][0]
-                            ret_start = cont.find(ret_tri_start)
-                            if ret_start != -1:
-                                generate_queries.append(cont[ret_start + len(ret_tri_start):].strip())
+                            found = re.search(ret_tri_start, cont)
+                            if found:
+                                generate_queries.append(cont[found.span()[1]:].strip())
                             else:
                                 generate_queries.append(None)
                     else:
@@ -321,10 +339,11 @@ class QueryAgent:
             new_generate_queries = []
             assert len(queries) == len(apireturns)
             if self.retrieval_trigers:
-                assert len(queries) == len(generate_queries)
+                assert len(queries) == len(generate_queries), f'{len(queries)} {len(generate_queries)}'
             for _i, ((i, query), ar) in enumerate(zip(queries, apireturns)):
                 cont, reason = ar.text, ar.finish_reason
                 final_outputs[i] += cont
+                traces[i].append((ar.prompt, cont))
                 if reason == 'stop':
                     pass
                 elif reason in {'length', 'boundary'}:
@@ -336,7 +355,7 @@ class QueryAgent:
                     raise ValueError
             queries = new_queries
             generate_queries = new_generate_queries
-        return final_outputs, final_retrievals
+        return final_outputs, final_retrievals, traces
 
 class BaseDataset:
     def format(
@@ -375,6 +394,8 @@ class BaseDataset:
     def retrieval_augment_examplars(
         self,
         qagent: QueryAgent,
+        retrieval_at_beginning: bool = False,
+        add_index: bool = False
     ):
         for examplar in self.examplars:
             question = examplar['question']
@@ -385,25 +406,39 @@ class BaseDataset:
             # search question
             ctx_ids, ctx_texts = qagent.retrieve([question])
             ctx_ids, ctx_texts = ctx_ids[0], ctx_texts[0]  # (ret_topk) * 2
-            new_cot.append(CtxPrompt.get_append_retrieval(' '.join(ctx_texts)))
+            new_cot.append(CtxPrompt.get_append_retrieval(' '.join(ctx_texts), index=0 if add_index else None))
 
             # search cot
+            ind = 1
             for t in cot:
-                new_cot.append(t)
                 query = None
-                if qagent.retrieval_trigers:
-                    for rs, re in qagent.retrieval_trigers:
-                        if t.startswith(rs) and t.endswith(re):
-                            query = t[len(rs):].strip()
-                            break
-                else:
-                    query = t.strip()
+                if not retrieval_at_beginning:
+                    if qagent.retrieval_trigers:
+                        for rts, rte in qagent.retrieval_trigers:
+                            if re.search(rts, t) and t.endswith(rte):
+                                query = re.sub(rts, '', t).strip()
+                                break
+                    else:
+                        query = t.strip()
                 if query is not None:
+                    if qagent.retrieval_trigers:
+                        if add_index:
+                            prefix = f'Follow up {ind}: '
+                            new_cot.append(prefix + query + '\n')
+                            assert 'Follow up' in qagent.retrieval_trigers[0][0] and qagent.retrieval_trigers[0][1].endswith('\n')
+                        else:
+                            new_cot.append(t)
+                    else:
+                        new_cot.append(t)
                     # (1, ret_topk) * 2
                     ctx_ids, ctx_texts = qagent.retrieve([query])
                     # (ret_topk) * 2
                     ctx_ids, ctx_texts = ctx_ids[0], ctx_texts[0]
-                    new_cot.append(CtxPrompt.get_append_retrieval(' '.join(ctx_texts)))
+                    new_cot.append(CtxPrompt.get_append_retrieval(' '.join(ctx_texts), index=ind if add_index else None))
+                else:
+                    prefix = f'Thought {ind}: ' if add_index else ''
+                    new_cot.append(prefix + t)
+                    ind += 1
             examplar['cot'] = new_cot
             examplar['ctxs'] = []
 
@@ -668,7 +703,7 @@ if __name__ == '__main__':
         use_decoder_input_ids=True)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 5,
+        'topk': 1,
         'frequency': 0,
         'boundary': ['?\n'],
         'use_gold': False,
@@ -678,8 +713,8 @@ if __name__ == '__main__':
         'look_ahead_steps': 0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        'retrieval_trigers': [('Follow up:', '?\n')],
-        'append_retrieval': True
+        'retrieval_trigers': [('Follow up[^:]*:', '?\n')],
+        'append_retrieval': False
     }
     qagent = QueryAgent(
         model=args.model,
@@ -691,7 +726,7 @@ if __name__ == '__main__':
     if args.dataset == 'strategyqa':
         data = StrategyQA(args.input, prompt_type='sa_ctx')
         if qagent.append_retrieval:
-            data.retrieval_augment_examplars(qagent)
+            data.retrieval_augment_examplars(qagent, retrieval_at_beginning=retrieval_kwargs['retrieval_at_beginning'])
         data.format(fewshot=args.fewshot)
     else:
         raise NotImplementedError
@@ -717,10 +752,11 @@ if __name__ == '__main__':
         for b in range(0, len(data), args.batch_size):
             batch = data.select(range(b, min(b + args.batch_size, len(data))))
             prompts = [CtxPrompt.from_dict(example) for example in batch]
-            generations, retrievals = qagent.prompt(prompts)
+            generations, retrievals, traces = qagent.prompt(prompts)
             retrievals = retrievals or [None] * len(generations)
-            for example, generation, retrieval in zip(batch, generations, retrievals):
+            for example, generation, retrieval, trace in zip(batch, generations, retrievals, traces):
                 example['output'] = generation
                 example['retrieval'] = retrieval
+                example['trace'] = trace
                 fout.write(json.dumps(example) + '\n')
             pbar.update(len(batch))

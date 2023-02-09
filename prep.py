@@ -682,7 +682,8 @@ def summary_to_beir(
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
-def compare(file1: str, file2: str, only_show_diff: bool = False):
+def compare(file1: str, file2: str, only_show_diff: bool = False, only_first_right: bool = True):
+    get_ans = lambda x: x.strip().rsplit(' ', 1)[-1][:-1].lower()
     with open(file1) as fin1, open(file2) as fin2:
         for l in fin1:
             example1 = json.loads(l)
@@ -697,17 +698,47 @@ def compare(file1: str, file2: str, only_show_diff: bool = False):
             o2 = example2['output']
             r1 = example1['retrieval']
             r2 = example2['retrieval']
+            ts1 = example1['trace'] if 'trace' in example1 else []
+            ts2 = example2['trace'] if 'trace' in example2 else []
 
-            if not only_show_diff or o1 != o2:
+            o1a = get_ans(o1)
+            o2a = get_ans(o2)
+            ga = get_ans(a)
+
+            if only_first_right:
+                show = only_first_right and o1a == ga and o2a != ga
+            elif only_show_diff:
+                show = only_show_diff and o1 != o2
+            else:
+                show = False
+
+            if show:
+                print('^' * 100)
+                for i, (t1p, t1r) in enumerate(ts1):
+                    print('-' * 30)
+                    print(f'1.{i}->', t1p)
+                    print(f'1.{i}->', t1r)
+                print('')
+
+                print('^' * 100)
+                for i, (t2p, t2r) in enumerate(ts2):
+                    print('-' * 30)
+                    print(f'2.{i}->', t2p)
+                    print(f'2.{i}->', t2r)
+                print('')
+
+                print('^' * 100)
                 print('Q->', q)
                 print('C->', c)
                 print('A->', a)
                 print('')
 
+                print('-' * 30)
                 print('1->', r1)
                 print('1->', o1)
                 print('')
 
+                print('-' * 30)
                 print('2->', r2)
                 print('2->', o2)
                 input('')
@@ -803,8 +834,9 @@ def eval(
     jsonl_file: str,
     anchor_text: str = 'So the answer is',
     retrieval_percentiles: List[Union[int, float]] = [1, 0.25, 0.5, 0.75, 1.0],
-    remove_followup: Tuple[str, str] = ('Follow up:', '?'),
+    remove_followup: Tuple[str, str] = ('Follow up[^:]*:', '?'),
     beir_dir: str = None,
+    debug: bool = False,
 ):
     if beir_dir is not None:
         corpus, queries, qrels = GenericDataLoader(data_folder=beir_dir).load(split='dev')
@@ -846,6 +878,9 @@ def eval(
             # yes/no
             position = pred.find(anchor_text)
             if position == -1:
+                if debug:
+                    print(pred)
+                    input()
                 wrongformat += 1
             elif yesno_ans in pred[position + len(anchor_text):].strip().lower():
                 correct += 1
