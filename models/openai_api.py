@@ -15,6 +15,8 @@ from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.search.lexical import BM25Search
 import openai
 from .retriever import BM25
+from .cohere_api import cohere_generate
+from .ai21_api import ai21_generate
 
 logging.basicConfig(level=logging.INFO)
 
@@ -127,29 +129,36 @@ class QueryAgent:
     ) -> List[Tuple[str, str]]:
         if 'max_tokens' in params:  # TODO: opt doesn't have this bug
             params['max_tokens'] = max(2, params['max_tokens'])  # openai returns nothing if set to 1
-        min_sleep = 60 / max_num_req_per_min
-        add_sleep = 3
-        expbf = 1.5
-        while True:
-            try:
-                responses = openai.Completion.create(
-                    model=self.model,
-                    prompt=queries,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    **params)
-                if 'openai' in openai.api_base:
-                    # GPT3 api
-                    generations = [(r['text'], r['finish_reason']) for r in responses['choices']]
-                else:
-                    # OPT API
-                    generations = [(r['text'], r['logprobs']['finish_reason']) for r in responses['choices']]
-                break
-            except openai.error.RateLimitError:  # TODO: make it exponential?
-                logging.info(f'sleep {add_sleep + min_sleep}')
-                time.sleep(add_sleep + min_sleep)
-                add_sleep = add_sleep * expbf
-        time.sleep(min_sleep)
+        
+        api_name = 'ai21'
+        if api_name == 'openai':
+            min_sleep = 60 / max_num_req_per_min
+            add_sleep = 3
+            expbf = 1.5
+            while True:
+                try:
+                    responses = openai.Completion.create(
+                        model=self.model,
+                        prompt=queries,
+                        temperature=self.temperature,
+                        top_p=self.top_p,
+                        **params)
+                    if 'openai' in openai.api_base:
+                        # GPT3 api
+                        generations = [(r['text'], r['finish_reason']) for r in responses['choices']]
+                    else:
+                        # OPT API
+                        generations = [(r['text'], r['logprobs']['finish_reason']) for r in responses['choices']]
+                    break
+                except openai.error.RateLimitError:  # TODO: make it exponential?
+                    logging.info(f'sleep {add_sleep + min_sleep}')
+                    time.sleep(add_sleep + min_sleep)
+                    add_sleep = add_sleep * expbf
+            time.sleep(min_sleep)
+        elif api_name == 'cohere':
+            generations = cohere_generate(queries, temperature=self.temperature, max_tokens=params['max_tokens'], stop=params['stop'])
+        elif api_name == 'ai21':
+            generations = ai21_generate(queries, temperature=self.temperature, max_tokens=params['max_tokens'], stop=params['stop'])
         return generations
 
     def prompt(
@@ -640,7 +649,7 @@ if __name__ == '__main__':
 
     # load data
     if args.dataset == 'strategyqa':
-        data = StrategyQA(args.input, prompt_type='sa')
+        data = StrategyQA(args.input, prompt_type='sa_ctx_nofollow')
         data.format(fewshot=args.fewshot)
     else:
         raise NotImplementedError
@@ -692,7 +701,7 @@ if __name__ == '__main__':
         'look_ahead_steps': 0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        'retrieval_trigers': [('Follow up:', '?')],
+        # 'retrieval_trigers': [('Follow up:', '?')],
     }
     qagent = QueryAgent(
         model=args.model,
