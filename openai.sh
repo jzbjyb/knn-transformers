@@ -10,6 +10,11 @@ output=$1
 max_generation_len=256
 batch_size=8
 max_num_examples=250
+model=code-davinci-002
+
+if [[ ${model} != code-* ]]; then
+    num_shards=1
+fi
 
 # build index
 OPENAI_API_KEY=${keys[0]} python -m models.openai_api \
@@ -20,6 +25,7 @@ OPENAI_API_KEY=${keys[0]} python -m models.openai_api \
 if [[ ${debug} == "true" ]]; then
     okey="${keys[0]}"
     OPENAI_API_KEY=${okey} python -m models.openai_api \
+        --model ${model} \
         --input data/strategyqa/train_cot_beir \
         --max_num_examples 32 \
         --max_generation_len ${max_generation_len} \
@@ -33,6 +39,7 @@ fi
 for (( i=0; i<${num_shards}; i++ )); do
     okey="${keys[$i]}"
     OPENAI_API_KEY=${okey} python -m models.openai_api \
+        --model ${model} \
         --input data/strategyqa/train_cot_beir \
         --max_num_examples ${max_num_examples} \
         --max_generation_len ${max_generation_len} \
