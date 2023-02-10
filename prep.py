@@ -884,7 +884,7 @@ def eval(
     print('correct\tincorrect\twrongformat')
     print(f'{correct / total}\t{incorrect / total}\t{wrongformat / total}')
     print('')
-
+    print('total', total)
     print('\t'.join(metrics.keys()))
     print('\t'.join(map(str, metrics.values())))
     print('#pred\t#gold')
