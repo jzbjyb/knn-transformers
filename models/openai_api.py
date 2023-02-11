@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Callable
 from operator import itemgetter
 import argparse
 import random
@@ -16,84 +16,10 @@ from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.search.lexical import BM25Search
 import openai
 from .retriever import BM25
+from .templates import CtxPrompt, RetrievalInstruction
 
 logging.basicConfig(level=logging.INFO)
 
-class CtxPrompt:
-    ctx_position = 'before_case'
-
-    def __init__(
-        self,
-        demo: List["CtxPrompt"] = [],
-        ctx: str = None,
-        ctxs: List[Tuple[str, str]] = [],
-        case: str = None,
-        qid: str = None,
-    ):
-        self.demo = demo
-        self.did = None
-        self.ctx = ctx
-        self.ctxs = ctxs
-        self.ctxs_idx = 0
-        self.case = case
-        self.qid = qid
-        self.ind = 0
-
-    @staticmethod
-    def get_append_retrieval(ret_to_append: str, index: int = None):
-        if index is not None:
-            return f'Reference {index}: {ret_to_append}\n'
-        return f'Reference: {ret_to_append}\n'
-
-    @classmethod
-    def from_dict(cls, adict):
-        adict = dict(adict)
-        if 'demo' in adict:
-            adict['demo'] = [cls.from_dict(d) for d in adict['demo']]
-        return cls(**{k: adict[k] for k in ['demo', 'ctx', 'ctxs', 'case', 'qid'] if k in adict})
-
-    def change_ctx(self):
-        assert len(self.ctxs)
-        if self.ctxs_idx >= len(self.ctxs):
-            return self.did, self.ctx
-        self.did, self.ctx = self.ctxs[self.ctxs_idx]
-        self.ctxs_idx += 1
-        return self.did, self.ctx
-
-    def append_retrieval(self, ret_to_append: str, add_index: bool = False):
-        self.case += self.get_append_retrieval(ret_to_append, index=self.ind if add_index else None)
-        self.ind = (self.ind + 1) if add_index else self.ind
-
-    def update_retrieval(self, ret: str, dedup: bool = True):
-        if self.ctx is None:
-            self.ctx = ret
-        else:
-            if dedup:
-                if ret.lower() not in self.ctx.lower():
-                    self.ctx += ' ' + ret
-            else:
-                self.ctx += ' ' + ret
-
-    def format(self, use_ctx: bool = False):
-        demo_formatted: List[str] = [d.format(use_ctx=use_ctx) for d in self.demo]
-        use_ctx = use_ctx and self.ctx
-        if use_ctx:
-            if self.ctx_position == 'begin':
-                if len(demo_formatted):
-                    return 'Evidence: ' + self.ctx + '\n\n' + '\n\n'.join(demo_formatted) + '\n\n' + self.case
-                else:
-                    return 'Evidence: ' + self.ctx + '\n' + self.case
-            elif self.ctx_position == 'before_case':
-                if len(demo_formatted):
-                    return '\n\n'.join(demo_formatted) + '\n\n' + 'Evidence: ' + self.ctx + '\n' + self.case
-                else:
-                    return 'Evidence: ' + self.ctx + '\n' + self.case
-            else:
-                raise NotImplementedError
-        if len(demo_formatted):
-            return '\n\n'.join(demo_formatted) + '\n\n' + self.case
-        else:
-            return self.case
 
 class ApiReturn:
     EOS = '<|endoftext|>'
@@ -200,7 +126,7 @@ class QueryAgent:
                     print('-->', generations[0].text)
                     input()
                 break
-            except openai.error.RateLimitError or openai.error.ServiceUnavailableError or openai.error.APIError or openai.error.Timeout:
+            except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout):
                 logging.info(f'sleep {add_sleep + min_sleep}')
                 time.sleep(add_sleep + min_sleep)
                 add_sleep = add_sleep * expbf
@@ -220,10 +146,12 @@ class QueryAgent:
             else:
                 return self.ret_prompt(queries)
         else:  # directly generate all without gold context
-            outputs = list(map(lambda x: x.text, self.complete(
+            ars = self.complete(
                 [q.format(use_ctx=False) for q in queries],
-                params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym})))
-            return outputs, None, None
+                params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym})
+            outputs = [ar.text for ar in ars]
+            traces = [[ar.prompt] for ar in ars]
+            return outputs, None, traces
 
     def ret_prompt(
         self,
@@ -367,26 +295,27 @@ class BaseDataset:
         def _format(
             example: Dict,
             use_answer: bool = False,
+            input_template_func: Callable = None,
         ):
             q = example['question']
             cot = example['cot'] if type(example['cot']) is str else ''.join(example['cot'])
             a = example['answer']
 
-            query = self.input_template(q)
+            query = input_template_func(q)
             if use_answer:
                 query += self.output_template(cot, a)
             return query
 
         # demo
         demo = [{
-            'case': _format(self.examplars[i], use_answer=True),
+            'case': _format(self.examplars[i], use_answer=True, input_template_func=self.demo_input_template),
             'ctxs': self.examplars[i]['ctxs'] if 'ctxs' in self.examplars[i] else [],
             'ctx': ' '.join(map(itemgetter(1), self.examplars[i]['ctxs'])) if 'ctxs' in self.examplars[i] and self.examplars[i]['ctxs'] else None,
         } for i in range(fewshot)] if fewshot else []
 
         def _format_for_dataset(example):
             # case
-            case = _format(example, use_answer=False)
+            case = _format(example, use_answer=False, input_template_func=self.test_input_template)
             # ctx
             example['demo'] = demo
             example['case'] = case
@@ -497,8 +426,10 @@ class StrategyQA(BaseDataset):
             'answer': 'no',
         }
     ]
-    cot_input_template = lambda self, ques: f'Q: {ques}\nA:'
-    cot_output_template = lambda self, cot, ans: f'{cot} So the answer is {ans}.'
+    cot_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step): '
+    cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    cot_output_template = lambda self, cot, ans: f'{cot} So the final answer is {ans}.'
+
 
     sa_examplars: List[Dict] = [
         {
@@ -645,7 +576,8 @@ class StrategyQA(BaseDataset):
 
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
         assert prompt_type in {'cot', 'sa', 'sa_ctx'}
-        self.input_template = getattr(self, f'{prompt_type}_input_template')
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
         self.examplars = getattr(self, f'{prompt_type}_examplars')
         self.dataset = self.load_data(beir_dir)
@@ -714,7 +646,7 @@ if __name__ == '__main__':
         'retriever': retriever,
         'topk': 1,
         'frequency': 0,
-        'boundary': ['?\n'],
+        'boundary': [],
         'use_gold': False,
         'use_gold_iterative': False,
         'max_query_length': 16,
@@ -722,18 +654,21 @@ if __name__ == '__main__':
         'look_ahead_steps': 0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        'retrieval_trigers': [('Follow up[^:]*:', '?\n')],
-        'append_retrieval': False
+        'retrieval_trigers': [],
+        'append_retrieval': False,
+        'use_retrieval_instruction': True
     }
     qagent = QueryAgent(
         model=args.model,
         tokenizer=prompt_tokenizer,
         max_generation_len=args.max_generation_len,
         retrieval_kwargs=retrieval_kwargs)
+    if retrieval_kwargs['use_retrieval_instruction']:
+        CtxPrompt.ret_instruction = RetrievalInstruction()
 
     # load data
     if args.dataset == 'strategyqa':
-        data = StrategyQA(args.input, prompt_type='sa_ctx')
+        data = StrategyQA(args.input, prompt_type='cot')
         if qagent.append_retrieval:
             data.retrieval_augment_examplars(qagent, retrieval_at_beginning=retrieval_kwargs['retrieval_at_beginning'])
         data.format(fewshot=args.fewshot)
@@ -763,6 +698,7 @@ if __name__ == '__main__':
             prompts = [CtxPrompt.from_dict(example) for example in batch]
             generations, retrievals, traces = qagent.prompt(prompts)
             retrievals = retrievals or [None] * len(generations)
+            traces = traces or [None] * len(generations)
             for example, generation, retrieval, trace in zip(batch, generations, retrievals, traces):
                 example['output'] = generation
                 example['retrieval'] = retrieval
