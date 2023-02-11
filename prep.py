@@ -843,6 +843,7 @@ def eval(
 
     metric_func = evaluate.load('rouge')
 
+    scount = 0
     correct = incorrect = wrongformat = total = 0
     ret_accs: List[List[float]] = []
     ret_covers: List[List[float]] = []
@@ -853,6 +854,7 @@ def eval(
         for l in fin:
             total += 1
             l = json.loads(l)
+            trace = l['trace'][0] if 'trace' in l else None
             qid = l['qid']
             question = l['question']
             ref = l['gold_output']
@@ -878,14 +880,21 @@ def eval(
             # yes/no
             position = pred.find(anchor_text)
             if position == -1:
-                if debug:
-                    print(pred)
-                    input()
                 wrongformat += 1
             elif yesno_ans in pred[position + len(anchor_text):].strip().lower():
                 correct += 1
             else:
                 incorrect += 1
+
+            scount += '[Search(' in pred
+
+            if debug:
+                print('Q->', question)
+                print()
+                print('T->', trace)
+                print()
+                print('P->', pred)
+                input()
 
             # retrieval
             ret_accs.append([])
@@ -935,6 +944,7 @@ def eval(
 
     print('retrieval acc\tcoverage')
     print(f'{format_list(ret_accs)}\t{format_list(ret_covers)}')
+    print(f'search count: {scount}')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

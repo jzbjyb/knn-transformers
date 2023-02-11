@@ -11,6 +11,7 @@ max_generation_len=256
 batch_size=8
 max_num_examples=250
 model=code-davinci-002
+fewshot=6
 
 if [[ ${model} != code-* ]]; then
     num_shards=1
@@ -29,6 +30,7 @@ if [[ ${debug} == "true" ]]; then
         --input data/strategyqa/train_cot_beir \
         --max_num_examples 32 \
         --max_generation_len ${max_generation_len} \
+        --fewshot ${fewshot} \
         --batch_size ${batch_size} \
         --output test.jsonl \
         --num_shards 1 \
@@ -43,6 +45,7 @@ for (( i=0; i<${num_shards}; i++ )); do
         --input data/strategyqa/train_cot_beir \
         --max_num_examples ${max_num_examples} \
         --max_generation_len ${max_generation_len} \
+        --fewshot ${fewshot} \
         --batch_size ${batch_size} \
         --output ${output}.${i} \
         --num_shards ${num_shards} \
