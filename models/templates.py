@@ -2,7 +2,7 @@ from typing import List, Dict, Any, Tuple
 
 
 class CtxPrompt:
-    ctx_position: str = 'before_case'
+    ctx_position: str = 'begin'
     ret_instruction: "RetrievalInstruction" = None
 
     def __init__(
@@ -58,11 +58,17 @@ class CtxPrompt:
             else:
                 self.ctx += ' ' + ret
 
-    def format(self, use_ctx: bool = False, use_ret_instruction: bool = True):
-        demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=False) for d in self.demo])
-        use_ctx = use_ctx and self.ctx
-        ref = 'Reference:\n' + self.ctx if use_ctx else None
+    def format(
+        self,
+        use_ctx: bool = False,
+        use_ret_instruction: bool = True
+    ):
+        if use_ctx and self.ctx is None:  # default is use all ctxs
+            self.ctx = ' '.join([ctx for _, ctx in self.ctxs])
         use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
+
+        demo_formatted: str = '\n\n'.join([d.format(use_ctx=False, use_ret_instruction=False) for d in self.demo])  # TODO: no retrieval for demo
+        ref = ('Reference:\n' + self.ctx) if use_ctx else None
         task, ret, ensemble = self.ret_instruction.format() if use_ret_instruction else (None, None, None)
         elements: List[str] = []
 

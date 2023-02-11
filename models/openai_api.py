@@ -139,10 +139,12 @@ class QueryAgent:
     ):
         if self.use_retrieval:
             if self.use_gold:  # directly generate all with gold context
-                outputs = list(map(lambda x: x.text, self.complete(
+                ars = self.complete(
                     [q.format(use_ctx=True) for q in queries],
-                    params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym})))
-                return outputs, None, None
+                    params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym})
+                outputs = [ar.text for ar in ars]
+                traces = [[ar.prompt] for ar in ars]
+                return outputs, None, traces
             else:
                 return self.ret_prompt(queries)
         else:  # directly generate all without gold context
@@ -185,7 +187,8 @@ class QueryAgent:
                 assert len(generate_queries) == len(queries)
                 queries_to_issue = [gq for gq in generate_queries if gq]
             else:
-                queries_to_issue = [(q.case + lh) if self.only_use_look_ahead else q.case
+                # TODO: only use question
+                queries_to_issue = [lh if self.only_use_look_ahead else (q.case.split('\n')[0].split(':', 1)[1].strip() + lh)
                     for (i, q), lh in zip(queries, look_aheads)]
             if queries_to_issue:
                 # (bs, ret_topk) * 2
@@ -238,10 +241,6 @@ class QueryAgent:
                         if self.retrieval_trigers:
                             generate_queries.append(None)
                     elif reason == 'stop' and self.final_stop_sym not in cont:  # stop at ret_boundary
-                        assert len(self.ret_boundary) == 1
-                        cont += self.ret_boundary[0]
-                        reason = 'boundary'
-                        assert len(cont) > 0, 'empty generation will cause dead lock'
                         if self.retrieval_trigers:  # extract queries from generation
                             assert len(self.retrieval_trigers) == 1
                             # TODO: check if it stops at retrieval trigers
@@ -251,6 +250,10 @@ class QueryAgent:
                                 generate_queries.append(cont[found.span()[1]:].strip())
                             else:
                                 generate_queries.append(None)
+                        assert len(self.ret_boundary) == 1
+                        cont += self.ret_boundary[0]
+                        reason = 'boundary'
+                        assert len(cont) > 0, 'empty generation will cause dead lock'
                     else:
                         if self.retrieval_trigers:
                             generate_queries.append(None)
@@ -384,6 +387,8 @@ class StrategyQA(BaseDataset):
     cot_examplars: List[Dict] = [
         {
             'question': 'Do hamsters provide food for any animals?',
+            'ctxs': [(None, "Hamsters are prey animals."),
+                (None, "Prey animals provide food for predators.")],
             'cot': ('Hamsters are prey animals. ',
                 'Prey are food for predators. ',
                 'Thus, hamsters provide food for some animals.'),
@@ -391,13 +396,21 @@ class StrategyQA(BaseDataset):
         },
         {
             'question': 'Could Brooke Shields succeed at University of Pennsylvania?',
+            'ctxs': [(None, "Brooke Shields graduated from Princeton University."),
+                (None, "Princeton is ranked as the number 1 national college by US news."),
+                (None, "University of Pennsylvania is ranked as number 6 national college by US news."),
+                (None, "Princeton only admits around 6 percent of applicants as of 2018."),
+                (None, "University of Pennsylvania accepts around 9% of applicants as of 2018.")],
             'cot': ('Brooke Shields went to Princeton University. ',
                 'Princeton University is about as academically rigorous as the University of Pennsylvania. ',
                 'Thus, Brooke Shields could also succeed at the University of Pennsylvania.'),
             'answer': 'yes',
         },
         {
-            'question': "Yes or no: Hydrogen's atomic number squared exceeds number of Spice Girls?",
+            'question': "Hydrogen's atomic number squared exceeds number of Spice Girls?",
+            'ctxs': [(None, "Hydrogen is the first element and has an atomic number of one."),
+                (None, "The Spice Girls has five members."),
+                (None, "To square a number, you multiply it by itself.")],
             'cot': ("Hydrogen has an atomic number of 1. ",
                 "1 squared is 1. ",
                 "There are 5 Spice Girls. ",
@@ -405,21 +418,28 @@ class StrategyQA(BaseDataset):
             'answer': 'no',
         },
         {
-            'question': "Yes or no: Is it common to see frost during some college commencements?",
+            'question': "Is it common to see frost during some college commencements?",
+            'ctxs': [(None, "Frost isn't uncommon to see during the month of December, as it is the winter."),
+                (None, "College commencement ceremonies often happen during the months of December, May, and sometimes June.")],
             'cot': ("College commencement ceremonies can happen in December, May, and June. ",
                 "December is in the winter, so there can be frost. ",
                 "Thus, there could be frost at some commencements."),
             'answer': 'yes',
         },
         {
-            'question': "Yes or no: Could a llama birth twice during War in Vietnam (1945-46)?",
+            'question': "Could a llama birth twice during War in Vietnam (1945-46)?",
+            'ctxs': [(None, "The War in Vietnam (1945-46) lasted around 6 months."),
+                (None, "The gestation period for a llama is 11 months.")],
             'cot': ("The War in Vietnam was 6 months. ",
                 "The gestation period for a llama is 11 months, which is more than 6 months. ",
                 "Thus, a llama could not give birth twice during the War in Vietnam."),
             'answer': 'no',
         },
         {
-            'question': "Yes or no: Would a pear sink in water?",
+            'question': "Would a pear sink in water?",
+            'ctxs': [(None, "The density of a raw pear is about 0.59 g/cm^3."),
+                (None, "The density of water is about 1 g/cm^3."),
+                (None, "Objects only sink if they are denser than the surrounding fluid.")],
             'cot': ("The density of a pear is about 0.6g/cm^3, which is less than water. ",
                 "Objects less dense than water float. ",
                 "Thus, a pear would float."),
@@ -430,71 +450,6 @@ class StrategyQA(BaseDataset):
     cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
     cot_output_template = lambda self, cot, ans: f'{cot} So the final answer is {ans}.'
 
-
-    sa_examplars: List[Dict] = [
-        {
-            'question': 'Do hamsters provide food for any animals?',
-            'cot': ('Follow up: What types of animal are hamsters?\n',
-                'Intermediate answer: Hamsters are prey animals.\n',
-                'Follow up: Do prey provide food for any other animals?\n',
-                'Intermediate answer: Prey are food for predators.'),
-            'answer': 'yes',
-        },
-        {
-            'question': 'Could Brooke Shields succeed at University of Pennsylvania?',
-            'cot': ('Follow up: What college did Brooke Shields go to?\n',
-                'Intermediate answer: Brooke Shields went to Princeton University.\n',
-                'Follow up: Out of all colleges in the US, how is Princeton University ranked?\n',
-                'Intermediate answer: Princeton is ranked as the number 1 national college by US news.\n',
-                'Follow up: Out of all colleges in the US, how is University of Pennsylvania ranked?\n',
-                'Intermediate answer: University of Pennsylvania is ranked as number 6 national college by US news.\n',
-                'Follow up: Is the ranking of University of Pennsylvania similar to Princeton University?\n',
-                'Intermediate answer: Princeton University is about as academically rigorous as the University of Pennsylvania. Thus, Brooke Shields could also succeed at the University of Pennsylvania.'),
-            'answer': 'yes',
-        },
-        {
-            'question': "Hydrogen's atomic number squared exceeds number of Spice Girls?",
-            'cot': ('Follow up: What is the atomic number of hydrogen?\n',
-                'Intermediate answer: Hydrogen has an atomic number of 1.\n',
-                'Follow up: How many people are in the Spice Girls band?\n',
-                'Intermediate answer: There are 5 Spice Girls.\n',
-                'Follow up: Is the square of 1 greater than 5?\n',
-                "Intermediate answer: 1 squared is 1. Thus, Hydrogen's atomic number squared is less than 5."),
-            'answer': 'no',
-        },
-        {
-            'question': "Is it common to see frost during some college commencements?",
-            'cot': ('Follow up: What seasons can you expect see frost?\n',
-                'Intermediate answer: Frost usually can be seen in the winter.\n',
-                'Follow up: What months do college commencements occur?\n',
-                'Intermediate answer: College commencement ceremonies can happen in December, May, and June.\n',
-                'Follow up: Do any of December, May, and June occur during winter?\n',
-                'Intermediate answer: December is in the winter, so there can be frost. Thus, there could be frost at some commencements.'),
-            'answer': 'yes',
-        },
-        {
-            'question': "Could a llama birth twice during War in Vietnam (1945-46)?",
-            'cot': ('Follow up: How long did the Vietnam war last?\n',
-                'Intermediate answer: The War in Vietnam was 6 months.\n',
-                'Follow up: How long is llama gestational period?\n',
-                'Intermediate answer: The gestation period for a llama is 11 months.\n',
-                'Follow up: What is 2 times 11 months?\n',
-                'Intermediate answer: 2 times 11 months is 22 months.\n',
-                'Follow up: Is 6 months longer than 22 months?\n',
-                'Intermediate answer: 6 months is not longer than 22 months.'),
-            'answer': 'no',
-        },
-        {
-            'question': "Would a pear sink in water?",
-            'cot': ('Follow up: What is the density of a pear?\n',
-                'Intermediate answer: The density of a pear is about 0.59 g/cm^3.\n',
-                'Follow up: What is the density of water?\n',
-                'Intermediate answer: The density of water is about 1 g/cm^3.\n',
-                'Follow up: Is 0.59 g/cm^3 greater than 1 g/cm^3?\n',
-                'Intermediate answer: 0.59 g/cm^3 is not greater than 1 g/cm^3? Thus, a pear would float.'),
-            'answer': 'no',
-        }
-    ]
     sa_ctx_examplars: List[Dict] = [
         {
             'question': 'Do hamsters provide food for any animals?',
@@ -569,10 +524,8 @@ class StrategyQA(BaseDataset):
             'answer': 'no',
         }
     ]
-    sa_input_template = lambda self, ques: f'Question: {ques}\n'
-    sa_output_template = lambda self, cot, ans: f'{cot}\nSo the final answer is: {ans}.'
-    sa_ctx_input_template = sa_input_template
-    sa_ctx_output_template = sa_output_template
+    sa_ctx_demo_input_template = sa_ctx_test_input_template = lambda self, ques: f'Question: {ques}\n'
+    sa_ctx_output_template = lambda self, cot, ans: f'{cot}\nSo the final answer is: {ans}.'
 
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
         assert prompt_type in {'cot', 'sa', 'sa_ctx'}
@@ -645,12 +598,12 @@ if __name__ == '__main__':
     retrieval_kwargs = {
         'retriever': retriever,
         'topk': 1,
-        'frequency': 0,
+        'frequency': 1,
         'boundary': [],
         'use_gold': False,
         'use_gold_iterative': False,
         'max_query_length': 16,
-        'retrieval_at_beginning': False,
+        'retrieval_at_beginning': True,
         'look_ahead_steps': 0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
