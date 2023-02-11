@@ -277,13 +277,15 @@ class QueryAgent:
                                 ret_id, ret_text = ctx_ids[idx].tolist(), ' '.join(ctx_texts[idx])
                             final_retrievals[i].append(ret_id)
                             if self.append_retrieval:
-                               q.append_retrieval(ret_text, add_index=False)
+                                q.ctx = None
+                                q.append_retrieval(ret_text, add_index=False)
                             else:
                                 q.update_retrieval(ret_text)
                     else:
                         ret_id, ret_text = ctx_ids[_i].tolist(), ' '.join(ctx_texts[_i])
                         if self.append_retrieval:
                             final_retrievals[i].append(ret_id)
+                            q.ctx = None
                             q.append_retrieval(ret_text, add_index=False)
                         else:
                             final_retrievals[i].append(ret_id)
@@ -395,7 +397,8 @@ class BaseDataset:
         self,
         qagent: QueryAgent,
         retrieval_at_beginning: bool = False,
-        add_index: bool = False
+        add_index: bool = False,
+        use_gold: bool = False,
     ):
         for examplar in self.examplars:
             question = examplar['question']
@@ -410,6 +413,7 @@ class BaseDataset:
 
             # search cot
             ind = 1
+            ctx_ind = 0
             for t in cot:
                 query = None
                 if not retrieval_at_beginning:
@@ -430,10 +434,15 @@ class BaseDataset:
                             new_cot.append(t)
                     else:
                         new_cot.append(t)
-                    # (1, ret_topk) * 2
-                    ctx_ids, ctx_texts = qagent.retrieve([query])
-                    # (ret_topk) * 2
-                    ctx_ids, ctx_texts = ctx_ids[0], ctx_texts[0]
+                    if use_gold:
+                        assert qagent.ret_topk == 1
+                        ctx_texts = [examplar['ctxs'][ctx_ind][1]]
+                        ctx_ind += 1
+                    else:
+                        # (1, ret_topk) * 2
+                        ctx_ids, ctx_texts = qagent.retrieve([query])
+                        # (ret_topk) * 2
+                        ctx_ids, ctx_texts = ctx_ids[0], ctx_texts[0]
                     new_cot.append(CtxPrompt.get_append_retrieval(' '.join(ctx_texts), index=ind if add_index else None))
                 else:
                     prefix = f'Thought {ind}: ' if add_index else ''
@@ -585,8 +594,8 @@ class StrategyQA(BaseDataset):
         {
             'question': "Hydrogen's atomic number squared exceeds number of Spice Girls?",
             'ctxs': [(None, "Hydrogen is the first element and has an atomic number of one."),
-                (None, "To square a number, you multiply it by itself."),
-                (None, "The Spice Girls has five members.")],
+                (None, "The Spice Girls has five members."),
+                (None, "To square a number, you multiply it by itself.")],
             'cot': ('Follow up: What is the atomic number of hydrogen?\n',
                 'Hydrogen has an atomic number of 1.\n',
                 'Follow up: How many people are in the Spice Girls band?\n',
@@ -596,8 +605,8 @@ class StrategyQA(BaseDataset):
         },
         {
             'question': "Is it common to see frost during some college commencements?",
-            'ctxs': [(None, "College commencement ceremonies often happen during the months of December, May, and sometimes June."),
-                (None, "Frost isn't uncommon to see during the month of December, as it is the winter.")],
+            'ctxs': [(None, "Frost isn't uncommon to see during the month of December, as it is the winter."),
+                (None, "College commencement ceremonies often happen during the months of December, May, and sometimes June.")],
             'cot': ('Follow up: What seasons can you expect see frost?\n',
                 'Frost usually can be seen in the winter.\n',
                 'Follow up: What months do college commencements occur?\n',
