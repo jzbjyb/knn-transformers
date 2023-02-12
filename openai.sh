@@ -12,15 +12,18 @@ batch_size=8
 max_num_examples=250
 model=code-davinci-002
 fewshot=6
+index_name=wikipedia_kilt
 
 if [[ ${model} != code-* ]]; then
     num_shards=1
 fi
 
-# build index
-OPENAI_API_KEY=${keys[0]} python -m models.openai_api \
-    --input data/strategyqa/train_cot_beir \
-    --build_index
+if [[ ${index_name} == "test" ]]; then  # build index
+    OPENAI_API_KEY=${keys[0]} python -m models.openai_api \
+        --input data/strategyqa/train_cot_beir \
+        --index_name ${index_name} \
+        --build_index
+fi
 
 # query api
 if [[ ${debug} == "true" ]]; then
@@ -28,6 +31,7 @@ if [[ ${debug} == "true" ]]; then
     OPENAI_API_KEY=${okey} python -m models.openai_api \
         --model ${model} \
         --input data/strategyqa/train_cot_beir \
+        --index_name ${index_name} \
         --max_num_examples 32 \
         --max_generation_len ${max_generation_len} \
         --fewshot ${fewshot} \
@@ -43,6 +47,7 @@ for (( i=0; i<${num_shards}; i++ )); do
     OPENAI_API_KEY=${okey} python -m models.openai_api \
         --model ${model} \
         --input data/strategyqa/train_cot_beir \
+        --index_name ${index_name} \
         --max_num_examples ${max_num_examples} \
         --max_generation_len ${max_generation_len} \
         --fewshot ${fewshot} \
