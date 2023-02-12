@@ -15,3 +15,6 @@ pip install sentencepiece==0.1.83
 
 # mongo for KILT
 #mongod --dbpath /path/to/data --logpath /path/to/mongod.log --fork
+
+# elasticsearch disable disk 95%
+#curl -XPUT -H "Content-Type: application/json" http://localhost:9200/_cluster/settings -d '{ "transient": { "cluster.routing.allocation.disk.threshold_enabled": false } }'

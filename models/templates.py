@@ -48,15 +48,21 @@ class CtxPrompt:
         self.case += self.get_append_retrieval(ret_to_append, index=self.ind if add_index else None)
         self.ind = (self.ind + 1) if add_index else self.ind
 
-    def update_retrieval(self, ret: str, dedup: bool = True):
+    def update_retrieval(self, ret: str, method: str = 'replace', dedup: bool = True):
+        assert method in {'replace', 'append'}
         if self.ctx is None:
             self.ctx = ret
         else:
-            if dedup:
-                if ret.lower() not in self.ctx.lower():
+            if method == 'replace':
+                self.ctx = ret
+            elif method == 'append':
+                if dedup:
+                    if ret.lower() not in self.ctx.lower():
+                        self.ctx += ' ' + ret
+                else:
                     self.ctx += ' ' + ret
             else:
-                self.ctx += ' ' + ret
+                raise NotImplementedError
 
     def format(
         self,

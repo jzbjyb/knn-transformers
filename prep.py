@@ -286,7 +286,7 @@ def save_beir_format(
                 fout.write(json.dumps(qid2dict[qid]) + '\n')
     if did2dict is not None:
         with open(os.path.join(beir_dir, 'corpus.jsonl'), 'w') as fout:
-            for did in did2dict:
+            for did in tqdm(did2dict, desc='save corpus'):
                 fout.write(json.dumps(did2dict[did]) + '\n')
     if split2qiddid is not None:
         os.makedirs(os.path.join(beir_dir, 'qrels'), exist_ok=True)
@@ -744,6 +744,35 @@ def compare(file1: str, file2: str, only_show_diff: bool = False, only_first_rig
                 input('')
 
 
+def kilt_to_beir(
+    kilt_wiki_file: str,
+    beir_dir: str,
+    dedup_doc: bool = False,
+    split: str = 'dev',
+):
+    qid2dict: Dict[str, Dict] = {}
+    did2dict: Dict[str, Dict] = {}
+    doc2did: Dict[str, str] = {}
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+
+    qid2dict['0'] = {'_id': '0', 'text': 'dummy'}
+    with open(kilt_wiki_file, 'r') as fin:
+        for l in tqdm(fin, desc='process kilt'):
+            example = json.loads(l)
+            title = example['wikipedia_title']
+            wiki_id = example['wikipedia_id']
+            for para_ind, para in enumerate(example['text']):
+                if dedup_doc and para in doc2did:
+                    did = doc2did[para]
+                else:
+                    did = str(len(did2dict))
+                    did2dict[did] = {'_id': did, 'title': title, 'text': para, 'metadata': {'wiki_id': wiki_id, 'para_index': para_ind}}
+                    doc2did[para] = did
+                if len(split2qiddid) == 0:
+                    split2qiddid[split].append(('0', did))
+        save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
+
+
 def strategyqa_to_beir(
     strategyqa_file: str,
     beir_dir: str,
@@ -844,6 +873,7 @@ def eval(
     metric_func = evaluate.load('rouge')
 
     scount = 0
+    search_per_example: List[int] = []
     correct = incorrect = wrongformat = total = 0
     ret_accs: List[List[float]] = []
     ret_covers: List[List[float]] = []
@@ -886,7 +916,10 @@ def eval(
             else:
                 incorrect += 1
 
-            scount += '[Search(' in pred
+            has_search = '[Search(' in pred
+            scount += has_search
+            if has_search:
+                search_per_example.append(len(re.findall('\[Search\(', pred)))
 
             if debug:
                 print('Q->', question)
@@ -944,7 +977,52 @@ def eval(
 
     print('retrieval acc\tcoverage')
     print(f'{format_list(ret_accs)}\t{format_list(ret_covers)}')
-    print(f'search count: {scount}')
+    print(f'#examples with search: {scount}, #avg search per example {np.mean(search_per_example)}')
+
+
+def build_elasticsearch(
+    beir_corpus_file: str,
+    index_name: str,
+):
+    from beir.retrieval.search.lexical.elastic_search import ElasticSearch
+    config = {
+        "hostname": 'localhost',
+        "index_name": index_name,
+        "keys": {"title": "title", "body": "txt"},
+        "timeout": 100,
+        "retry_on_timeout": True,
+        "maxsize": 24,
+        "number_of_shards": 'default',
+        "language": 'english',
+    }
+    es = ElasticSearch(config)
+
+    # create index
+    print(f'create index {index_name}')
+    es.delete_index()
+    time.sleep(5)
+    es.create_index()
+
+    # generator
+    def generate_actions():
+        with open(beir_corpus_file, 'r') as fin:
+            for l in fin:
+                doc = json.loads(l)
+                es_doc = {
+                    "_id": str(doc['_id']),
+                    "_op_type": "index",
+                    "refresh": "wait_for",
+                    config['keys']['body']: doc['text'],
+                    config['keys']['title']: doc['title'],
+                }
+                yield es_doc
+
+    # index
+    progress = tqdm(unit='docs')
+    es.bulk_add_to_index(
+        generate_actions=generate_actions(),
+        progress=progress)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -953,7 +1031,7 @@ if __name__ == '__main__':
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
         'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare',
-        'strategyqa_to_beir', 'tsv_to_beir', 'eval'])
+        'strategyqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir', 'build_elasticsearch'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -1065,5 +1143,15 @@ if __name__ == '__main__':
     elif args.task == 'eval':
         jsonl_file = args.inp[0]
         eval(jsonl_file,
-            anchor_text='answer is',
-            beir_dir='/projects/metis1/users/zhengbaj/exp/knn-transformers/data/strategyqa/train_cot_beir')
+            #anchor_text='So the final answer is:',
+            anchor_text='So the final answer is',
+            beir_dir='data/strategyqa/train_cot_beir')
+
+    elif args.task == 'kilt_to_beir':
+        kilt_wiki_file = args.inp[0]
+        beir_dir = args.out
+        kilt_to_beir(kilt_wiki_file, beir_dir)
+
+    elif args.task == 'build_elasticsearch':
+        beir_corpus_file, index_name = args.inp  # 'wikipedia_kilt'
+        build_elasticsearch(beir_corpus_file, index_name)
