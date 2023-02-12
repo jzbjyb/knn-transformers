@@ -18,9 +18,11 @@ def get_organic_results(query):
     }
 
     brave_organic_search_results = []
+    print(query)
 
     html = requests.get('https://search.brave.com/search', headers=headers, params=params)
     soup = BeautifulSoup(html.text, 'lxml')
+    
     
     for result in soup.select('.snippet'):
         title = result.select_one('.snippet-title').get_text().strip()
@@ -28,7 +30,7 @@ def get_organic_results(query):
         link = result.select_one('.result-header').get('href')
         displayed_link = result.select_one('.snippet-url').get_text().strip().replace('\n', '')
 
-        snippet = result.select_one('.snippet-content .snippet-description , .snippet-description:nth-child(1)').get_text()
+        snippet = result.select_one('.snippet-content .snippet-description , .snippet-description:nth-child(1), .description').get_text()
         snippet = snippet.strip().split('\n')[-1].lstrip() if snippet else None
 
         snippet_image = result.select_one('.video-thumb img , .thumb')
@@ -49,6 +51,8 @@ def get_organic_results(query):
                     'link': sitelink.get('href')
                 })
         
+        print(snippet)
+        
         brave_organic_search_results.append({
             'title': title,
             'favicon': favicon,
@@ -68,13 +72,18 @@ def get_batch_brave_search_results(queries):
     results = []
     for query in queries:
         results.append(get_organic_results(query))
-        time.sleep(1 + random.random())
+        time.sleep(3 + random.random())
     return results
 
 if __name__ == "__main__":
-    queries = ["hydrogen atomic number",
-               "number of spice girls",
-               "oxygen atomic number"]
+    queries = ['Could a dichromat probably easily distinguish chlorine gas from neon gas?', 
+               'Can you buy spinal cord at Home Depot?', 
+               'Could a cow produce Harvey Milk?', 
+               'Was Mozart accused of stealing from Richard Wagner?', 
+               'Can you transport a primate in a backpack?', 
+               'Was Dr. Seuss a liar?', 
+               'Did Johann Sebastian Bach ever win a Grammy Award?', 
+               'Would moon cakes be easy to find in Chinatown, Manhattan?']
     
     results = get_batch_brave_search_results(queries)
-    print(results)
+    print(json.dumps(results))
