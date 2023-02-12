@@ -1,11 +1,12 @@
 from bs4 import BeautifulSoup
 import requests, lxml, json
+import time
+import random
 
-
-def get_organic_results():
+def get_organic_results(query):
     # https://docs.python-requests.org/en/master/user/quickstart/#passing-parameters-in-urls
     params = {
-        'q': 'hydrogen atomic number', 		# query
+        'q': query, 		# query
         'source': 'web',		# source
         'tf': 'at',				# publish time (by default any time)
         'offset': 0				# pagination (start from page 1)
@@ -60,8 +61,21 @@ def get_organic_results():
             'sitelinks': sitelinks
         })
         
-    print(json.dumps(brave_organic_search_results, indent=2, ensure_ascii=False))
-	
+        time.sleep(1 + random.random())
+        
+    return brave_organic_search_results
+
+
+def get_batch_brave_search_results(queries):
+    results = []
+    for query in queries:
+        results.append(get_organic_results(query))
+    return results
 
 if __name__ == "__main__":
-	get_organic_results()
+    queries = ["hydrogen atomic number",
+               "number of spice girls",
+               "oxygen atomic number"]
+    
+    results = get_batch_brave_search_results(queries)
+    print(results)
