@@ -60,9 +60,7 @@ def get_organic_results(query):
             'votes': votes,
             'sitelinks': sitelinks
         })
-        
-        time.sleep(1 + random.random())
-        
+                
     return brave_organic_search_results
 
 
@@ -70,6 +68,7 @@ def get_batch_brave_search_results(queries):
     results = []
     for query in queries:
         results.append(get_organic_results(query))
+        time.sleep(1 + random.random())
     return results
 
 if __name__ == "__main__":
