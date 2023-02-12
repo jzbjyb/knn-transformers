@@ -7,7 +7,7 @@ def ai21_generate(prompts, temperature=0, max_tokens=256, stop='\n\n'):
         try:
             response = requests.post(
                                     "https://api.ai21.com/studio/v1/j1-jumbo/complete",
-                                    headers={"Authorization": "Bearer 3lRJs0miElc0d9ZqDzNi8sYrmFD3Ip9f"},
+                                    headers={"Authorization": "Bearer YOUR_OWN_API_KEY"},
                                     json={
                                             "prompt": prompt, 
                                             "numResults": 1, 

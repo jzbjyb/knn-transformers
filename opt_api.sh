@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-debug=false
+debug=true
 
 num_shards=1
 output=$1

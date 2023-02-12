@@ -2,7 +2,7 @@ import cohere
 import logging
 
 def cohere_generate(prompts, temperature=0, max_tokens=256, stop='\n\n'):
-    co = cohere.Client('y5mqYHjjsXehMX97OdW66U0KRrGcdrHEM3IHq0Cz') # This is your trial API key
+    co = cohere.Client('YOUR_OWN_API_KEY') # This is your trial API key
     generations = []
     for prompt in prompts:
         try:

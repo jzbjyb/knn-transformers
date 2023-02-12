@@ -12,7 +12,7 @@ Documentation: https://docs.microsoft.com/en-us/bing/search-apis/bing-web-search
 # subscription_key = os.environ['BING_SEARCH_V7_SUBSCRIPTION_KEY']
 # endpoint = os.environ['BING_SEARCH_V7_ENDPOINT'] + "/bing/v7.0/search"
 
-subscription_key = ""
+subscription_key = "YOUR_OWN_API_KEY"
 endpoint = "https://api.bing.microsoft.com/" + "v7.0/search"
 
 # Query term(s) to search for. 
