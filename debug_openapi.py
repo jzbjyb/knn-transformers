@@ -4,7 +4,7 @@ import time
 
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
-openai.api_key = "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"
+openai.api_key = "YOUR_OWN_API_KEY"
 
 for i in range(100):
     response = openai.Completion.create(
