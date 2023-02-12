@@ -18,3 +18,4 @@ for i in range(100):
     print(i)
     print(response['usage'])
     time.sleep(10)
+    

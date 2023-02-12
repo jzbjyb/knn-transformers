@@ -532,7 +532,8 @@ class StrategyQA(BaseDataset):
     sa_ctx_output_template = lambda self, cot, ans: f'{cot}\nSo the final answer is: {ans}.'
 
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'sa', 'sa_ctx', 'sa_ctx_nofollow'}
+        assert prompt_type in {'cot', 'sa', 'sa_ctx',}
+        print('prompt type:', prompt_type)
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
@@ -571,7 +572,7 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=str, default='.')
     parser.add_argument('--shard_id', type=int, default=0)
     parser.add_argument('--num_shards', type=int, default=1)
-    parser.add_argument('--prompt_type', type=str, default='sa_ctx', choices=['cot', 'sa', 'sa_ctx'])
+    parser.add_argument('--prompt_type', type=str, default='cot', choices=['cot', 'sa', 'sa_ctx'])
 
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--max_num_examples', type=int, default=None)
@@ -601,8 +602,8 @@ if __name__ == '__main__':
         index_name=index_name,
         use_decoder_input_ids=True)
 
-    # no ret: freq 0, boundary [], use gold false, retrieval_triggers []
-    # gold ret: freq 0, boundary [], use gold true
+    # no ret: freq 0, boundary [], use gold false, retrieval_triggers [] retrieval_at_beginning': False
+    # gold ret: freq 0, boundary [], use gold true retrieval_at_beginning': False
     # ret once: freq 0, boundary [], use gold false, retrieval_at_beginning': True
     # ret every 16 tokens: freq 16, boundary [], use gold false
 
@@ -611,14 +612,14 @@ if __name__ == '__main__':
         'topk': 1,
         'frequency': 0,
         'boundary': [],
-        'use_gold': False,
+        'use_gold': True,
         'use_gold_iterative': False,
         'max_query_length': 16,
-        'retrieval_at_beginning': True,
+        'retrieval_at_beginning': False,
         'look_ahead_steps': 0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        # 'retrieval_trigers': [],
+        'retrieval_trigers': [],
         'append_retrieval': False,
         'use_retrieval_instruction': True
     }
