@@ -8,6 +8,34 @@ from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.lexical import BM25Search
 from beir.retrieval.search.lexical.elastic_search import ElasticSearch
+from .brave import get_batch_brave_search_results
+from .bing import search_bing_batch
+
+
+class SearchEngineConnector:
+    def __init__(self, engine: str):
+        self.fake_doc_id = '0'
+        self.fake_score = 0
+        assert engine in {'brave', 'bing'}
+        self.engine = engine
+
+    def retrieve(
+        self,
+        corpus = None,
+        queries: Dict[int, str] = None,
+        **kwargs,
+    ):
+        qs = list(queries.values())
+        if self.engine == 'brave':
+            se_results = get_batch_brave_search_results(qs)
+        elif self.engine == 'bing':
+            se_results = search_bing_batch(qs)
+        else:
+            raise NotImplementedError
+        results: Dict[int, Dict[str, Tuple[float, str]]] = {}
+        for (qid, query), ser in zip(queries.items(), se_results):
+            results[qid] = {self.fake_doc_id: (self.fake_score, r['snippet']) for r in ser}
+        return results
 
 
 class BM25:
@@ -17,6 +45,7 @@ class BM25:
         collator = None,
         dataset: GenericDataLoader = None,
         index_name: str = None,
+        engine: str = 'elasticsearch',
         encode_retrieval_in: str = 'encoder',
         use_encoder_input_ids: bool = False,
         use_decoder_input_ids: bool = True,
@@ -24,10 +53,17 @@ class BM25:
         self.tokenizer = tokenizer
         self.collator = collator
         self.corpus, self.queries, self.qrels = dataset
-        # load bm25 index
-        model = BM25Search(index_name=index_name, hostname='localhost', initialize=False, number_of_shards=1)
-        self.max_ret_topk = 100
-        self.retriever = EvaluateRetrieval(model, k_values=[self.max_ret_topk])
+        # load index
+        assert engine in {'elasticsearch', 'brave', 'bing'}
+        if engine == 'elasticsearch':
+            self.max_ret_topk = 100
+            self.retriever = EvaluateRetrieval(
+                BM25Search(index_name=index_name, hostname='localhost', initialize=False, number_of_shards=1),
+                k_values=[self.max_ret_topk])
+        else:
+            self.max_ret_topk = 10
+            self.retriever = SearchEngineConnector(engine)
+
         self.encode_retrieval_in = encode_retrieval_in
         assert encode_retrieval_in in {'encoder', 'decoder'}
         self.use_encoder_input_ids = use_encoder_input_ids

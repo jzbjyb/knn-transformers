@@ -773,6 +773,27 @@ def kilt_to_beir(
         save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
+def dpr_to_beir(
+    dpr_file: str,
+    beir_dir: str,
+    split: str = 'dev',
+):
+    qid2dict: Dict[str, Dict] = {}
+    did2dict: Dict[str, Dict] = {}
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+
+    qid2dict['0'] = {'_id': '0', 'text': 'dummy'}
+    with open(dpr_file, 'r') as fin:
+        reader = csv.reader(fin, delimiter='\t')
+        header = next(reader)
+        for row in tqdm(reader, desc='process dpr'):
+            did, text, title = row
+            did2dict[did] = {'_id': did, 'title': title, 'text': text}
+            if len(split2qiddid) == 0:
+                split2qiddid[split].append(('0', did))
+        save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
+
+
 def strategyqa_to_beir(
     strategyqa_file: str,
     beir_dir: str,
@@ -1031,7 +1052,8 @@ if __name__ == '__main__':
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
         'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare',
-        'strategyqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir', 'build_elasticsearch'])
+        'strategyqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
+        'build_elasticsearch', 'dpr_to_beir'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
@@ -1151,6 +1173,11 @@ if __name__ == '__main__':
         kilt_wiki_file = args.inp[0]
         beir_dir = args.out
         kilt_to_beir(kilt_wiki_file, beir_dir)
+
+    elif args.task == 'dpr_to_beir':
+        dpr_file = args.inp[0]
+        beir_dir = args.out
+        dpr_to_beir(dpr_file, beir_dir)
 
     elif args.task == 'build_elasticsearch':
         beir_corpus_file, index_name = args.inp  # 'wikipedia_kilt'

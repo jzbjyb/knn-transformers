@@ -12,7 +12,7 @@ batch_size=8
 max_num_examples=250
 model=code-davinci-002
 fewshot=6
-index_name=wikipedia_kilt
+index_name=wikipedia_dpr
 
 if [[ ${model} != code-* ]]; then
     num_shards=1
@@ -28,7 +28,7 @@ fi
 # query api
 if [[ ${debug} == "true" ]]; then
     okey="${keys[0]}"
-    OPENAI_API_KEY=${okey} python -m models.openai_api \
+    OPENAI_API_KEY=${okey} BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
         --model ${model} \
         --input data/strategyqa/train_cot_beir \
         --index_name ${index_name} \
@@ -44,7 +44,7 @@ fi
 
 for (( i=0; i<${num_shards}; i++ )); do
     okey="${keys[$i]}"
-    OPENAI_API_KEY=${okey} python -m models.openai_api \
+    OPENAI_API_KEY=${okey} BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
         --model ${model} \
         --input data/strategyqa/train_cot_beir \
         --index_name ${index_name} \

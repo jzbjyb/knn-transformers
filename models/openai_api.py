@@ -333,7 +333,8 @@ if __name__ == '__main__':
         tokenizer=ret_tokenizer,
         dataset=(corpus, queries, qrels),
         index_name=args.index_name,
-        use_decoder_input_ids=True)
+        use_decoder_input_ids=True,
+        engine='elasticsearch')
 
     # no ret: freq 0, boundary [], use gold false, retrieval_triggers [] retrieval_at_beginning': False
     # gold ret: freq 0, boundary [], use gold true retrieval_at_beginning': False
@@ -343,17 +344,16 @@ if __name__ == '__main__':
     retrieval_kwargs = {
         'retriever': retriever,
         'topk': 1,
-        'frequency': 0,
+        'frequency': 1,
         'boundary': [],
-        'use_gold': True,
+        'use_gold': False,
         'use_gold_iterative': False,
         'max_query_length': 16,
-        'retrieval_at_beginning': False,
-        'retrieval_at_beginning': False,
+        'retrieval_at_beginning': True,
         'look_ahead_steps': 0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        'retrieval_trigers': [('\[Search\("', '")]')],
+        'retrieval_trigers': [],
         'append_retrieval': False,
         'use_retrieval_instruction': False
     }
