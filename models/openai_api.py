@@ -8,6 +8,7 @@ import os
 import re
 import time
 import json
+from filelock import FileLock
 from transformers import AutoTokenizer, GPT2TokenizerFast
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.search.lexical import BM25Search
@@ -302,6 +303,7 @@ if __name__ == '__main__':
     parser.add_argument('--index_name', type=str, default='test')
     parser.add_argument('--shard_id', type=int, default=0)
     parser.add_argument('--num_shards', type=int, default=1)
+    parser.add_argument('--file_lock', type=str, default=None)
 
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--max_num_examples', type=int, default=None)
@@ -329,7 +331,8 @@ if __name__ == '__main__':
         dataset=(corpus, queries, qrels),
         index_name=args.index_name,
         use_decoder_input_ids=True,
-        engine='elasticsearch')
+        engine='bing',
+        file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
         'topk': 1,

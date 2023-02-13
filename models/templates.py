@@ -64,6 +64,20 @@ class CtxPrompt:
             else:
                 raise NotImplementedError
 
+    def format_reference(self, ref: str, method: str = 'default'):
+        assert method in {'default', 'ignore', 'ignore_for_retrieval_instruct'}
+        if method == 'default':
+            return 'Reference:\n' + ref
+        if method == 'ignore':
+            formatted = [
+                '1. The reference below might be helpful when answering questions but it is noisy. Free free to ignore irrelevant information in it.', ref.strip(),
+                '2. You should write out the reasoning steps and then draw your conclusion, where the reasoning steps should utilize the Search API "[Search(term)]" to look up information about "term" whenever possible. For example:']
+            return '\n\n'.join(formatted)
+        if method == 'ignore_for_retrieval_instruct':
+            formatted = ['The reference below might be helpful when answering questions but it is noisy. Free free to ignore irrelevant information in it.', ref.strip()]
+            return '\n\n'.join(formatted)
+        raise NotImplementedError
+
     def format(
         self,
         use_ctx: bool = False,
@@ -74,14 +88,14 @@ class CtxPrompt:
         use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
 
         demo_formatted: str = '\n\n'.join([d.format(use_ctx=False, use_ret_instruction=False) for d in self.demo])  # TODO: no retrieval for demo
-        ref = ('Reference:\n' + self.ctx) if use_ctx else None
+        ref = self.format_reference(self.ctx, method='ignore') if use_ctx else None
         task, ret, ensemble = self.ret_instruction.format() if use_ret_instruction else (None, None, None)
         elements: List[str] = []
 
         if use_ctx and self.ctx_position == 'begin':
             elements.append(ref)
 
-        # append retrieval instruction
+        # append retrieval instructionj
         if use_ret_instruction:
             elements.append(ret)
 
@@ -110,7 +124,8 @@ class RetrievalInstruction:
     toolformer_instruction: Dict[str, Any] = {
         'retrieval': '1. You should use a Search API to look up information. You can do so by writing "[Search(term)]" where "term" is the search term you want to look up. For example:',
         'task': '2. You should answer a question by thinking step-by-step. You can do so by first write out the reasoning steps and then draw you conclusion. For example:',
-        'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw you conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible.',
+        #'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw you conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible.',
+        'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw you conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible. However, you should not directly copy chunks of words from "reference".',
         'examplars': [
             {
                 'question': 'But what are the risks during production of nanomaterials?',

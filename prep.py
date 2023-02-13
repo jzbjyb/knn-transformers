@@ -905,7 +905,7 @@ def eval(
         for l in fin:
             total += 1
             l = json.loads(l)
-            trace = l['trace'][0] if 'trace' in l else None
+            trace = l['trace'] if 'trace' in l else None
             qid = l['qid']
             question = l['question']
             ref = l['gold_output']
@@ -929,8 +929,10 @@ def eval(
                 ret_dids = np.array([['placeholder']], dtype=np.str_)
 
             # yes/no
+            formatwrong = False
             position = pred.find(anchor_text)
             if position == -1:
+                formatwrong = True
                 wrongformat += 1
             elif yesno_ans in pred[position + len(anchor_text):].strip().lower():
                 correct += 1
@@ -942,10 +944,14 @@ def eval(
             if has_search:
                 search_per_example.append(len(re.findall('\[Search\(', pred)))
 
-            if debug:
+            if debug and formatwrong:
                 print('Q->', question)
                 print()
-                print('T->', trace)
+                print('T->')
+                for prompt, cont in trace:
+                    print(prompt)
+                    print('->', cont)
+                    print('\n------------------\n')
                 print()
                 print('P->', pred)
                 input()
@@ -1166,7 +1172,7 @@ if __name__ == '__main__':
         jsonl_file = args.inp[0]
         eval(jsonl_file,
             #anchor_text='So the final answer is:',
-            anchor_text='So the final answer is',
+            anchor_text='answer is',
             beir_dir='data/strategyqa/train_cot_beir')
 
     elif args.task == 'kilt_to_beir':

@@ -12,6 +12,7 @@ pip install accelerate
 # has bugs with --global-option="build_ext" --global-option="-j8"
 DS_BUILD_OPS=1 DS_BUILD_FUSED_LAMB=1 DS_BUILD_SPARSE_ATTN=0 DS_BUILD_AIO=0 pip install deepspeed
 pip install sentencepiece==0.1.83
+pip install filelock
 
 # mongo for KILT
 #mongod --dbpath /path/to/data --logpath /path/to/mongod.log --fork

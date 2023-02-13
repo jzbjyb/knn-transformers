@@ -42,6 +42,7 @@ if [[ ${debug} == "true" ]]; then
     exit
 fi
 
+file_lock=$(mktemp)
 for (( i=0; i<${num_shards}; i++ )); do
     okey="${keys[$i]}"
     OPENAI_API_KEY=${okey} BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
@@ -54,8 +55,10 @@ for (( i=0; i<${num_shards}; i++ )); do
         --batch_size ${batch_size} \
         --output ${output}.${i} \
         --num_shards ${num_shards} \
-        --shard_id ${i} &
+        --shard_id ${i} \
+        --file_lock ${file_lock} &
 done
 wait
+rm ${file_lock}
 cat ${output}.* > ${output}
 rm ${output}.*

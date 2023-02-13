@@ -3,6 +3,7 @@ import time
 import tqdm
 import numpy as np
 import torch
+from filelock import FileLock
 from transformers import AutoTokenizer
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
@@ -13,11 +14,15 @@ from .bing import search_bing_batch
 
 
 class SearchEngineConnector:
-    def __init__(self, engine: str):
-        self.fake_doc_id = '0'
+    def __init__(
+        self,
+        engine: str,
+        file_lock: FileLock = None
+    ):
         self.fake_score = 0
         assert engine in {'brave', 'bing'}
         self.engine = engine
+        self.file_lock = file_lock
 
     def retrieve(
         self,
@@ -25,17 +30,23 @@ class SearchEngineConnector:
         queries: Dict[int, str] = None,
         **kwargs,
     ):
-        qs = list(queries.values())
-        if self.engine == 'brave':
-            se_results = get_batch_brave_search_results(qs)
-        elif self.engine == 'bing':
-            se_results = search_bing_batch(qs)
-        else:
-            raise NotImplementedError
-        results: Dict[int, Dict[str, Tuple[float, str]]] = {}
-        for (qid, query), ser in zip(queries.items(), se_results):
-            results[qid] = {self.fake_doc_id: (self.fake_score, r['snippet']) for r in ser}
-        return results
+        if self.file_lock is not None:
+            self.file_lock.acquire()
+        try:
+            qs = list(queries.values())
+            if self.engine == 'brave':
+                se_results = get_batch_brave_search_results(qs)
+            elif self.engine == 'bing':
+                se_results = search_bing_batch(qs)
+            else:
+                raise NotImplementedError
+            results: Dict[int, Dict[str, Tuple[float, str]]] = {}
+            for (qid, query), ser in zip(queries.items(), se_results):
+                results[qid] = {str(did): (self.fake_score, r['snippet']) for did, r in enumerate(ser)}
+            return results
+        finally:
+            if self.file_lock is not None:
+                self.file_lock.release()
 
 
 class BM25:
@@ -49,6 +60,7 @@ class BM25:
         encode_retrieval_in: str = 'encoder',
         use_encoder_input_ids: bool = False,
         use_decoder_input_ids: bool = True,
+        file_lock: FileLock = None,
     ):
         self.tokenizer = tokenizer
         self.collator = collator
@@ -62,7 +74,7 @@ class BM25:
                 k_values=[self.max_ret_topk])
         else:
             self.max_ret_topk = 10
-            self.retriever = SearchEngineConnector(engine)
+            self.retriever = SearchEngineConnector(engine, file_lock=file_lock)
 
         self.encode_retrieval_in = encode_retrieval_in
         assert encode_retrieval_in in {'encoder', 'decoder'}
