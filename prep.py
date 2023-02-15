@@ -18,6 +18,7 @@ from datasets import load_dataset
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.lexical import BM25Search as BM25
+from models.datasets import HotpotQA
 
 class Wikipedia(object):
     def __init__(self):
@@ -714,14 +715,22 @@ def compare(file1: str, file2: str, only_show_diff: bool = False, only_first_rig
 
             if show:
                 print('^' * 100)
-                for i, (t1p, t1r) in enumerate(ts1):
+                for i, t1 in enumerate(ts1):
+                    if type(t1) is str:
+                        t1p, t1r = t1, None
+                    else:
+                        t1p, t1r = t1
                     print('-' * 30)
                     print(f'1.{i}->', t1p)
                     print(f'1.{i}->', t1r)
                 print('')
 
                 print('^' * 100)
-                for i, (t2p, t2r) in enumerate(ts2):
+                for i, t2 in enumerate(ts2):
+                    if type(t2) is str:
+                        t2p, t2r = t2, None
+                    else:
+                        t2p, t2r = t2
                     print('-' * 30)
                     print(f'2.{i}->', t2p)
                     print(f'2.{i}->', t2r)
@@ -847,6 +856,45 @@ def strategyqa_to_beir(
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
+def hotpotqa_to_beir(
+    beir_dir: str,
+    split: str = 'dev',
+    dedup_doc: bool = True,
+):
+    qid2dict: Dict[str, Dict] = {}
+    did2dict: Dict[str, Dict] = {}
+    question2qid: Dict[str, Dict] = {}
+    doc2did: Dict[str, str] = {}
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+
+    dataset = load_dataset('hotpot_qa', 'distractor')['validation' if split == 'dev' else 'train']
+    for example_ind in range(len(dataset)):
+        example = dataset[example_ind]
+
+        question = example['question'].strip()
+        answer = example['answer'].strip()
+        qid = ori_id = example['id']
+
+        qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer, 'id': ori_id}}
+        question2qid[question] = qid
+
+        title2paras: Dict[str, List[str]] = dict(zip(example['context']['title'], example['context']['sentences']))
+        for title, para_ind in zip(example['supporting_facts']['title'], example['supporting_facts']['sent_id']):
+            if para_ind >= len(title2paras[title]):
+                print(ori_id, 'support fact index oob')
+                continue
+            doc = title2paras[title][para_ind].strip()
+            if dedup_doc and doc in doc2did:
+                did = doc2did[doc]
+            else:
+                did = str(len(did2dict))
+                did2dict[did] = {'_id': did, 'title': title, 'text': doc}
+                doc2did[doc] = did
+            split2qiddid[split].append((qid, did))
+
+    save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
+
+
 def tsv_to_beir(
     tsv_file: str,
     beir_dir: str,
@@ -880,12 +928,31 @@ def tsv_to_beir(
 
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
+def self_consistency(examples: List[Dict], anchor_text: str):
+    if len(examples) == 1:
+        return examples[0]
+    answer2indices: Dict[str, List[int]] = defaultdict(list)
+    for i, example in enumerate(examples):
+        pred = example['output'].split('\n\n', 1)[0].strip()
+        position = pred.find(anchor_text)
+        if position != -1:
+            ans = pred[position + len(anchor_text):].strip().lower()
+            answer2indices[ans].append(i)
+    answer2indices: List[Tuple[str, List[int]]] = sorted(answer2indices.items(), key=lambda x: -len(x[1]) + random.random() / 2)
+    if len(answer2indices):
+        candidates = answer2indices[0][1]
+        return examples[candidates[random.randint(0, len(candidates) - 1)]]
+    else:  # all format error
+        return examples[random.randint(0, len(examples) - 1)]
+
 def eval(
-    jsonl_file: str,
+    dataset: str,
+    jsonl_files: List[str],
     anchor_text: str = 'So the answer is',
     retrieval_percentiles: List[Union[int, float]] = [1, 0.25, 0.5, 0.75, 1.0],
     remove_followup: Tuple[str, str] = ('Follow up[^:]*:', '?'),
     beir_dir: str = None,
+    consistency_suffix: str = 'run',
     debug: bool = False,
 ):
     if beir_dir is not None:
@@ -901,86 +968,112 @@ def eval(
     predictions: List[str] = []
     followups: List[str] = []
     references: List[str] = []
-    with open(jsonl_file, 'r') as fin:
-        for l in fin:
-            total += 1
-            l = json.loads(l)
-            trace = l['trace'] if 'trace' in l else None
-            qid = l['qid']
-            question = l['question']
-            ref = l['gold_output']
-            pred = l['output'].split('\n\n', 1)[0].strip()
-            if remove_followup:
-                raw_pred = pred
-                rms, rme = remove_followup
-                pred = re.sub(f'{rms}[^\{rme}]*\{rme}', '', raw_pred)
-                fu = ' '.join(re.findall(f'{rms}[^\{rme}]*\{rme}', raw_pred))
-                followups.append(fu)
-            yesno_ans = l['answer']
-            if anchor_text in yesno_ans:
-                yesno_ans = yesno_ans[yesno_ans.find(anchor_text) + len(anchor_text):].strip()[:-1].strip().lower()
-            assert yesno_ans in {'yes', 'no'}
 
-            references.append(ref)
-            predictions.append(pred)
-            if 'retrieval' in l and l['retrieval']:
-                ret_dids = np.array([r if type(r[0]) is str else r[0] for r in l['retrieval']], dtype=np.str_)
-            else:
-                ret_dids = np.array([['placeholder']], dtype=np.str_)
+    root_file = None
+    if len(jsonl_files) > 1:  # consistency
+        for jf in jsonl_files:
+            assert jf.rsplit('.', 1)[1].startswith(consistency_suffix)
+        root_file = jsonl_files[0].rsplit('.', 1)[0]
+    examples_all_files = [[json.loads(l) for l in open(jf)] for jf in jsonl_files]
+    assert len(set([len(examples) for examples in examples_all_files])) == 1
+    total = len(examples_all_files[0])
 
-            # yes/no
-            formatwrong = False
-            position = pred.find(anchor_text)
-            if position == -1:
-                formatwrong = True
-                wrongformat += 1
-            elif yesno_ans in pred[position + len(anchor_text):].strip().lower():
-                correct += 1
-            else:
-                incorrect += 1
+    consistency_examples: List[Dict] = []
+    for i in range(total):
+        examples: List[Dict] = [file[i] for file in examples_all_files]
 
-            has_search = '[Search(' in pred
-            scount += has_search
-            if has_search:
-                search_per_example.append(len(re.findall('\[Search\(', pred)))
+        # aggregate multiple examples with consistency
+        example = self_consistency(examples, anchor_text=anchor_text)
+        consistency_examples.append(example)
 
-            if debug and formatwrong:
-                print('Q->', question)
-                print()
-                print('T->')
-                for prompt, cont in trace:
-                    print(prompt)
-                    print('->', cont)
-                    print('\n------------------\n')
-                print()
-                print('P->', pred)
-                input()
-
-            # retrieval
-            ret_accs.append([])
-            ret_covers.append([])
-            if ret_dids is not None:
-                ret_seq_len = len(ret_dids)
-                rel_dids: List[str] = np.array([d for d, r in qrels[qid].items() if r])
-                rels = np.isin(ret_dids, rel_dids).any(-1)  # (ret_seq_len)
-                prev_pt = 0
-                for pt in retrieval_percentiles:
-                    if type(pt) is int:
-                        pass
-                    elif type(pt) is float:
-                        pt = int(ret_seq_len * pt)
-                    else:
-                        raise NotImplementedError
-                    if pt <= prev_pt:  # at least one token
-                        pt = prev_pt + 1
-                    ret_accs[-1].append(rels[prev_pt:pt].mean())
-                    ret_covers[-1].append(len(np.intersect1d(ret_dids[:pt].reshape(-1), rel_dids)) / (len(rel_dids) or 1))
-                    prev_pt = max(min(pt, ret_seq_len - 1), 0)
-
-        # rouge
-        metrics = metric_func.compute(predictions=predictions, references=references)
+        # evaluate based on the aggregated example
+        trace = example['trace'] if 'trace' in example else None
+        qid = example['qid']
+        question = example['question']
+        ref = example['gold_output']
+        pred = example['output'].split('\n\n', 1)[0].strip()
         if remove_followup:
-            metrics_followup = metric_func.compute(predictions=followups, references=references)
+            raw_pred = pred
+            rms, rme = remove_followup
+            pred = re.sub(f'{rms}[^\{rme}]*\{rme}', '', raw_pred)
+            fu = ' '.join(re.findall(f'{rms}[^\{rme}]*\{rme}', raw_pred))
+            followups.append(fu)
+        final_ans = example['answer']
+        if anchor_text in final_ans:
+            final_ans = final_ans[final_ans.find(anchor_text) + len(anchor_text):].strip()[:-1].strip().lower()
+        if dataset == 'strategyqa':
+            assert final_ans in {'yes', 'no'}
+
+        references.append(ref)
+        predictions.append(pred)
+        if 'retrieval' in example and example['retrieval']:
+            ret_dids = np.array([r if type(r[0]) is str else r[0] for r in example['retrieval']], dtype=np.str_)
+        else:
+            ret_dids = np.array([['placeholder']], dtype=np.str_)
+
+        formatwrong = False
+        position = pred.find(anchor_text)
+        if position == -1:
+            formatwrong = True
+            wrongformat += 1
+        else:
+            pred_ans = pred[position + len(anchor_text):].strip().lower()
+            if dataset == 'strategyqa':
+                iscorrect = final_ans in pred_ans
+            elif dataset == 'hotpotqa':
+                iscorrect = HotpotQA.exact_match_score(pred_ans, final_ans)
+            else:
+                raise NotImplementedError
+            correct += iscorrect
+            incorrect += (not iscorrect)
+
+        has_search = '[Search(' in pred
+        scount += has_search
+        if has_search:
+            search_per_example.append(len(re.findall('\[Search\(', pred)))
+
+        if debug:
+            print('Q->', question)
+            print()
+            print('T->')
+            for prompt, cont in trace:
+                print(prompt)
+                print('->', cont)
+                print('\n------------------\n')
+            print()
+            print('P->', pred)
+            input()
+
+        # retrieval
+        ret_accs.append([])
+        ret_covers.append([])
+        if ret_dids is not None:
+            ret_seq_len = len(ret_dids)
+            rel_dids: List[str] = np.array([d for d, r in qrels[qid].items() if r])
+            rels = np.isin(ret_dids, rel_dids).any(-1)  # (ret_seq_len)
+            prev_pt = 0
+            for pt in retrieval_percentiles:
+                if type(pt) is int:
+                    pass
+                elif type(pt) is float:
+                    pt = int(ret_seq_len * pt)
+                else:
+                    raise NotImplementedError
+                if pt <= prev_pt:  # at least one token
+                    pt = prev_pt + 1
+                ret_accs[-1].append(rels[prev_pt:pt].mean())
+                ret_covers[-1].append(len(np.intersect1d(ret_dids[:pt].reshape(-1), rel_dids)) / (len(rel_dids) or 1))
+                prev_pt = max(min(pt, ret_seq_len - 1), 0)
+
+    if root_file:
+        with open(root_file + '.merge', 'w') as fout:
+            for e in consistency_examples:
+                fout.write(json.dumps(e) + '\n')
+
+    # rouge
+    metrics = metric_func.compute(predictions=predictions, references=references)
+    if remove_followup:
+        metrics_followup = metric_func.compute(predictions=followups, references=references)
 
     ret_accs = np.array(ret_accs, dtype=float).mean(0)
     ret_covers = np.array(ret_covers, dtype=float).mean(0)
@@ -1058,9 +1151,10 @@ if __name__ == '__main__':
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
         'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare',
-        'strategyqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
+        'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
         'build_elasticsearch', 'dpr_to_beir'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
+    parser.add_argument('--dataset', type=str, default='strategyqa', help='input dataset', choices=['strategyqa', 'hotpotqa'])
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
 
@@ -1163,17 +1257,28 @@ if __name__ == '__main__':
         beir_dir = args.out
         strategyqa_to_beir(strategyqa_file, beir_dir, prompt_file=prompt_file, split='dev')
 
+    elif args.task == 'hotpotqa_to_beir':
+        beir_dir = args.out
+        hotpotqa_to_beir(beir_dir, split='dev')
+
     elif args.task == 'tsv_to_beir':
         tsv_file = args.inp[0]
         beir_dir = args.out
         tsv_to_beir(tsv_file, beir_dir, split='dev')
 
     elif args.task == 'eval':
-        jsonl_file = args.inp[0]
-        eval(jsonl_file,
-            #anchor_text='So the final answer is:',
-            anchor_text='answer is',
-            beir_dir='data/strategyqa/train_cot_beir')
+        dataset = args.dataset
+        jsonl_files = glob.glob(args.inp[0])
+        if dataset == 'hotpotqa':
+            eval(dataset=dataset,
+                jsonl_files=jsonl_files,
+                anchor_text='answer is',
+                beir_dir='data/hotpotqa/dev_beir',)
+        elif dataset == 'strategyqa':
+            eval(dataset=dataset,
+                jsonl_files=jsonl_files,
+                anchor_text='answer is',
+                beir_dir='data/strategyqa/train_cot_beir')
 
     elif args.task == 'kilt_to_beir':
         kilt_wiki_file = args.inp[0]

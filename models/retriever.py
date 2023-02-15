@@ -166,11 +166,12 @@ class BM25:
             for qid, query in enumerate(queries):
                 _docids = []
                 _docs = []
-                for did, (score, text) in results[qid].items():
-                    _docids.append(did)
-                    _docs.append(text)
-                    if len(_docids) >= topk:
-                        break
+                if qid in results:
+                    for did, (score, text) in results[qid].items():
+                        _docids.append(did)
+                        _docs.append(text)
+                        if len(_docids) >= topk:
+                            break
                 if len(_docids) < topk:  # add dummy docs
                     _docids += ['-1'] * (topk - len(_docids))
                     _docs += [''] * (topk - len(_docs))

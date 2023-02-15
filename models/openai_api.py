@@ -15,7 +15,7 @@ from beir.retrieval.search.lexical import BM25Search
 import openai
 from .retriever import BM25
 from .templates import CtxPrompt, RetrievalInstruction
-from .datasets import StrategyQA
+from .datasets import StrategyQA, HotpotQA
 
 logging.basicConfig(level=logging.INFO)
 
@@ -46,7 +46,8 @@ class QueryAgent:
         model: str = 'code-davinci-002',
         max_generation_len: int = 128,
         retrieval_kwargs: Dict[str, Any] = {},
-        tokenizer: AutoTokenizer = None
+        tokenizer: AutoTokenizer = None,
+        temperature: float = 0,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -54,9 +55,8 @@ class QueryAgent:
         # generation args
         self.final_stop_sym = '\n\n'
         self.max_generation_len = max_generation_len
-        self.temperature = 0
-        assert self.temperature == 0, f'do not support sampling'
-        self.top_p = 0
+        self.temperature = temperature
+        self.top_p = 1.0
 
         # retrieval args
         self.retriever = retrieval_kwargs.get('retriever', None)
@@ -146,7 +146,7 @@ class QueryAgent:
                     [q.format(use_ctx=True) for q in queries],
                     params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym})
                 outputs = [ar.text for ar in ars]
-                traces = [[ar.prompt] for ar in ars]
+                traces = [[(ar.prompt, ar.text)] for ar in ars]
                 return outputs, None, traces
             else:
                 return self.ret_prompt(queries)
@@ -155,7 +155,7 @@ class QueryAgent:
                 [q.format(use_ctx=False) for q in queries],
                 params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym})
             outputs = [ar.text for ar in ars]
-            traces = [[ar.prompt] for ar in ars]
+            traces = [[(ar.prompt, ar.text)] for ar in ars]
             return outputs, None, traces
 
     def ret_prompt(
@@ -296,10 +296,10 @@ class QueryAgent:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa'])
+    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa'])
     parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003'])
-    parser.add_argument('--input', type=str, default='.')
-    parser.add_argument('--output', type=str, default='.')
+    parser.add_argument('--input', type=str, default=None)
+    parser.add_argument('--output', type=str, default=None)
     parser.add_argument('--index_name', type=str, default='test')
     parser.add_argument('--shard_id', type=int, default=0)
     parser.add_argument('--num_shards', type=int, default=1)
@@ -307,8 +307,9 @@ if __name__ == '__main__':
 
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--max_num_examples', type=int, default=None)
-    parser.add_argument('--fewshot', type=int, default=6)
+    parser.add_argument('--fewshot', type=int, default=0)
     parser.add_argument('--max_generation_len', type=int, default=128)
+    parser.add_argument('--temperature', type=float, default=0.0)
 
     parser.add_argument('--build_index', action='store_true')
     parser.add_argument('--seed', type=int, default=2022)
@@ -317,10 +318,11 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
 
     # load retrieval corpus and index
-    corpus, queries, qrels = GenericDataLoader(data_folder=args.input).load(split='dev')
+    corpus, queries, qrels = GenericDataLoader(data_folder=args.input).load(split='dev') if args.input else (None, None, None)
     if args.build_index:
-        BM25Search(index_name=args.index_name, hostname='localhost', initialize=True, number_of_shards=1).index(corpus)
-        time.sleep(5)
+        if args.input:
+            BM25Search(index_name=args.index_name, hostname='localhost', initialize=True, number_of_shards=1).index(corpus)
+            time.sleep(5)
         exit()
 
     # init agent
@@ -331,21 +333,21 @@ if __name__ == '__main__':
         dataset=(corpus, queries, qrels),
         index_name=args.index_name,
         use_decoder_input_ids=True,
-        engine='bing',
+        engine='elasticsearch',
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
         'topk': 1,
-        'frequency': 1,
-        'boundary': [],
+        'frequency': 0,
+        'boundary': ['")]'],
         'use_gold': False,
         'use_gold_iterative': False,
         'max_query_length': 16,
-        'retrieval_at_beginning': True,
+        'retrieval_at_beginning': False,
         'look_ahead_steps': 0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        'retrieval_trigers': [],
+        'retrieval_trigers': [('\[Search\("', '")]')],
         'append_retrieval': False,
         'use_retrieval_instruction': False
     }
@@ -353,13 +355,19 @@ if __name__ == '__main__':
         model=args.model,
         tokenizer=prompt_tokenizer,
         max_generation_len=args.max_generation_len,
-        retrieval_kwargs=retrieval_kwargs)
+        retrieval_kwargs=retrieval_kwargs,
+        temperature=args.temperature)
     if retrieval_kwargs['use_retrieval_instruction']:
         CtxPrompt.ret_instruction = RetrievalInstruction()
 
     # load data
     if args.dataset == 'strategyqa':
-        data = StrategyQA(args.input, prompt_type='tool')
+        data = StrategyQA(args.input, prompt_type='cot')
+        if qagent.append_retrieval:
+            data.retrieval_augment_examplars(qagent, retrieval_at_beginning=retrieval_kwargs['retrieval_at_beginning'])
+        data.format(fewshot=args.fewshot)
+    elif args.dataset == 'hotpotqa':
+        data = HotpotQA('validation', prompt_type='tool')
         if qagent.append_retrieval:
             data.retrieval_augment_examplars(qagent, retrieval_at_beginning=retrieval_kwargs['retrieval_at_beginning'])
         data.format(fewshot=args.fewshot)
