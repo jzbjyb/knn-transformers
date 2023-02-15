@@ -21,7 +21,7 @@ def bing_search(query):
     params = {'q': query, 
               'mkt': 'en-US', 
               'responseFilter':['Webpages'], 
-              "count": 5,
+              "count": 1,
               "safeSearch": 'Off',
               "setLang": 'en-US'}
     
@@ -45,4 +45,4 @@ def bing_search(query):
         raise ex
 
 if __name__ == "__main__":
-    bing_search("Can you transport a primate in a backpack?")
+    bing_search("Do people remember Lucille Ball's winemaking as successful?")
