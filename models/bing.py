@@ -15,20 +15,31 @@ Documentation: https://docs.microsoft.com/en-us/bing/search-apis/bing-web-search
 subscription_key = os.environ['BING_SEARCH_V7_SUBSCRIPTION_KEY']
 endpoint = "https://api.bing.microsoft.com/" + "v7.0/search"
 
-def search_bing(query: str, count: int = 10, max_query_per_sec: int = 0.2):
-    mkt = 'en-US'
+def search_bing(query: str, count: int = 10, max_query_per_sec: int = 100, debug: bool = False):
     params = {
         'q': query,
-        'mkt': mkt,
+        'mkt': 'en-US',
         'responseFilter':['Webpages'],
-        'count': count
+        'count': count,
+        'safeSearch': 'Off',
+        'setLang': 'en-US'
     }
-    headers = {'Ocp-Apim-Subscription-Key': subscription_key}
+    headers = {
+        'Ocp-Apim-Subscription-Key': subscription_key,
+        'Pragma': 'no-cache',
+        'X-MSEdge-ClientID':'05EFBDF2399564422335AF4538A8655D',
+        'User-Agent': "Mozilla/5.0 (Windows NT 6.3; WOW64; Trident/7.0; Touch; rv:11.0) like Gecko",
+        'X-MSEdge-ClientIP': "128.2.211.82"
+    }
     try:
         response = requests.get(endpoint, headers=headers, params=params)
         response.raise_for_status()
+        response = response.json()
+        if debug:
+            print(response)
+            input()
         results: List[Dict] = []
-        for page in response.json()['webPages']['value']:
+        for page in response['webPages']['value']:
             result = {
                 'url': page['url'],
                 'title': page['name'],
@@ -45,3 +56,8 @@ def search_bing_batch(queries: List[str], count: int = 10):
     for query in queries:
         results.append(search_bing(query, count=count))
     return results
+
+
+if __name__ == '__main__':
+    query = "Do people remember Lucille Ball's winemaking as successful?"
+    search_bing(query)

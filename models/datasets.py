@@ -1,9 +1,10 @@
-from typing import Dict, List, Callable
+from typing import Dict, List, Callable, Tuple
 import os
 import json
 from operator import itemgetter
 import re
-from datasets import Dataset
+import string
+from datasets import Dataset, load_dataset
 from beir.datasets.data_loader import GenericDataLoader
 from .templates import CtxPrompt
 
@@ -299,3 +300,131 @@ class StrategyQA(BaseDataset):
                     'ctxs': ctxs,
                 })
         return Dataset.from_list(dataset)
+
+
+class HotpotQA(BaseDataset):
+    cot_examplars: List[Dict] = [
+        {
+            'question': "Which magazine was started first Arthur's Magazine or First for Women?",
+            'ctxs': [(None, "Arthur's Magazine (1844-1846) was an American literary periodical published in Philadelphia in the 19th century."),
+                (None, "First for Women is a woman's magazine published by Bauer Media Group in the USA.")],
+            'cot': ("Arthur's Magazine started in 1844. First for Women started in 1989. So Arthur's Magazine was started first."),
+            'answer': "Arthur's Magazine",
+        },
+        {
+            'question': 'The Oberoi family is part of a hotel company that has a head office in what city?',
+            'ctxs': [(None, 'The Oberoi family is an Indian family that is famous for its involvement in hotels, namely through The Oberoi Group.'),
+                (None, 'The Oberoi Group is a hotel company with its head office in Delhi.')],
+            'cot': ("The Oberoi family is part of the hotel company called The Oberoi Group. The Oberoi Group has its head office in Delhi."),
+            'answer': 'Delhi',
+        },
+        {
+            'question': "What nationality was James Henry Miller's wife?",
+            'ctxs': [(None, 'Margaret "Peggy" Seeger (born June 17, 1935) is an American folksinger.'),
+                (None, 'She is also well known in Britain, where she has lived for more than 30 years, and was married to the singer and songwriter Ewan MacColl until his death in 1989.'),
+                (None, 'James Henry Miller (25 January 1915 - 22 October 1989), better known by his stage name Ewan MacColl, was an English folk singer, songwriter, communist, labour activist, actor, poet, playwright and record producer.')],
+            'cot': ("James Henry Miller's wife is June Miller. June Miller is an American."),
+            'answer': 'American',
+        },
+        {
+            'question': 'The Dutch-Belgian television series that "House of Anubis" was based on first aired in what year?',
+            'ctxs': [(None, 'House of Anubis is a mystery television series developed for Nickelodeon based on the Dutch-Belgian television series "Het Huis Anubis".'),
+                (None, 'It first aired in September 2006 and the last episode was broadcast on December 4, 2009.')],
+            'cot': ('"House of Anubis" is based on the Dutch-Belgian television series Het Huis Anubis. Het Huis Anubis is firstaired in September 2006.'),
+            'answer': '2006',
+        },
+    ]
+    cot_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step): '
+    cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    cot_output_template = lambda self, cot, ans: f'{cot} The answer is {ans}.'
+
+    tool_examplars: List[Dict] = [
+        {
+            'question': "Which magazine was started first Arthur's Magazine or First for Women?",
+            'ctxs': [(None, "Arthur's Magazine (1844-1846) was an American literary periodical published in Philadelphia in the 19th century."),
+                (None, "First for Women is a woman's magazine published by Bauer Media Group in the USA.")],
+            'cot': ("[Search(\"Arthur's Magazine\")] Arthur's Magazine started in 1844. [Search(\"First for Women\")] First for Women started in 1989. So Arthur's Magazine was started first."),
+            'answer': "Arthur's Magazine",
+        },
+        {
+            'question': 'The Oberoi family is part of a hotel company that has a head office in what city?',
+            'ctxs': [(None, 'The Oberoi family is an Indian family that is famous for its involvement in hotels, namely through The Oberoi Group.'),
+                (None, 'The Oberoi Group is a hotel company with its head office in Delhi.')],
+            'cot': ("[Search(\"The Oberoi family's company\")] The Oberoi family is part of the hotel company called The Oberoi Group. [Search(\"The Oberoi Group's head office\")] The Oberoi Group has its head office in Delhi."),
+            'answer': 'Delhi',
+        },
+        {
+            'question': "What nationality was James Henry Miller's wife?",
+            'ctxs': [(None, 'Margaret "Peggy" Seeger (born June 17, 1935) is an American folksinger.'),
+                (None, 'She is also well known in Britain, where she has lived for more than 30 years, and was married to the singer and songwriter Ewan MacColl until his death in 1989.'),
+                (None, 'James Henry Miller (25 January 1915 - 22 October 1989), better known by his stage name Ewan MacColl, was an English folk singer, songwriter, communist, labour activist, actor, poet, playwright and record producer.')],
+            'cot': ("[Search(\"James Henry Miller's wife\")] James Henry Miller's wife is June Miller. [Search(\"June Miller's nationality\")] June Miller is an American."),
+            'answer': 'American',
+        },
+        {
+            'question': 'The Dutch-Belgian television series that "House of Anubis" was based on first aired in what year?',
+            'ctxs': [(None, 'House of Anubis is a mystery television series developed for Nickelodeon based on the Dutch-Belgian television series "Het Huis Anubis".'),
+                (None, 'It first aired in September 2006 and the last episode was broadcast on December 4, 2009.')],
+            'cot': ('[Search("House of Anubis was based on")] "House of Anubis" is based on the Dutch-Belgian television series Het Huis Anubis. [Search("Het Huis Anubis air date")] Het Huis Anubis is first aired in September 2006.'),
+            'answer': '2006',
+        },
+    ]
+    tool_demo_input_template = tool_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    tool_output_template = lambda self, cot, ans: f'{cot} The answer is {ans}.'
+
+
+    def __init__(self, split: str, prompt_type: str = 'cot'):
+        assert prompt_type in {'cot', 'tool'}
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplars = getattr(self, f'{prompt_type}_examplars')
+        for e, ref_e in zip(self.examplars, self.cot_examplars):  # copy missing keys from cot_examplars
+            for k in ref_e:
+                if k not in e:
+                    e[k] = ref_e[k]
+        self.dataset = self.load_data(split)
+
+    @classmethod
+    def exact_match_score(cls, prediction, ground_truth):
+        return cls.normalize_answer(prediction) == cls.normalize_answer(ground_truth)
+
+    @classmethod
+    def normalize_answer(cls, s):
+        def remove_articles(text):
+            return re.sub(r'\b(a|an|the)\b', ' ', text)
+        def white_space_fix(text):
+            return ' '.join(text.split())
+        def remove_punc(text):
+            exclude = set(string.punctuation)
+            return ''.join(ch for ch in text if ch not in exclude)
+        def lower(text):
+            return text.lower()
+        return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+    def load_data(self, split):
+        # follow "Rationale-Augmented Ensembles in Language Models"
+        dataset = load_dataset('hotpot_qa', 'distractor')[split].select(range(0, 1000))
+        def _map(example: Dict):
+            qid = example['id']
+            question = example['question']
+            qtype = example['type']
+            level = example['level']
+            ans = example['answer']
+            cot = ''
+            title2paras: Dict[str, List[str]] = dict(zip(example['context']['title'], example['context']['sentences']))
+            ctxs: List[Tuple[str, str]] = []
+            for title, para_ind in zip(example['supporting_facts']['title'], example['supporting_facts']['sent_id']):
+                ctxs.append((None, title2paras[title][para_ind]))
+            output = self.output_template(cot, ans)
+            return {
+                'qid': qid,
+                'question': question,
+                'cot': cot,
+                'answer': ans,
+                'gold_output': output,
+                'ctxs': ctxs,
+                'type': qtype,
+                'level': level,
+            }
+        return dataset.map(_map)
