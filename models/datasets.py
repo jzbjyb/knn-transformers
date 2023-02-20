@@ -4,12 +4,30 @@ import json
 from operator import itemgetter
 import re
 import string
+import numpy as np
 from datasets import Dataset, load_dataset
 from beir.datasets.data_loader import GenericDataLoader
 from .templates import CtxPrompt
 
 
 class BaseDataset:
+    @classmethod
+    def exact_match_score(cls, prediction, ground_truth):
+        return cls.normalize_answer(prediction) == cls.normalize_answer(ground_truth)
+
+    @classmethod
+    def normalize_answer(cls, s):
+        def remove_articles(text):
+            return re.sub(r'\b(a|an|the)\b', ' ', text)
+        def white_space_fix(text):
+            return ' '.join(text.split())
+        def remove_punc(text):
+            exclude = set(string.punctuation)
+            return ''.join(ch for ch in text if ch not in exclude)
+        def lower(text):
+            return text.lower()
+        return white_space_fix(remove_articles(remove_punc(lower(s))))
+
     def format(
         self,
         fewshot: int = 0,
@@ -385,23 +403,6 @@ class HotpotQA(BaseDataset):
                     e[k] = ref_e[k]
         self.dataset = self.load_data(split)
 
-    @classmethod
-    def exact_match_score(cls, prediction, ground_truth):
-        return cls.normalize_answer(prediction) == cls.normalize_answer(ground_truth)
-
-    @classmethod
-    def normalize_answer(cls, s):
-        def remove_articles(text):
-            return re.sub(r'\b(a|an|the)\b', ' ', text)
-        def white_space_fix(text):
-            return ' '.join(text.split())
-        def remove_punc(text):
-            exclude = set(string.punctuation)
-            return ''.join(ch for ch in text if ch not in exclude)
-        def lower(text):
-            return text.lower()
-        return white_space_fix(remove_articles(remove_punc(lower(s))))
-
     def load_data(self, split):
         # follow "Rationale-Augmented Ensembles in Language Models"
         dataset = load_dataset('hotpot_qa', 'distractor')[split].select(range(0, 1000))
@@ -428,3 +429,106 @@ class HotpotQA(BaseDataset):
                 'level': level,
             }
         return dataset.map(_map)
+
+
+class WikiMultiHopQA(BaseDataset):
+    sa_examplars: List[Dict] = [
+        {
+            'question': "Who lived longer, Theodor Haecker or Harry Vaughan Watkins?",
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: How old was Theodor Haecker when he died?\n"
+                "Intermediate answer: Theodor Haecker was 65 years old when he died.\n"
+                "Follow up: How old was Harry Vaughan Watkins when he died?\n"
+                "Intermediate answer: Harry Vaughan Watkins was 69 years old when he died."),
+            'answer': "Harry Vaughan Watkins",
+        },
+        {
+            'question': 'Why did the founder of Versus die?',
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: Who founded Versus?\n"
+                "Intermediate answer: Gianni Versace.\n"
+                "Follow up: Why did Gianni Versace die?\n"
+                "Intermediate answer: Gianni Versace was shot and killed on the steps of his Miami Beach mansion on July 15, 1997."),
+            'answer': 'Shot',
+        },
+        {
+            'question': "Who is the grandchild of Dambar Shah?",
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: Who is the child of Dambar Shah?\n"
+                "Intermediate answer: Dambar Shah (? - 1645) was the king of the Gorkha Kingdom. He was the father of Krishna Shah.\n"
+                "Follow up: Who is the child of Krishna Shah?\n"
+                "Intermediate answer: Krishna Shah (? - 1661) was the king of the Gorkha Kingdom. He was the father of Rudra Shah."),
+            'answer': 'Rudra Shah',
+        },
+        {
+            'question': "Are both director of film FAQ: Frequently Asked Questions and director of film The Big Money from the same country?",
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: Who directed the film FAQ: Frequently Asked Questions?\n"
+                "Intermediate answer: Carlos Atanes.\n"
+                "Follow up: Who directed the film The Big Money?\n"
+                "Intermediate answer: John Paddy Carstairs.\n"
+                "Follow up: What is the nationality of Carlos Atanes?\n"
+                "Intermediate answer: Carlos Atanes is Spanish.\n"
+                "Follow up: What is the nationality of John Paddy Carstairs?\n"
+                "Intermediate answer: John Paddy Carstairs is British."),
+            'answer': 'No',
+        },
+    ]
+    sa_demo_input_template = sa_test_input_template = lambda self, ques: f'Question: {ques}\n'
+    sa_output_template = lambda self, cot, ans: f'{cot}\nSo the final answer is {ans}.'
+
+    def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
+        assert prompt_type in {'sa'}
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplars = getattr(self, f'{prompt_type}_examplars')
+        self.dataset = self.load_data(beir_dir)
+
+    @classmethod
+    def load_wid2alias(cls, wid2alias_file: str):
+        if hasattr(cls, 'wid2alias'):
+            return
+        cls.wid2alias: Dict[str, List[str]] = {}
+        with open(wid2alias_file, 'r') as fin:
+            for l in fin:
+                l = json.loads(l)
+                cls.wid2alias[l['Q_id']] = l['aliases']
+
+    @classmethod
+    def exact_match_score(
+        cls,
+        prediction,
+        ground_truth: str,
+        ground_truth_id: str = None,
+        wid2alias_file: str = 'data/2wikimultihopqa/data_ids_april7/id_aliases.json'):
+        cls.load_wid2alias(wid2alias_file)
+        ground_truths = {ground_truth}
+        if ground_truth_id and ground_truth_id in cls.wid2alias:
+            ground_truths.update(cls.wid2alias[ground_truth_id])
+        print(len(ground_truths), ground_truth_id, ground_truth_id in cls.wid2alias)
+        return np.max([cls.normalize_answer(prediction) == cls.normalize_answer(gt) for gt in ground_truths])
+
+    def load_data(self, beir_dir: str):
+        query_file = os.path.join(beir_dir, 'queries.jsonl')
+        dataset = []
+        with open(query_file, 'r') as fin:
+            for l in fin:
+                example = json.loads(l)
+                qid = example['_id']
+                question = example['text']
+                cot = ''
+                ans = example['metadata']['answer']
+                ans_id = example['metadata']['answer_id']
+                ctxs = example['metadata']['ctxs']
+                output = self.output_template(cot, ans)
+                dataset.append({
+                    'qid': qid,
+                    'question': question,
+                    'cot': cot,
+                    'answer': ans,
+                    'answer_id': ans_id,
+                    'gold_output': output,
+                    'ctxs': ctxs,
+                })
+        return Dataset.from_list(dataset)

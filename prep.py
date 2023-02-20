@@ -18,7 +18,7 @@ from datasets import load_dataset
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.lexical import BM25Search as BM25
-from models.datasets import HotpotQA
+from models.datasets import HotpotQA, WikiMultiHopQA
 
 class Wikipedia(object):
     def __init__(self):
@@ -683,7 +683,7 @@ def summary_to_beir(
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
-def compare(file1: str, file2: str, only_show_diff: bool = False, only_first_right: bool = True):
+def compare(file1: str, file2: str, only_show_diff: bool = False, only_first_right: bool = False):
     get_ans = lambda x: x.strip().rsplit(' ', 1)[-1][:-1].lower()
     with open(file1) as fin1, open(file2) as fin2:
         for l in fin1:
@@ -857,6 +857,7 @@ def strategyqa_to_beir(
 
 
 def hotpotqa_to_beir(
+    input_file: str,
     beir_dir: str,
     split: str = 'dev',
     dedup_doc: bool = True,
@@ -867,21 +868,37 @@ def hotpotqa_to_beir(
     doc2did: Dict[str, str] = {}
     split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
 
-    dataset = load_dataset('hotpot_qa', 'distractor')['validation' if split == 'dev' else 'train']
+    if input_file == 'hotpot_qa':
+        dataset = load_dataset('hotpot_qa', 'distractor')['validation' if split == 'dev' else 'train']
+    else:
+        dataset = json.load(open(input_file, 'r'))
+
     for example_ind in range(len(dataset)):
         example = dataset[example_ind]
 
         question = example['question'].strip()
         answer = example['answer'].strip()
-        qid = ori_id = example['id']
+        answer_id = example['answer_id'] if 'answer_id' in example else None
+        qid = example['id'] if 'id' in example else example['_id']
+        ctxs: List[Tuple[str, str]] = []
 
-        qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer, 'id': ori_id}}
-        question2qid[question] = qid
+        if type(example['context']) is dict:
+            title2paras: Dict[str, List[str]] = dict(zip(example['context']['title'], example['context']['sentences']))
+        elif type(example['context']) is list:
+            title2paras: Dict[str, List[str]] = {title: sents for title, sents in example['context']}
+        else:
+            raise NotImplementedError
 
-        title2paras: Dict[str, List[str]] = dict(zip(example['context']['title'], example['context']['sentences']))
-        for title, para_ind in zip(example['supporting_facts']['title'], example['supporting_facts']['sent_id']):
+        if type(example['supporting_facts']) is dict:
+            fact_gen = zip(example['supporting_facts']['title'], example['supporting_facts']['sent_id'])
+        elif type(example['supporting_facts']) is list:
+            fact_gen = example['supporting_facts']
+        else:
+            raise NotImplementedError
+
+        for title, para_ind in fact_gen:
             if para_ind >= len(title2paras[title]):
-                print(ori_id, 'support fact index oob')
+                print(qid, 'support fact index oob')
                 continue
             doc = title2paras[title][para_ind].strip()
             if dedup_doc and doc in doc2did:
@@ -891,6 +908,10 @@ def hotpotqa_to_beir(
                 did2dict[did] = {'_id': did, 'title': title, 'text': doc}
                 doc2did[doc] = did
             split2qiddid[split].append((qid, did))
+            ctxs.append((did, doc))
+
+        qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'answer': answer, 'answer_id': answer_id, 'ctxs': ctxs}}
+        question2qid[question] = qid
 
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
@@ -999,6 +1020,7 @@ def eval(
             fu = ' '.join(re.findall(f'{rms}[^\{rme}]*\{rme}', raw_pred))
             followups.append(fu)
         final_ans = example['answer']
+        ans_id = example['answer_id'] if 'answer_id' in example else None
         if anchor_text in final_ans:
             final_ans = final_ans[final_ans.find(anchor_text) + len(anchor_text):].strip()[:-1].strip().lower()
         if dataset == 'strategyqa':
@@ -1020,8 +1042,10 @@ def eval(
             pred_ans = pred[position + len(anchor_text):].strip().lower()
             if dataset == 'strategyqa':
                 iscorrect = final_ans in pred_ans
-            elif dataset == 'hotpotqa':
+            elif dataset in {'hotpotqa'}:
                 iscorrect = HotpotQA.exact_match_score(pred_ans, final_ans)
+            elif dataset in {'2wikihop'}:
+                iscorrect = WikiMultiHopQA.exact_match_score(pred_ans, final_ans, ground_truth_id=ans_id)
             else:
                 raise NotImplementedError
             correct += iscorrect
@@ -1154,7 +1178,7 @@ if __name__ == '__main__':
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
         'build_elasticsearch', 'dpr_to_beir'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='strategyqa', help='input dataset', choices=['strategyqa', 'hotpotqa'])
+    parser.add_argument('--dataset', type=str, default='strategyqa', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop'])
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
 
@@ -1258,8 +1282,9 @@ if __name__ == '__main__':
         strategyqa_to_beir(strategyqa_file, beir_dir, prompt_file=prompt_file, split='dev')
 
     elif args.task == 'hotpotqa_to_beir':
+        input_file = args.inp[0]
         beir_dir = args.out
-        hotpotqa_to_beir(beir_dir, split='dev')
+        hotpotqa_to_beir(input_file, beir_dir, split='dev')
 
     elif args.task == 'tsv_to_beir':
         tsv_file = args.inp[0]
@@ -1279,6 +1304,11 @@ if __name__ == '__main__':
                 jsonl_files=jsonl_files,
                 anchor_text='answer is',
                 beir_dir='data/strategyqa/train_cot_beir')
+        elif dataset == '2wikihop':
+            eval(dataset=dataset,
+                jsonl_files=jsonl_files,
+                anchor_text='answer is',
+                beir_dir='data/2wikimultihopqa/dev_beir')
 
     elif args.task == 'kilt_to_beir':
         kilt_wiki_file = args.inp[0]

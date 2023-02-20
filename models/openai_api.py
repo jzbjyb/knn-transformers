@@ -15,7 +15,7 @@ from beir.retrieval.search.lexical import BM25Search
 import openai
 from .retriever import BM25
 from .templates import CtxPrompt, RetrievalInstruction
-from .datasets import StrategyQA, HotpotQA
+from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA
 
 logging.basicConfig(level=logging.INFO)
 
@@ -296,7 +296,7 @@ class QueryAgent:
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa'])
+    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa', '2wikihop'])
     parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003'])
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
@@ -339,7 +339,8 @@ if __name__ == '__main__':
         'retriever': retriever,
         'topk': 1,
         'frequency': 0,
-        'boundary': ['")]'],
+        #'boundary': [],
+        'boundary': ['Intermediate answer:'],
         'use_gold': False,
         'use_gold_iterative': False,
         'max_query_length': 16,
@@ -347,9 +348,11 @@ if __name__ == '__main__':
         'look_ahead_steps': 0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        'retrieval_trigers': [('\[Search\("', '")]')],
+        #'retrieval_trigers': [],
+        'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         'append_retrieval': False,
-        'use_retrieval_instruction': False
+        'use_retrieval_instruction': False,
+        'format_reference_method': 'default',
     }
     qagent = QueryAgent(
         model=args.model,
@@ -359,20 +362,20 @@ if __name__ == '__main__':
         temperature=args.temperature)
     if retrieval_kwargs['use_retrieval_instruction']:
         CtxPrompt.ret_instruction = RetrievalInstruction()
+    CtxPrompt.format_reference_method = retrieval_kwargs['format_reference_method']
 
     # load data
     if args.dataset == 'strategyqa':
         data = StrategyQA(args.input, prompt_type='cot')
-        if qagent.append_retrieval:
-            data.retrieval_augment_examplars(qagent, retrieval_at_beginning=retrieval_kwargs['retrieval_at_beginning'])
-        data.format(fewshot=args.fewshot)
     elif args.dataset == 'hotpotqa':
         data = HotpotQA('validation', prompt_type='tool')
-        if qagent.append_retrieval:
-            data.retrieval_augment_examplars(qagent, retrieval_at_beginning=retrieval_kwargs['retrieval_at_beginning'])
-        data.format(fewshot=args.fewshot)
+    elif args.dataset == '2wikihop':
+        data = WikiMultiHopQA(args.input, prompt_type='sa')
     else:
         raise NotImplementedError
+    if qagent.append_retrieval:
+        data.retrieval_augment_examplars(qagent, retrieval_at_beginning=retrieval_kwargs['retrieval_at_beginning'])
+    data.format(fewshot=args.fewshot)
     data = data.dataset
 
     # downsample

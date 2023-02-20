@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Tuple
 class CtxPrompt:
     ctx_position: str = 'begin'
     ret_instruction: "RetrievalInstruction" = None
+    format_reference_method: str = 'default'
 
     def __init__(
         self,
@@ -88,7 +89,7 @@ class CtxPrompt:
         use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
 
         demo_formatted: str = '\n\n'.join([d.format(use_ctx=False, use_ret_instruction=False) for d in self.demo])  # TODO: no retrieval for demo
-        ref = self.format_reference(self.ctx, method='ignore') if use_ctx else None
+        ref = self.format_reference(self.ctx, method=self.format_reference_method) if use_ctx else None
         task, ret, ensemble = self.ret_instruction.format() if use_ret_instruction else (None, None, None)
         elements: List[str] = []
 

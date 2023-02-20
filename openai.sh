@@ -7,10 +7,9 @@ source openai_keys.sh
 num_shards=${#keys[@]}
 
 output=$1
-dataset=hotpotqa
+dataset=2wikihop
 max_generation_len=256
 batch_size=8
-max_num_examples=250
 model=code-davinci-002
 index_name=wikipedia_dpr
 consistency=1
@@ -18,9 +17,15 @@ consistency=1
 if [[ ${dataset} == 'hotpotqa' ]]; then
     input=""
     fewshot=4
+    max_num_examples=250
 elif [[ ${dataset} == 'strategyqa' ]]; then
     input="--input data/strategyqa/train_cot_beir"
     fewshot=6
+    max_num_examples=250
+elif [[ ${dataset} == '2wikihop' ]]; then
+    input="--input data/2wikimultihopqa/dev_beir"
+    fewshot=4
+    max_num_examples=1000
 else
     exit
 fi
@@ -67,7 +72,7 @@ for (( run=0; run<${consistency}; run++ )); do
     file_lock=$(mktemp)
     for (( i=0; i<${num_shards}; i++ )); do
         okey="${keys[$i]}"
-        echo OPENAI_API_KEY=${okey} BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
+        OPENAI_API_KEY=${okey} BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
             --model ${model} \
             --dataset ${dataset} ${input} \
             --fewshot ${fewshot} \
@@ -82,7 +87,7 @@ for (( run=0; run<${consistency}; run++ )); do
             --file_lock ${file_lock} &
     done
     wait
-    #rm ${file_lock}
-    #cat ${oneoutput}.* > ${oneoutput}
-    #rm ${oneoutput}.*
+    rm ${file_lock}
+    cat ${oneoutput}.* > ${oneoutput}
+    rm ${oneoutput}.*
 done
