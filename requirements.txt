@@ -7,3 +7,6 @@ sacrebleu
 evaluate==0.2.2
 rouge_score==0.1.2
 openai
+chardet==5.1.0
+cchardet==2.1.7
+BeautifulSoup4==4.11.2

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-debug=false
+debug=true
 
 source openai_keys.sh
 num_shards=${#keys[@]}
@@ -25,7 +25,7 @@ elif [[ ${dataset} == 'strategyqa' ]]; then
 elif [[ ${dataset} == '2wikihop' ]]; then
     input="--input data/2wikimultihopqa/dev_beir"
     fewshot=4
-    max_num_examples=1000
+    max_num_examples=250
 else
     exit
 fi
