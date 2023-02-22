@@ -1,10 +1,12 @@
 from typing import List, Dict, Any, Tuple
+from operator import itemgetter
 
 
 class CtxPrompt:
     ctx_position: str = 'begin'
     ret_instruction: "RetrievalInstruction" = None
     format_reference_method: str = 'default'
+    add_ref_suffix: str = '...'
 
     def __init__(
         self,
@@ -65,7 +67,11 @@ class CtxPrompt:
             else:
                 raise NotImplementedError
 
-    def format_reference(self, ref: str, method: str = 'default'):
+    @classmethod
+    def format_reference(cls, ref: str):
+        if cls.add_ref_suffix and not ref.endswith(cls.add_ref_suffix):
+            ref += cls.add_ref_suffix
+        method = cls.format_reference_method
         assert method in {'default', 'ignore', 'ignore_for_retrieval_instruct'}
         if method == 'default':
             return 'Reference:\n' + ref
@@ -84,13 +90,15 @@ class CtxPrompt:
         use_ctx: bool = False,
         use_ret_instruction: bool = True
     ):
-        if use_ctx and self.ctx is None:  # default is use all ctxs
-            self.ctx = ' '.join([ctx for _, ctx in self.ctxs])
-        use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
+        # run on demo
+        demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=use_ret_instruction) for d in self.demo])  # TODO: no retrieval for demo
 
-        demo_formatted: str = '\n\n'.join([d.format(use_ctx=False, use_ret_instruction=False) for d in self.demo])  # TODO: no retrieval for demo
-        ref = self.format_reference(self.ctx, method=self.format_reference_method) if use_ctx else None
-        task, ret, ensemble = self.ret_instruction.format() if use_ret_instruction else (None, None, None)
+        if use_ctx and self.ctx is None and len(self.ctxs):  # default is use all ctxs
+            self.ctx = ' '.join([ctx for _, ctx in self.ctxs])
+        use_ctx = use_ctx and self.ctx
+        use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
+        ref = self.format_reference(self.ctx) if use_ctx else None
+        task, ret, ensemble = self.ret_instruction.format(use_ctx=use_ctx) if use_ret_instruction else (None, None, None)
         elements: List[str] = []
 
         if use_ctx and self.ctx_position == 'begin':
@@ -113,10 +121,9 @@ class CtxPrompt:
             elements.append(ensemble)
 
         if use_ctx and self.ctx_position == 'before_case':
-            elements.append(ref)
-
-        # append test case
-        elements.append(self.case)
+            elements.append(ref + '\n' + self.case)
+        else:
+            elements.append(self.case)
 
         return '\n\n'.join(elements)
 
@@ -130,14 +137,17 @@ class RetrievalInstruction:
         'examplars': [
             {
                 'question': 'But what are the risks during production of nanomaterials?',
+                'ctxs': [(None, 'The increased production of manufactured nanomaterials (MNMs) and their use in consumer and industrial products means that workers in all countries will be at the front line of any exposure, placing...')],
                 'answer': '[Search("nanomaterial production risks")] Some nanomaterials may give rise to various kinds of lung damage.',
             },
             {
                 'question': 'The colors on the flag of Ghana have the following meanings.',
+                'ctxs': [(None, "The flag of Ghana comprises of the Pan-African colors of red, yellow and green. These colors are horizontal stripes that make up the background of the flag. Red is represents the nation's fight for independence, the gold is a sign of the country's mineral wealth, and the green is a representation of the country's natural wealth...")],
                 'answer': 'Red is for [Search("Ghana flag red meaning")] the blood of martyrs, green for forests, and gold for mineral wealth.',
             },
             {
                 'question': 'Metformin is the first-line drug for what?',
+                'ctxs': [(None, "Metformin, sold under the brand name Glucophage, among others, is the main first-line medication for the treatment of type 2 diabetes,[6][7][8][9] particularly in people who are overweight.[7] It is also used in the treatment of polycystic ovary syndrome...")],
                 'answer': '[Search("Metformin first-line drug")] patients with type 2 diabetes and obesity.'
             }
         ]
@@ -147,12 +157,19 @@ class RetrievalInstruction:
         self.instruction = getattr(self, f'{method}_instruction')
         self.fewshot = len(self.instruction['examplars']) if fewshot is None else self.fewshot
 
-    def format(self) -> Tuple[str, str]:
+    def format(self, use_ctx: bool = False) -> Tuple[str, str]:
         demos: List[str] = []
         for i in range(self.fewshot):
             q = self.instruction['examplars'][i]['question']
             a = self.instruction['examplars'][i]['answer']
-            demos.append(f'Question: {q}\nAnswer (with Search): {a}')
+            if use_ctx:
+                ctxs = self.instruction['examplars'][i]['ctxs']
+                assert CtxPrompt.ctx_position == 'before_case'
+                ref = CtxPrompt.format_reference(' '.join(map(itemgetter(1), ctxs)))
+                demo = f'{ref}\nQuestion: {q}\nAnswer (with Search): {a}'
+            else:
+                demo = f'Question: {q}\nAnswer (with Search): {a}'
+            demos.append(demo)
         task = self.instruction['task']
         ret = self.instruction['retrieval'] + '\n\n' + '\n\n'.join(demos)
         ensemble = self.instruction['ensemble']

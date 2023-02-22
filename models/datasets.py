@@ -432,36 +432,66 @@ class HotpotQA(BaseDataset):
 
 
 class WikiMultiHopQA(BaseDataset):
-    sa_examplars: List[Dict] = [
+    cot_examplars: List[Dict] = [
         {
             'question': "Who lived longer, Theodor Haecker or Harry Vaughan Watkins?",
+            'cot': ("Theodor Haecker was 65 years old when he died. Harry Vaughan Watkins was 69 years old when he died."),
+            'answer': "Harry Vaughan Watkins",
+        },
+        {
+            'question': 'Why did the founder of Versus die?',
+            'cot': ("The founder of Versus was Gianni Versace. "
+                "Gianni Versace was shot and killed on the steps of his Miami Beach mansion on July 15, 1997."),
+            'answer': 'Shot',
+        },
+        {
+            'question': "Who is the grandchild of Dambar Shah?",
+            'cot': ("Dambar Shah (? - 1645) was the king of the Gorkha Kingdom. "
+                "He was the father of Krishna Shah. "
+                "Krishna Shah (? - 1661) was the king of the Gorkha Kingdom. "
+                "He was the father of Rudra Shah."),
+            'answer': 'Rudra Shah',
+        },
+        {
+            'question': "Are both director of film FAQ: Frequently Asked Questions and director of film The Big Money from the same country?",
+            'cot': ("The director of the film FAQ: Frequently Asked Questions is Carlos Atanes. "
+                "The director of the film The Big Money is John Paddy Carstairs. "
+                "The nationality of Carlos Atanes is Spanish. "
+                "The nationality of John Paddy Carstairs is British."),
+            'answer': 'No',
+        },
+    ]
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer: '
+    cot_output_template = lambda self, cot, ans: f'{cot} So the final answer is {ans}.'
+
+    cot_ret_examplars = cot_examplars
+    cot_ret_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step): '
+    cot_ret_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    cot_ret_output_template = cot_output_template
+
+    sa_examplars: List[Dict] = [
+        {
             'cot': ("Are follow up questions needed here: Yes.\n"
                 "Follow up: How old was Theodor Haecker when he died?\n"
                 "Intermediate answer: Theodor Haecker was 65 years old when he died.\n"
                 "Follow up: How old was Harry Vaughan Watkins when he died?\n"
                 "Intermediate answer: Harry Vaughan Watkins was 69 years old when he died."),
-            'answer': "Harry Vaughan Watkins",
         },
         {
-            'question': 'Why did the founder of Versus die?',
             'cot': ("Are follow up questions needed here: Yes.\n"
                 "Follow up: Who founded Versus?\n"
                 "Intermediate answer: Gianni Versace.\n"
                 "Follow up: Why did Gianni Versace die?\n"
                 "Intermediate answer: Gianni Versace was shot and killed on the steps of his Miami Beach mansion on July 15, 1997."),
-            'answer': 'Shot',
         },
         {
-            'question': "Who is the grandchild of Dambar Shah?",
             'cot': ("Are follow up questions needed here: Yes.\n"
                 "Follow up: Who is the child of Dambar Shah?\n"
                 "Intermediate answer: Dambar Shah (? - 1645) was the king of the Gorkha Kingdom. He was the father of Krishna Shah.\n"
                 "Follow up: Who is the child of Krishna Shah?\n"
                 "Intermediate answer: Krishna Shah (? - 1661) was the king of the Gorkha Kingdom. He was the father of Rudra Shah."),
-            'answer': 'Rudra Shah',
         },
         {
-            'question': "Are both director of film FAQ: Frequently Asked Questions and director of film The Big Money from the same country?",
             'cot': ("Are follow up questions needed here: Yes.\n"
                 "Follow up: Who directed the film FAQ: Frequently Asked Questions?\n"
                 "Intermediate answer: Carlos Atanes.\n"
@@ -471,18 +501,21 @@ class WikiMultiHopQA(BaseDataset):
                 "Intermediate answer: Carlos Atanes is Spanish.\n"
                 "Follow up: What is the nationality of John Paddy Carstairs?\n"
                 "Intermediate answer: John Paddy Carstairs is British."),
-            'answer': 'No',
         },
     ]
     sa_demo_input_template = sa_test_input_template = lambda self, ques: f'Question: {ques}\n'
     sa_output_template = lambda self, cot, ans: f'{cot}\nSo the final answer is {ans}.'
 
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
-        assert prompt_type in {'sa'}
+        assert prompt_type in {'cot', 'cot_ret', 'sa'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
         self.examplars = getattr(self, f'{prompt_type}_examplars')
+        for e, ref_e in zip(self.examplars, self.cot_examplars):  # copy missing keys from cot_examplars
+            for k in ref_e:
+                if k not in e:
+                    e[k] = ref_e[k]
         self.dataset = self.load_data(beir_dir)
 
     @classmethod
@@ -506,7 +539,6 @@ class WikiMultiHopQA(BaseDataset):
         ground_truths = {ground_truth}
         if ground_truth_id and ground_truth_id in cls.wid2alias:
             ground_truths.update(cls.wid2alias[ground_truth_id])
-        print(len(ground_truths), ground_truth_id, ground_truth_id in cls.wid2alias)
         return np.max([cls.normalize_answer(prediction) == cls.normalize_answer(gt) for gt in ground_truths])
 
     def load_data(self, beir_dir: str):

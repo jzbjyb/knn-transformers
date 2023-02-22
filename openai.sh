@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-debug=true
+debug=false
 
 source openai_keys.sh
 num_shards=${#keys[@]}
@@ -52,9 +52,9 @@ if [[ ${debug} == "true" ]]; then
         --dataset ${dataset} ${input} \
         --fewshot ${fewshot} \
         --index_name ${index_name} \
-        --max_num_examples 32 \
+        --max_num_examples 100 \
         --max_generation_len ${max_generation_len} \
-        --batch_size ${batch_size} \
+        --batch_size 1 \
         --output test.jsonl \
         --num_shards 1 \
         --shard_id 0

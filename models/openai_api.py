@@ -28,16 +28,54 @@ class ApiReturn:
         prompt: str,
         text: str,
         tokens: List[str] = [],
+        probs: List[float] = [],
+        offsets: List[int] = [],
         finish_reason: str = 'stop',
     ):
         self.prompt = prompt
         self.text = text
+        assert len(tokens) == len(probs) == len(offsets)
         self.tokens = tokens
+        self.probs = probs
+        self.offsets = offsets
         self.finish_reason = finish_reason
+
+    @property
+    def num_tokens(self):
+        return len(self.tokens)
 
     @property
     def has_endoftext(self):
         return self.EOS in self.tokens
+
+    def truncate_at_prob(self, low: float):
+        if self.num_tokens <= 1:
+            return self
+
+        break_point = self.num_tokens
+        for i in range(self.num_tokens):
+            t, p, o = self.tokens[i], self.probs[i], self.offsets[i]
+            if p <= low:
+                break_point = i
+                break
+        if break_point == 0 and self.num_tokens > 0:  # avoid deadlock
+            break_point = 1
+
+        while break_point < self.num_tokens:  # truncation
+            assert break_point > 0
+            keep = self.offsets[break_point] - len(self.prompt)
+            if keep <= 0:
+                break_point += 1
+                continue
+
+            self.text = self.text[:keep]
+            self.tokens = self.tokens[:break_point]
+            self.probs = self.probs[:break_point]
+            self.offsets = self.offsets[:break_point]
+            self.finish_reason = 'boundary'
+            break
+
+        return self
 
 
 class QueryAgent:
@@ -61,6 +99,7 @@ class QueryAgent:
         # retrieval args
         self.retriever = retrieval_kwargs.get('retriever', None)
         self.ret_frequency = retrieval_kwargs.get('frequency', 0)
+        self.truncate_at_prob = retrieval_kwargs.get('truncate_at_prob', 0)
         self.ret_boundary = retrieval_kwargs.get('boundary', [])
         self.use_gold = retrieval_kwargs.get('use_gold', False)
         if self.ret_boundary:  # otherwise cannot decide when to finally stop
@@ -123,6 +162,8 @@ class QueryAgent:
                     prompt=q,
                     text=r['text'],
                     tokens=r['logprobs']['tokens'],
+                    probs=[np.exp(lp) for lp in r['logprobs']['token_logprobs']],
+                    offsets=r['logprobs']['text_offset'],
                     finish_reason=r['finish_reason']) for r, q in zip(responses['choices'], queries)]
                 if debug:
                     print(queries[0])
@@ -191,8 +232,9 @@ class QueryAgent:
                 queries_to_issue = [gq for gq in generate_queries if gq]
             else:
                 # TODO: only use question
-                queries_to_issue = [lh if self.only_use_look_ahead else (q.case.split('\n')[0].split(':', 1)[1].strip() + lh)
-                    for (i, q), lh in zip(queries, look_aheads)]
+                #queries_to_issue = [lh if self.only_use_look_ahead else (q.case.split('\n')[0].split(':', 1)[1].strip() + lh)
+                #    for (i, q), lh in zip(queries, look_aheads)]
+                queries_to_issue = [lh if self.only_use_look_ahead else q.case + lh for (i, q), lh in zip(queries, look_aheads)]
             if queries_to_issue:
                 # (bs, ret_topk) * 2
                 ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
@@ -231,7 +273,12 @@ class QueryAgent:
                 apireturns = self.complete(
                     [q.format(use_ctx=True) for i, q in queries],
                     params={'max_tokens': self.ret_frequency, 'stop': self.final_stop_sym})
-                max_gen_len += self.ret_frequency
+                if self.truncate_at_prob > 0:
+                    apireturns = [ar.truncate_at_prob(self.truncate_at_prob) for ar in apireturns]
+                    max_gen_len += np.min([ar.num_tokens for ar in apireturns])
+                    generate_queries = [ar.text for ar in apireturns]
+                else:
+                    max_gen_len += self.ret_frequency
             elif self.ret_boundary:
                 apireturns = self.complete(
                     [q.format(use_ctx=True) for i, q in queries],
@@ -248,11 +295,14 @@ class QueryAgent:
                             assert len(self.retrieval_trigers) == 1
                             # TODO: check if it stops at retrieval trigers
                             ret_tri_start = self.retrieval_trigers[0][0]
-                            found = re.search(ret_tri_start, cont)
-                            if found:
-                                generate_queries.append(cont[found.span()[1]:].strip())
+                            if ret_tri_start is None:  # use all generated tokens as query
+                                generate_queries.append(cont)
                             else:
-                                generate_queries.append(None)
+                                found = re.search(ret_tri_start, cont)
+                                if found:
+                                    generate_queries.append(cont[found.span()[1]:].strip())
+                                else:
+                                    generate_queries.append(None)
                         assert len(self.ret_boundary) == 1
                         cont += self.ret_boundary[0]
                         reason = 'boundary'
@@ -338,9 +388,11 @@ if __name__ == '__main__':
     retrieval_kwargs = {
         'retriever': retriever,
         'topk': 1,
-        'frequency': 0,
-        #'boundary': [],
-        'boundary': ['Intermediate answer:'],
+        'frequency': 32,
+        'boundary': [],
+        #'boundary': ['Intermediate answer:'],
+        #'boundary': ['")]'],
+        #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
         'max_query_length': 16,
@@ -348,11 +400,16 @@ if __name__ == '__main__':
         'look_ahead_steps': 0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        #'retrieval_trigers': [],
-        'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
+        'retrieval_trigers': [],
+        #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
+        #'retrieval_trigers': [('\[Search\("', '")]')],
+        #'retrieval_trigers': [(None, '. ')],
+        'truncate_at_prob': 0.1,
         'append_retrieval': False,
         'use_retrieval_instruction': False,
         'format_reference_method': 'default',
+        'ctx_position': 'before_case',
+        'prompt_type': 'cot',
     }
     qagent = QueryAgent(
         model=args.model,
@@ -363,14 +420,15 @@ if __name__ == '__main__':
     if retrieval_kwargs['use_retrieval_instruction']:
         CtxPrompt.ret_instruction = RetrievalInstruction()
     CtxPrompt.format_reference_method = retrieval_kwargs['format_reference_method']
+    CtxPrompt.ctx_position = retrieval_kwargs['ctx_position']
 
     # load data
     if args.dataset == 'strategyqa':
-        data = StrategyQA(args.input, prompt_type='cot')
+        data = StrategyQA(args.input, prompt_type=retrieval_kwargs['prompt_type'])
     elif args.dataset == 'hotpotqa':
-        data = HotpotQA('validation', prompt_type='tool')
+        data = HotpotQA('validation', prompt_type=retrieval_kwargs['prompt_type'])
     elif args.dataset == '2wikihop':
-        data = WikiMultiHopQA(args.input, prompt_type='sa')
+        data = WikiMultiHopQA(args.input, prompt_type=retrieval_kwargs['prompt_type'])
     else:
         raise NotImplementedError
     if qagent.append_retrieval:

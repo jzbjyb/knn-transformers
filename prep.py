@@ -989,6 +989,7 @@ def eval(
     predictions: List[str] = []
     followups: List[str] = []
     references: List[str] = []
+    num_steps: List[int] = []
 
     root_file = None
     if len(jsonl_files) > 1:  # consistency
@@ -1008,7 +1009,7 @@ def eval(
         consistency_examples.append(example)
 
         # evaluate based on the aggregated example
-        trace = example['trace'] if 'trace' in example else None
+        trace = example['trace'] if 'trace' in example else []
         qid = example['qid']
         question = example['question']
         ref = example['gold_output']
@@ -1028,6 +1029,7 @@ def eval(
 
         references.append(ref)
         predictions.append(pred)
+        num_steps.append(len(trace))
         if 'retrieval' in example and example['retrieval']:
             ret_dids = np.array([r if type(r[0]) is str else r[0] for r in example['retrieval']], dtype=np.str_)
         else:
@@ -1056,7 +1058,7 @@ def eval(
         if has_search:
             search_per_example.append(len(re.findall('\[Search\(', pred)))
 
-        if debug:
+        if debug and formatwrong:
             print('Q->', question)
             print()
             print('T->')
@@ -1121,7 +1123,7 @@ def eval(
 
     print('retrieval acc\tcoverage')
     print(f'{format_list(ret_accs)}\t{format_list(ret_covers)}')
-    print(f'#examples with search: {scount}, #avg search per example {np.mean(search_per_example)}')
+    print(f'#examples with search: {scount}, #avg search per example {np.mean(search_per_example)}, #steps {np.mean(num_steps)}')
 
 
 def build_elasticsearch(
