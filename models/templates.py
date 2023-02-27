@@ -6,7 +6,8 @@ class CtxPrompt:
     ctx_position: str = 'begin'
     ret_instruction: "RetrievalInstruction" = None
     format_reference_method: str = 'default'
-    add_ref_suffix: str = '...'
+    add_ref_suffix: str = None
+    add_ref_prefix: str = None
 
     def __init__(
         self,
@@ -71,10 +72,12 @@ class CtxPrompt:
     def format_reference(cls, ref: str):
         if cls.add_ref_suffix and not ref.endswith(cls.add_ref_suffix):
             ref += cls.add_ref_suffix
+        if cls.add_ref_prefix and not ref.startswith(cls.add_ref_prefix):
+            ref = cls.add_ref_prefix + ref
         method = cls.format_reference_method
-        assert method in {'default', 'ignore', 'ignore_for_retrieval_instruct'}
+        assert method in {'default', 'ignore', 'ignore_for_retrieval_instruct', 'short_ignore'}
         if method == 'default':
-            return 'Reference:\n' + ref
+            return 'Reference: ' + ref
         if method == 'ignore':
             formatted = [
                 '1. The reference below might be helpful when answering questions but it is noisy. Free free to ignore irrelevant information in it.', ref.strip(),
@@ -83,6 +86,9 @@ class CtxPrompt:
         if method == 'ignore_for_retrieval_instruct':
             formatted = ['The reference below might be helpful when answering questions but it is noisy. Free free to ignore irrelevant information in it.', ref.strip()]
             return '\n\n'.join(formatted)
+        if method == 'short_ignore':
+            formatted = ['The reference below might be helpful but it is noisy. Free free to ignore irrelevant information in it:', ref.strip()]
+            return ' '.join(formatted)
         raise NotImplementedError
 
     def format(

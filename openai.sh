@@ -24,8 +24,8 @@ elif [[ ${dataset} == 'strategyqa' ]]; then
     max_num_examples=250
 elif [[ ${dataset} == '2wikihop' ]]; then
     input="--input data/2wikimultihopqa/dev_beir"
-    fewshot=4
-    max_num_examples=250
+    fewshot=15
+    max_num_examples=1000
 else
     exit
 fi
@@ -57,7 +57,8 @@ if [[ ${debug} == "true" ]]; then
         --batch_size 1 \
         --output test.jsonl \
         --num_shards 1 \
-        --shard_id 0
+        --shard_id 0 \
+        --debug
     exit
 fi
 

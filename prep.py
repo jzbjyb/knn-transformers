@@ -1058,7 +1058,7 @@ def eval(
         if has_search:
             search_per_example.append(len(re.findall('\[Search\(', pred)))
 
-        if debug and formatwrong:
+        if debug:
             print('Q->', question)
             print()
             print('T->')
@@ -1180,7 +1180,7 @@ if __name__ == '__main__':
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
         'build_elasticsearch', 'dpr_to_beir'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='strategyqa', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop'])
+    parser.add_argument('--dataset', type=str, default='2wikihop', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop'])
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
 
@@ -1274,7 +1274,7 @@ if __name__ == '__main__':
 
     elif args.task == 'compare':
         file1, file2 = args.inp
-        compare(file1, file2, only_show_diff=True)
+        compare(file1, file2, only_show_diff=True, only_first_right=True)
 
     elif args.task == 'strategyqa_to_beir':
         strategyqa_file = args.inp[0]

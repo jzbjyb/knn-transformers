@@ -13,6 +13,7 @@ from transformers import AutoTokenizer, GPT2TokenizerFast
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.search.lexical import BM25Search
 import openai
+import spacy
 from .retriever import BM25
 from .templates import CtxPrompt, RetrievalInstruction
 from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA
@@ -22,6 +23,7 @@ logging.basicConfig(level=logging.INFO)
 
 class ApiReturn:
     EOS = '<|endoftext|>'
+    nlp = spacy.load('en_core_web_sm')
 
     def __init__(
         self,
@@ -77,6 +79,33 @@ class ApiReturn:
 
         return self
 
+    def truncate_at_boundary(self, unit: str = 'sentence'):
+        if self.num_tokens <= 1:
+            return self
+
+        if unit == 'sentence':
+            doc = self.nlp(self.text)
+            break_at = len(self.text)
+            for sent in doc.sents:
+                if sent.end_char > 0:
+                    break_at = sent.end_char
+                    break
+
+            if break_at > 0 and break_at < len(self.text):  # truncation
+                i = 0
+                for i in range(self.num_tokens):
+                    if self.offsets[i] - len(self.prompt) >= break_at:
+                        break_at = self.offsets[i] - len(self.prompt)
+                        break
+                assert i > 0 and break_at > 0
+                self.text = self.text[:break_at]
+                self.tokens = self.tokens[:i]
+                self.probs = self.probs[:i]
+                self.offsets = self.offsets[:i]
+                self.finish_reason = 'boundary'
+        else:
+            raise NotImplementedError
+        return self
 
 class QueryAgent:
     def __init__(
@@ -100,10 +129,13 @@ class QueryAgent:
         self.retriever = retrieval_kwargs.get('retriever', None)
         self.ret_frequency = retrieval_kwargs.get('frequency', 0)
         self.truncate_at_prob = retrieval_kwargs.get('truncate_at_prob', 0)
+        self.truncate_at_boundary = retrieval_kwargs.get('truncate_at_boundary', None)
         self.ret_boundary = retrieval_kwargs.get('boundary', [])
         self.use_gold = retrieval_kwargs.get('use_gold', False)
         if self.ret_boundary:  # otherwise cannot decide when to finally stop
             assert self.final_stop_sym not in self.ret_boundary
+        self.use_ctx_for_examplars = retrieval_kwargs.get('use_ctx_for_examplars', None)
+        self.ctx_increase = retrieval_kwargs.get('ctx_increase', 'replace')
 
         self.look_ahead_steps = retrieval_kwargs.get('look_ahead_steps', 0)
         self.look_ahead_boundary = retrieval_kwargs.get('look_ahead_boundary', 0)
@@ -116,6 +148,7 @@ class QueryAgent:
         self.append_retrieval = retrieval_kwargs.get('append_retrieval', False)
 
         self.ret_topk = retrieval_kwargs.get('topk', 1)
+        self.debug = retrieval_kwargs.get('debug', False)
 
         self.retrieval_at_beginning = retrieval_kwargs.get('retrieval_at_beginning', False)
         if self.retrieval_at_beginning:
@@ -142,13 +175,12 @@ class QueryAgent:
         queries: List[str],
         params: Dict[str, Any],
         max_num_req_per_min: int = 10,
-        debug: bool = False,
     ) -> List[ApiReturn]:
         if 'max_tokens' in params:  # TODO: opt doesn't have this bug
             params['max_tokens'] = max(2, params['max_tokens'])  # openai returns nothing if set to 1
         min_sleep = 60 / max_num_req_per_min
         add_sleep = 3
-        expbf = 1.5
+        expbf = 2
         while True:
             try:
                 responses = openai.Completion.create(
@@ -165,10 +197,10 @@ class QueryAgent:
                     probs=[np.exp(lp) for lp in r['logprobs']['token_logprobs']],
                     offsets=r['logprobs']['text_offset'],
                     finish_reason=r['finish_reason']) for r, q in zip(responses['choices'], queries)]
-                if debug:
-                    print(queries[0])
-                    print('-->', generations[0].text)
-                    input()
+                if self.debug:
+                    print('Prompt ->', queries[0])
+                    print('Output ->', generations[0].text)
+                    input('-' * 50)
                 break
             except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout):
                 logging.info(f'sleep {add_sleep + min_sleep}')
@@ -236,6 +268,8 @@ class QueryAgent:
                 #    for (i, q), lh in zip(queries, look_aheads)]
                 queries_to_issue = [lh if self.only_use_look_ahead else q.case + lh for (i, q), lh in zip(queries, look_aheads)]
             if queries_to_issue:
+                if self.debug:
+                    print('Query ->', queries_to_issue[0])
                 # (bs, ret_topk) * 2
                 ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
                     decoder_texts=queries_to_issue,
@@ -256,7 +290,7 @@ class QueryAgent:
                                 q.ctx = None
                                 q.append_retrieval(ret_text, add_index=False)
                             else:
-                                q.update_retrieval(ret_text, method='replace')
+                                q.update_retrieval(ret_text, method=self.ctx_increase)
                     else:
                         ret_id, ret_text = ctx_ids[_i].tolist(), self.clean_retrieval(ctx_texts[_i])
                         if self.append_retrieval:
@@ -265,7 +299,7 @@ class QueryAgent:
                             q.append_retrieval(ret_text, add_index=False)
                         else:
                             final_retrievals[i].append(ret_id)
-                            q.update_retrieval(ret_text, method='replace')
+                            q.update_retrieval(ret_text, method=self.ctx_increase)
             generate_queries = []
 
             # complete
@@ -275,6 +309,10 @@ class QueryAgent:
                     params={'max_tokens': self.ret_frequency, 'stop': self.final_stop_sym})
                 if self.truncate_at_prob > 0:
                     apireturns = [ar.truncate_at_prob(self.truncate_at_prob) for ar in apireturns]
+                    max_gen_len += np.min([ar.num_tokens for ar in apireturns])
+                    generate_queries = [ar.text for ar in apireturns]
+                elif self.truncate_at_boundary:
+                    apireturns = [ar.truncate_at_boundary(self.truncate_at_boundary) for ar in apireturns]
                     max_gen_len += np.min([ar.num_tokens for ar in apireturns])
                     generate_queries = [ar.text for ar in apireturns]
                 else:
@@ -324,7 +362,7 @@ class QueryAgent:
             new_queries = []
             new_generate_queries = []
             assert len(queries) == len(apireturns)
-            if self.retrieval_trigers:
+            if len(generate_queries):
                 assert len(queries) == len(generate_queries), f'{len(queries)} {len(generate_queries)}'
             for _i, ((i, query), ar) in enumerate(zip(queries, apireturns)):
                 cont, reason = ar.text, ar.finish_reason
@@ -335,7 +373,7 @@ class QueryAgent:
                 elif reason in {'length', 'boundary'}:
                     query.case += cont
                     new_queries.append((i, query))
-                    if self.retrieval_trigers:
+                    if len(generate_queries):
                         new_generate_queries.append(generate_queries[_i])
                 else:
                     raise ValueError
@@ -363,6 +401,7 @@ if __name__ == '__main__':
 
     parser.add_argument('--build_index', action='store_true')
     parser.add_argument('--seed', type=int, default=2022)
+    parser.add_argument('--debug', action='store_true')
     args = parser.parse_args()
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -378,8 +417,9 @@ if __name__ == '__main__':
     # init agent
     ret_tokenizer = AutoTokenizer.from_pretrained('google/flan-t5-xl')
     prompt_tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
+    prompt_tokenizer.pad_token = prompt_tokenizer.eos_token
     retriever = BM25(
-        tokenizer=ret_tokenizer,
+        tokenizer=prompt_tokenizer,
         dataset=(corpus, queries, qrels),
         index_name=args.index_name,
         use_decoder_input_ids=True,
@@ -388,14 +428,14 @@ if __name__ == '__main__':
     retrieval_kwargs = {
         'retriever': retriever,
         'topk': 1,
-        'frequency': 32,
+        'frequency': 128,
         'boundary': [],
         #'boundary': ['Intermediate answer:'],
         #'boundary': ['")]'],
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 16,
+        'max_query_length': 128,
         'retrieval_at_beginning': False,
         'look_ahead_steps': 0,
         'look_ahead_boundary': [],
@@ -404,12 +444,18 @@ if __name__ == '__main__':
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         #'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
-        'truncate_at_prob': 0.1,
+        'truncate_at_prob': 0.0,
+        'truncate_at_boundary': 'sentence',
         'append_retrieval': False,
+        'use_ctx_for_examplars': True,
         'use_retrieval_instruction': False,
         'format_reference_method': 'default',
         'ctx_position': 'before_case',
-        'prompt_type': 'cot',
+        'prompt_type': 'cot_interleave',
+        'ctx_increase': 'replace',
+        'add_ref_suffix': None,
+        'add_ref_prefix': None,
+        'debug': args.debug,
     }
     qagent = QueryAgent(
         model=args.model,
@@ -421,6 +467,8 @@ if __name__ == '__main__':
         CtxPrompt.ret_instruction = RetrievalInstruction()
     CtxPrompt.format_reference_method = retrieval_kwargs['format_reference_method']
     CtxPrompt.ctx_position = retrieval_kwargs['ctx_position']
+    CtxPrompt.add_ref_suffix = retrieval_kwargs['add_ref_suffix']
+    CtxPrompt.add_ref_prefix = retrieval_kwargs['add_ref_prefix']
 
     # load data
     if args.dataset == 'strategyqa':
@@ -429,10 +477,11 @@ if __name__ == '__main__':
         data = HotpotQA('validation', prompt_type=retrieval_kwargs['prompt_type'])
     elif args.dataset == '2wikihop':
         data = WikiMultiHopQA(args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = WikiMultiHopQA.get_gold_ctxs
     else:
         raise NotImplementedError
-    if qagent.append_retrieval:
-        data.retrieval_augment_examplars(qagent, retrieval_at_beginning=retrieval_kwargs['retrieval_at_beginning'])
+    if qagent.use_ctx_for_examplars:
+        data.retrieval_augment_examplars(qagent, use_gold=use_gold_func)
     data.format(fewshot=args.fewshot)
     data = data.dataset
 

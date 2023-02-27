@@ -1,6 +1,7 @@
-from typing import Dict, List, Callable, Tuple
+from typing import Dict, List, Set, Callable, Tuple, Union, Callable
 import os
 import json
+import random
 from operator import itemgetter
 import re
 import string
@@ -65,10 +66,39 @@ class BaseDataset:
     def retrieval_augment_examplars(
         self,
         qagent: "QueryAgent",
-        retrieval_at_beginning: bool = False,
         add_index: bool = False,
         use_gold: bool = False,
     ):
+        if qagent.append_retrieval:
+            return self.retrieval_augment_examplars_append(qagent, add_index=add_index, use_gold=use_gold)
+        return self.retrieval_augment_examplars_prepend(qagent, add_index=add_index, use_gold=use_gold)
+
+    def retrieval_augment_examplars_prepend(
+        self,
+        qagent: "QueryAgent",
+        add_index: bool = False,
+        use_gold: Union[bool, Callable] = False,
+    ):
+        for examplar in self.examplars:
+            question = examplar['question']
+
+            if use_gold:
+                _id = examplar['id']
+                ctxs: List[Tuple[str, str]] = use_gold(_id)
+                examplar['ctxs'] = ctxs
+            else:  # search question
+                ctx_ids, ctx_texts = qagent.retrieve([question])
+                ctx_ids, ctx_texts = ctx_ids[0], ctx_texts[0]  # (ret_topk) * 2
+                examplar['ctxs'] = list(zip(ctx_ids, ctx_texts))
+
+    def retrieval_augment_examplars_append(
+        self,
+        qagent: "QueryAgent",
+        add_index: bool = False,
+        use_gold: bool = False,
+    ):
+        retrieval_at_beginning = qagent.retrieval_at_beginning
+
         for examplar in self.examplars:
             question = examplar['question']
             cot = examplar['cot']
@@ -432,6 +462,7 @@ class HotpotQA(BaseDataset):
 
 
 class WikiMultiHopQA(BaseDataset):
+    raw_train_data_file = 'data/2wikimultihopqa/data_ids_april7/train.json'
     cot_examplars: List[Dict] = [
         {
             'question': "Who lived longer, Theodor Haecker or Harry Vaughan Watkins?",
@@ -506,16 +537,142 @@ class WikiMultiHopQA(BaseDataset):
     sa_demo_input_template = sa_test_input_template = lambda self, ques: f'Question: {ques}\n'
     sa_output_template = lambda self, cot, ans: f'{cot}\nSo the final answer is {ans}.'
 
+    cot_interleave_examplars: List[Dict] = [
+        {
+            'id': '5811079c0bdc11eba7f7acde48001122',
+            'question': "When did the director of film Hypocrite (Film) die?",
+            'cot': "The film Hypocrite was directed by Miguel Morayta. Miguel Morayta died on 19 June 2013.",
+            'answer': "19 June 2013",
+        },
+        {
+            'id': '97954d9408b011ebbd84ac1f6bf848b6',
+            'question': "Do director of film Coolie No. 1 (1995 Film) and director of film The Sensational Trial have the same nationality?",
+            'cot': "Coolie No. 1 (1995 film) was directed by David Dhawan. The Sensational Trial was directed by Karl Freund. David Dhawan's nationality is India. Karl Freund's nationality is Germany. Thus, they do not have the same nationality.",
+            'answer': "no",
+        },
+        {
+            'id': '35bf3490096d11ebbdafac1f6bf848b6',
+            'question': "Are both Kurram Garhi and Trojkrsti located in the same country?",
+            'cot': "Kurram Garhi is located in the country of Pakistan. Trojkrsti is located in the country of Republic of Macedonia. Thus, they are not in the same country.",
+            'answer': "no",
+        },
+        {
+            'id': 'c6805b2908a911ebbd80ac1f6bf848b6',
+            'question': "Who was born first out of Martin Hodge and Ivania Martinich?",
+            'cot': "Martin Hodge was born on 4 February 1959. Ivania Martinich was born on 25 July 1995. Thus, Martin Hodge was born first.",
+            'answer': "Martin Hodge",
+        },
+        {
+            'id': '5897ec7a086c11ebbd61ac1f6bf848b6',
+            'question': "Which film came out first, The Night Of Tricks or The Genealogy?",
+            'cot': "The Night of Tricks was published in the year 1939. The Genealogy was published in the year 1979. Thus, The Night of Tricks came out first.",
+            'answer': "The Night Of Tricks",
+        },
+        {
+            'id': 'e5150a5a0bda11eba7f7acde48001122',
+            'question': "When did the director of film Laughter In Hell die?",
+            'cot': "The film Laughter In Hell was directed by Edward L. Cahn. Edward L. Cahn died on August 25, 1963.",
+            'answer': "August 25, 1963",
+        },
+        {
+            'id': 'a5995da508ab11ebbd82ac1f6bf848b6',
+            'question': "Which film has the director died later, The Gal Who Took the West or Twenty Plus Two?",
+            'cot': "The film Twenty Plus Two was directed by Joseph M. Newman. The Gal Who Took the West was directed by Frederick de Cordova. Joseph M. Newman died on January 23, 2006. Fred de Cordova died on September 15, 2001. Thus, the person to die later from the two is Twenty Plus Two.",
+            'answer': "Twenty Plus Two",
+        },
+        {
+            'id': 'cdbb82ec0baf11ebab90acde48001122',
+            'question': "Who is Boraqchin (Wife Of Ögedei)'s father-in-law?",
+            'cot': "Boraqchin is married to Ögedei Khan. Ögedei Khan's father is Genghis Khan. Thus, Boraqchin's father-in-law is Genghis Khan.",
+            'answer': "Genghis Khan",
+        },
+        {
+            'id': 'f44939100bda11eba7f7acde48001122',
+            'question': "What is the cause of death of Grand Duke Alexei Alexandrovich Of Russia's mother?",
+            'cot': "The mother of Grand Duke Alexei Alexandrovich of Russia is Maria Alexandrovna. Maria Alexandrovna died from tuberculosis.",
+            'answer': "tuberculosis",
+        },
+        {
+            'id': '4724c54e08e011ebbda1ac1f6bf848b6',
+            'question': "Which film has the director died earlier, When The Mad Aunts Arrive or The Miracle Worker (1962 Film)?",
+            'cot': "When The Mad Aunts Arrive was directed by Franz Josef Gottlieb. The Miracle Worker (1962 film) was directed by Arthur Penn. Franz Josef Gottlieb died on 23 July 2006. Arthur Penn died on September 28, 2010. Thus, of the two, the director to die earlier is Franz Josef Gottlieb, who directed When The Mad Aunts Arrive.",
+            'answer': "When The Mad Aunts Arrive",
+        },
+        {
+            'id': 'f86b4a28091711ebbdaeac1f6bf848b6',
+            'question': "Which album was released earlier, What'S Inside or Cassandra'S Dream (Album)?",
+            'cot': "What's Inside was released in the year 1995. Cassandra's Dream (album) was released in the year 2008. Thus, of the two, the album to release earlier is What's Inside.",
+            'answer': "What's Inside",
+        },
+        {
+            'id': '13cda43c09b311ebbdb0ac1f6bf848b6',
+            'question': "Are both mountains, Serre Mourene and Monte Galbiga, located in the same country?",
+            'cot': "Serre Mourene is located in Spain. Monte Galbiga is located in Italy. Thus, the two countries are not located in the same country.",
+            'answer': "no",
+        },
+        {
+            'id': '228546780bdd11eba7f7acde48001122',
+            'question': "What is the date of birth of the director of film Best Friends (1982 Film)?",
+            'cot': "The film Best Friends was directed by Norman Jewison. Norman Jewison was born on July 21, 1926.",
+            'answer': "July 21, 1926",
+        },
+        {
+            'id': 'c6f63bfb089e11ebbd78ac1f6bf848b6',
+            'question': "Which film has the director born first, Two Weeks With Pay or Chhailla Babu?",
+            'cot': "Two Weeks with Pay was directed by Maurice Campbell. Chhailla Babu was directed by Joy Mukherjee. Maurice Campbell was born on November 28, 1919. Joy Mukherjee was born on 24 February 1939. Thus, from the two directors, Chhailla Babu was born first, who directed Two Weeks With Pay.",
+            'answer': "Two Weeks With Pay",
+        },
+        {
+            'id': '1ceeab380baf11ebab90acde48001122',
+            'question': "Who is the grandchild of Krishna Shah (Nepalese Royal)?",
+            'cot': "Krishna Shah has a child named Rudra Shah. Rudra Shah has a child named Prithvipati Shah. Thus, Krishna Shah has a grandchild named Prithvipati Shah.",
+            'answer': "Prithvipati Shah",
+        },
+        {
+            'id': '8727d1280bdc11eba7f7acde48001122',
+            'question': "When was the director of film P.S. Jerusalem born?",
+            'cot': "P.S. Jerusalem was directed by Danae Elon. Danae Elon was born on December 23, 1970.",
+            'answer': "December 23, 1970",
+        },
+        {
+            'id': 'f1ccdfee094011ebbdaeac1f6bf848b6',
+            'question': "Which album was released more recently, If I Have to Stand Alone or Answering Machine Music?",
+            'cot': "If I Have to Stand Alone was published in the year 1991. Answering Machine Music was released in the year 1999. Thus, of the two, the album to release more recently is Answering Machine Music.",
+            'answer': "Answering Machine Music",
+        },
+        {
+            'id': '79a863dc0bdc11eba7f7acde48001122',
+            'question': "Where did the director of film Maddalena (1954 Film) die?",
+            'cot': "The film Maddalena is directed by Augusto Genina. Augusto Genina died in Rome.",
+            'answer': "Rome",
+        },
+        {
+            'id': '028eaef60bdb11eba7f7acde48001122',
+            'question': "When did the director of film The Boy And The Fog die?",
+            'cot': "The director of The Boy and the Fog is Roberto Gavaldón. Roberto Gavaldón died on September 4, 1986.",
+            'answer': "September 4, 1986",
+        },
+        {
+            'id': 'af8c6722088b11ebbd6fac1f6bf848b6',
+            'question': "Are the directors of films The Sun of the Sleepless and Nevada (1927 film) both from the same country?",
+            'cot': "The director of Sun of the Sleepless is Temur Babluani. The director of Nevada (1927 film) is John Waters. John Waters is from the country of America. Temur Babluani is from the country of Georgia. Thus, John Walters and Temur Babluani are not from the same country.",
+            'answer': "no",
+        }
+    ]
+    cot_interleave_demo_input_template = cot_interleave_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer: '
+    cot_interleave_output_template = lambda self, cot, ans: f'{cot} So the answer is {ans}.'
+
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'cot_ret', 'sa'}
+        assert prompt_type in {'cot', 'cot_ret', 'sa', 'cot_interleave'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
         self.examplars = getattr(self, f'{prompt_type}_examplars')
-        for e, ref_e in zip(self.examplars, self.cot_examplars):  # copy missing keys from cot_examplars
-            for k in ref_e:
-                if k not in e:
-                    e[k] = ref_e[k]
+        if len(self.examplars) == len(self.cot_examplars):
+            for e, ref_e in zip(self.examplars, self.cot_examplars):  # copy missing keys from cot_examplars
+                for k in ref_e:
+                    if k not in e:
+                        e[k] = ref_e[k]
         self.dataset = self.load_data(beir_dir)
 
     @classmethod
@@ -540,6 +697,28 @@ class WikiMultiHopQA(BaseDataset):
         if ground_truth_id and ground_truth_id in cls.wid2alias:
             ground_truths.update(cls.wid2alias[ground_truth_id])
         return np.max([cls.normalize_answer(prediction) == cls.normalize_answer(gt) for gt in ground_truths])
+
+    @classmethod
+    def get_gold_ctxs(cls, _id: str, num_distractors: int = 1):
+        if not hasattr(cls, 'rawdata'):
+            rawdata = json.load(open(cls.raw_train_data_file, 'r'))
+            cls.rawdata: Dict[str, Dict] = {e['_id']: e for e in rawdata}
+        example = cls.rawdata[_id]
+        title2paras: Dict[str, List[str]] = {title: sents for title, sents in example['context']}
+        golds = [(f'{title}__{para_ind}', title2paras[title][para_ind].strip()) for title, para_ind in example['supporting_facts']
+            if title in title2paras and para_ind < len(title2paras[title])]
+        if num_distractors:
+            all_tp: Set[Tuple[str, int]] = set((title, para_ind) for title in title2paras for para_ind in range(len(title2paras[title])))
+            gold_tp: Set[Tuple[str, int]] = set((title, para_ind) for title, para_ind in example['supporting_facts'])
+            neg_tp: List[Tuple[str, int]] = list(all_tp - gold_tp)
+            random.shuffle(neg_tp)
+            neg_tp = neg_tp[:num_distractors]
+            negs = [(f'{title}__{para_ind}', title2paras[title][para_ind].strip()) for title, para_ind in neg_tp]
+            ctxs = golds + negs
+            random.shuffle(ctxs)  # shuffle golds and negs
+            return ctxs
+        else:
+            return golds
 
     def load_data(self, beir_dir: str):
         query_file = os.path.join(beir_dir, 'queries.jsonl')
