@@ -54,7 +54,7 @@ if [[ ${debug} == "true" ]]; then
         --index_name ${index_name} \
         --max_num_examples 100 \
         --max_generation_len ${max_generation_len} \
-        --batch_size 1 \
+        --batch_size ${batch_size} \
         --output test.jsonl \
         --num_shards 1 \
         --shard_id 0 \

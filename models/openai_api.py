@@ -139,7 +139,9 @@ class QueryAgent:
 
         self.look_ahead_steps = retrieval_kwargs.get('look_ahead_steps', 0)
         self.look_ahead_boundary = retrieval_kwargs.get('look_ahead_boundary', 0)
+        self.look_ahead_truncate_at_boundary = retrieval_kwargs.get('look_ahead_truncate_at_boundary', None)
         self.max_query_length = retrieval_kwargs.get('max_query_length', None)
+        self.use_full_input_as_query = retrieval_kwargs.get('use_full_input_as_query', False)
         self.only_use_look_ahead = retrieval_kwargs.get('only_use_look_ahead', False)
         self.retrieval_trigers = retrieval_kwargs.get('retrieval_trigers', [])
         for rts, rte in self.retrieval_trigers:
@@ -189,6 +191,7 @@ class QueryAgent:
                     temperature=self.temperature,
                     top_p=self.top_p,
                     logprobs=0,
+                    #logit_bias={'685': 1.0},  # 'Ġ['
                     **params)
                 generations = [ApiReturn(
                     prompt=q,
@@ -243,13 +246,16 @@ class QueryAgent:
         max_gen_len = 0
 
         generate_queries: List[str] = []
+        first_ret = True
         while len(queries) and max_gen_len < self.max_generation_len:
             # retrieve
             look_aheads: List[str] = [''] * len(queries)
             if self.look_ahead_steps:  # generate a fixed number tokens for retrieval
                 apireturns = self.complete(
                     [q.format(use_ctx=True) for i, q in queries],
-                    params={'max_tokens': self.look_ahead, 'stop': self.final_stop_sym})
+                    params={'max_tokens': self.look_ahead_steps, 'stop': self.final_stop_sym})
+                if self.look_ahead_truncate_at_boundary:
+                    apireturns = [ar.truncate_at_boundary(self.look_ahead_truncate_at_boundary) for ar in apireturns]
                 look_aheads = [ar.text for ar in apireturns]
             elif self.look_ahead_boundary:  # generate tokens until boundary for retrieval
                 apireturns = self.complete(
@@ -261,20 +267,24 @@ class QueryAgent:
             # send queries to index
             if generate_queries:  # some queries might be None which means no queries are generated
                 assert len(generate_queries) == len(queries)
-                queries_to_issue = [gq for gq in generate_queries if gq]
+                queries_to_issue = [lh if self.only_use_look_ahead else (gq + lh)
+                    for gq, lh in zip(generate_queries, look_aheads) if gq]
             else:
                 # TODO: only use question
                 #queries_to_issue = [lh if self.only_use_look_ahead else (q.case.split('\n')[0].split(':', 1)[1].strip() + lh)
                 #    for (i, q), lh in zip(queries, look_aheads)]
-                queries_to_issue = [lh if self.only_use_look_ahead else q.case + lh for (i, q), lh in zip(queries, look_aheads)]
+                queries_to_issue = [lh if self.only_use_look_ahead else (q.case + lh)
+                    for (i, q), lh in zip(queries, look_aheads)]
             if queries_to_issue:
                 if self.debug:
                     print('Query ->', queries_to_issue[0])
                 # (bs, ret_topk) * 2
+                mql = None if (self.use_full_input_as_query and first_ret) else self.max_query_length
                 ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
                     decoder_texts=queries_to_issue,
                     topk=self.ret_topk,
-                    max_query_length=self.max_query_length)
+                    max_query_length=mql)
+                first_ret = False
                 idx = -1
                 for _i, (i, q) in enumerate(queries):
                     if generate_queries:
@@ -428,30 +438,32 @@ if __name__ == '__main__':
     retrieval_kwargs = {
         'retriever': retriever,
         'topk': 1,
-        'frequency': 128,
-        'boundary': [],
+        'frequency': 0,
+        #'boundary': [],
         #'boundary': ['Intermediate answer:'],
-        #'boundary': ['")]'],
+        'boundary': ['")]'],
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 128,
+        'max_query_length': 16,
+        'use_full_input_as_query': True,
         'retrieval_at_beginning': False,
         'look_ahead_steps': 0,
+        'look_ahead_truncate_at_boundary': None,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        'retrieval_trigers': [],
+        #'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
-        #'retrieval_trigers': [('\[Search\("', '")]')],
+        'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
         'truncate_at_prob': 0.0,
-        'truncate_at_boundary': 'sentence',
+        'truncate_at_boundary': None,
         'append_retrieval': False,
         'use_ctx_for_examplars': True,
-        'use_retrieval_instruction': False,
+        'use_retrieval_instruction': True,
         'format_reference_method': 'default',
         'ctx_position': 'before_case',
-        'prompt_type': 'cot_interleave',
+        'prompt_type': 'cot_interleave_ret',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,

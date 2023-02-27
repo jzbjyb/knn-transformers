@@ -97,7 +97,7 @@ class CtxPrompt:
         use_ret_instruction: bool = True
     ):
         # run on demo
-        demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=use_ret_instruction) for d in self.demo])  # TODO: no retrieval for demo
+        demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=False) for d in self.demo])  # TODO: no retrieval for demo
 
         if use_ctx and self.ctx is None and len(self.ctxs):  # default is use all ctxs
             self.ctx = ' '.join([ctx for _, ctx in self.ctxs])
@@ -137,8 +137,8 @@ class CtxPrompt:
 class RetrievalInstruction:
     toolformer_instruction: Dict[str, Any] = {
         'retrieval': '1. You should use a Search API to look up information. You can do so by writing "[Search(term)]" where "term" is the search term you want to look up. For example:',
-        'task': '2. You should answer a question by thinking step-by-step. You can do so by first write out the reasoning steps and then draw you conclusion. For example:',
-        'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw you conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible.',
+        'task': '2. You should answer questions by thinking step-by-step. You can do so by first write out the reasoning steps and then draw the conclusion. For example:',
+        'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw then conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible.',
         #'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw you conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible. However, you should not directly copy chunks of words from "reference".',
         'examplars': [
             {

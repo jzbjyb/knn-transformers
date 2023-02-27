@@ -983,7 +983,7 @@ def eval(
 
     scount = 0
     search_per_example: List[int] = []
-    correct = incorrect = wrongformat = total = 0
+    final_metrics = {k: 0 for k in ['correct', 'incorrect', 'wrongformat', 'f1', 'precision', 'recall']}
     ret_accs: List[List[float]] = []
     ret_covers: List[List[float]] = []
     predictions: List[str] = []
@@ -1035,23 +1035,27 @@ def eval(
         else:
             ret_dids = np.array([['placeholder']], dtype=np.str_)
 
-        formatwrong = False
+        wrongformat = 0
         position = pred.find(anchor_text)
         if position == -1:
-            formatwrong = True
-            wrongformat += 1
+            wrongformat = 1
+            final_metrics['wrongformat'] += 1
         else:
             pred_ans = pred[position + len(anchor_text):].strip().lower()
             if dataset == 'strategyqa':
-                iscorrect = final_ans in pred_ans
+                correct = int(final_ans in pred_ans)
+                final_metrics['correct'] += correct
+                final_metrics['incorrect'] += 1 - correct
             elif dataset in {'hotpotqa'}:
-                iscorrect = HotpotQA.exact_match_score(pred_ans, final_ans)
+                for k, v in HotpotQA.exact_match_score(pred_ans, final_ans).items():
+                    final_metrics[k] += v
             elif dataset in {'2wikihop'}:
-                iscorrect = WikiMultiHopQA.exact_match_score(pred_ans, final_ans, ground_truth_id=ans_id)
+                for k, v in WikiMultiHopQA.exact_match_score(pred_ans, final_ans, ground_truth_id=ans_id).items():
+                    final_metrics[k] += v
+                for k, v in WikiMultiHopQA.f1_score(pred_ans, final_ans, ground_truth_id=ans_id).items():
+                    final_metrics[k] += v
             else:
                 raise NotImplementedError
-            correct += iscorrect
-            incorrect += (not iscorrect)
 
         has_search = '[Search(' in pred
         scount += has_search
@@ -1104,8 +1108,8 @@ def eval(
     ret_accs = np.array(ret_accs, dtype=float).mean(0)
     ret_covers = np.array(ret_covers, dtype=float).mean(0)
     format_list = lambda arr: ', '.join(map(lambda x: '{:.3f}'.format(x), arr.tolist()))
-    print('correct\tincorrect\twrongformat')
-    print(f'{correct / total}\t{incorrect / total}\t{wrongformat / total}')
+    print('\t'.join(final_metrics.keys()))
+    print('\t'.join(map(lambda x: str(x / total), final_metrics.values())))
     print('')
 
     print('\t'.join(metrics.keys()))

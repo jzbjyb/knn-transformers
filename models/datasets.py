@@ -3,6 +3,7 @@ import os
 import json
 import random
 from operator import itemgetter
+from collections import Counter
 import re
 import string
 import numpy as np
@@ -14,7 +15,8 @@ from .templates import CtxPrompt
 class BaseDataset:
     @classmethod
     def exact_match_score(cls, prediction, ground_truth):
-        return cls.normalize_answer(prediction) == cls.normalize_answer(ground_truth)
+        correct = int(cls.normalize_answer(prediction) == cls.normalize_answer(ground_truth))
+        return {'correct': correct, 'incorrect': 1 - correct}
 
     @classmethod
     def normalize_answer(cls, s):
@@ -462,7 +464,8 @@ class HotpotQA(BaseDataset):
 
 
 class WikiMultiHopQA(BaseDataset):
-    raw_train_data_file = 'data/2wikimultihopqa/data_ids_april7/train.json'
+    raw_train_data_file: str = 'data/2wikimultihopqa/data_ids_april7/train.json'
+    wid2alias_file: str = 'data/2wikimultihopqa/data_ids_april7/id_aliases.json'
     cot_examplars: List[Dict] = [
         {
             'question': "Who lived longer, Theodor Haecker or Harry Vaughan Watkins?",
@@ -662,8 +665,13 @@ class WikiMultiHopQA(BaseDataset):
     cot_interleave_demo_input_template = cot_interleave_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer: '
     cot_interleave_output_template = lambda self, cot, ans: f'{cot} So the answer is {ans}.'
 
+    cot_interleave_ret_examplars = cot_interleave_examplars
+    cot_interleave_ret_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step): '
+    cot_interleave_ret_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    cot_interleave_ret_output_template = cot_interleave_output_template
+
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'cot_ret', 'sa', 'cot_interleave'}
+        assert prompt_type in {'cot', 'cot_ret', 'sa', 'cot_interleave', 'cot_interleave_ret'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
@@ -676,27 +684,66 @@ class WikiMultiHopQA(BaseDataset):
         self.dataset = self.load_data(beir_dir)
 
     @classmethod
-    def load_wid2alias(cls, wid2alias_file: str):
+    def load_wid2alias(cls):
         if hasattr(cls, 'wid2alias'):
             return
         cls.wid2alias: Dict[str, List[str]] = {}
-        with open(wid2alias_file, 'r') as fin:
+        with open(cls.wid2alias_file, 'r') as fin:
             for l in fin:
                 l = json.loads(l)
                 cls.wid2alias[l['Q_id']] = l['aliases']
 
     @classmethod
+    def get_all_alias(cls, ground_truth_id: str) -> List[str]:
+        cls.load_wid2alias()
+        if ground_truth_id and ground_truth_id in cls.wid2alias:
+            return cls.wid2alias[ground_truth_id]
+        return []
+
+    @classmethod
     def exact_match_score(
         cls,
-        prediction,
+        prediction: str,
         ground_truth: str,
-        ground_truth_id: str = None,
-        wid2alias_file: str = 'data/2wikimultihopqa/data_ids_april7/id_aliases.json'):
-        cls.load_wid2alias(wid2alias_file)
+        ground_truth_id: str = None
+    ):
         ground_truths = {ground_truth}
-        if ground_truth_id and ground_truth_id in cls.wid2alias:
-            ground_truths.update(cls.wid2alias[ground_truth_id])
-        return np.max([cls.normalize_answer(prediction) == cls.normalize_answer(gt) for gt in ground_truths])
+        ground_truths.update(cls.get_all_alias(ground_truth_id))
+        correct = np.max([int(cls.normalize_answer(prediction) == cls.normalize_answer(gt)) for gt in ground_truths])
+        return {'correct': correct, 'incorrect': 1 - correct}
+
+    @classmethod
+    def f1_score(
+        cls,
+        prediction: str,
+        ground_truth: str,
+        ground_truth_id: str = None
+    ):
+        ground_truths = {ground_truth}
+        ground_truths.update(cls.get_all_alias(ground_truth_id))
+
+        final_metric = {'f1': 0, 'precision': 0, 'recall': 0}
+        for ground_truth in ground_truths:
+            normalized_prediction = cls.normalize_answer(prediction)
+            normalized_ground_truth = cls.normalize_answer(ground_truth)
+
+            if normalized_prediction in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+                continue
+            if normalized_ground_truth in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+                continue
+            prediction_tokens = normalized_prediction.split()
+            ground_truth_tokens = normalized_ground_truth.split()
+            common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
+            num_same = sum(common.values())
+            if num_same == 0:
+                continue
+
+            precision = 1.0 * num_same / len(prediction_tokens)
+            recall = 1.0 * num_same / len(ground_truth_tokens)
+            f1 = (2 * precision * recall) / (precision + recall)
+            for k in ['f1', 'precision', 'recall']:
+                final_metric[k] = max(eval(k), final_metric[k])
+        return final_metric
 
     @classmethod
     def get_gold_ctxs(cls, _id: str, num_distractors: int = 1):
