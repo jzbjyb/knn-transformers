@@ -52,6 +52,27 @@ class ApiReturn:
     def has_endoftext(self):
         return self.EOS in self.tokens
 
+    @classmethod
+    def get_sent(cls, text: str, position: str = 'begin'):
+        doc = cls.nlp(text)
+        if position == 'begin':
+            break_at = len(text)
+            for sent in doc.sents:
+                if sent.end_char > 0:
+                    break_at = sent.end_char
+                    break
+            return text[:break_at], break_at
+        if position == 'end':
+            sents = list(doc.sents)
+            break_at = 0
+            for i in range(len(sents)):
+                sent = sents[len(sents) - i - 1]
+                if len(text) - sent.start_char >= 5:  # TODO: argument
+                    break_at = sent.start_char
+                    break
+            return text[break_at:], break_at
+        raise NotImplementedError
+
     def truncate_at_prob(self, low: float):
         if self.num_tokens <= 1:
             return self
@@ -137,7 +158,7 @@ class QueryAgent:
         self.use_gold = retrieval_kwargs.get('use_gold', False)
         if self.ret_boundary:  # otherwise cannot decide when to finally stop
             assert self.final_stop_sym not in self.ret_boundary
-        self.use_ctx_for_examplars = retrieval_kwargs.get('use_ctx_for_examplars', None)
+        self.use_ctx_for_examplars = retrieval_kwargs.get('use_ctx_for_examplars', False)
         self.ctx_increase = retrieval_kwargs.get('ctx_increase', 'replace')
 
         self.look_ahead_steps = retrieval_kwargs.get('look_ahead_steps', 0)
@@ -170,11 +191,12 @@ class QueryAgent:
     def clean_retrieval(texts: List[str]):
         return ' '.join(texts).replace('\n', ' ')
 
-    def retrieve(self, queries: List[str]):
+    def retrieve(self, queries: List[str], is_question: bool = False):
+        mql = None if (self.use_full_input_as_query and is_question) else self.max_query_length
         ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
             decoder_texts=queries,
             topk=self.ret_topk,
-            max_query_length=self.max_query_length)
+            max_query_length=mql)
         return ctx_ids, ctx_texts
 
     def complete(
@@ -292,11 +314,7 @@ class QueryAgent:
                 if self.debug:
                     print('Query ->', queries_to_issue[0])
                 # (bs, ret_topk) * 2
-                mql = None if (self.use_full_input_as_query and first_ret) else self.max_query_length
-                ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
-                    decoder_texts=queries_to_issue,
-                    topk=self.ret_topk,
-                    max_query_length=mql)
+                ctx_ids, ctx_texts = self.retrieve(queries_to_issue, is_question=first_ret)
                 first_ret = False
                 idx = -1
                 for _i, (i, q) in enumerate(queries):
@@ -332,11 +350,12 @@ class QueryAgent:
                     params={'max_tokens': min(self.max_generation_len - max_gen_len, self.ret_frequency), 'stop': self.final_stop_sym})
                 if self.truncate_at_prob > 0:
                     apireturns = [ar.truncate_at_prob(self.truncate_at_prob) for ar in apireturns]
-                    max_gen_len += np.min([ar.num_tokens for ar in apireturns])
+                    max_gen_len += int(np.min([ar.num_tokens for ar in apireturns]))
+                    #generate_queries = [ApiReturn.get_sent(ar.text, position='end')[0] for ar in apireturns]
                     generate_queries = [ar.text for ar in apireturns]
                 elif self.truncate_at_boundary:
                     apireturns = [ar.truncate_at_boundary(self.truncate_at_boundary) for ar in apireturns]
-                    max_gen_len += np.min([ar.num_tokens for ar in apireturns])
+                    max_gen_len += int(np.min([ar.num_tokens for ar in apireturns]))
                     generate_queries = [ar.text for ar in apireturns]
                 else:
                     max_gen_len += self.ret_frequency
@@ -469,10 +488,10 @@ if __name__ == '__main__':
         'retriever': retriever,
         'topk': 3,
         'use_ctx': True,
-        'frequency': 0,
-        #'boundary': [],
+        'frequency': 128,
+        'boundary': [],
         #'boundary': ['Intermediate answer:'],
-        'boundary': ['")]'],
+        #'boundary': ['")]'],
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
@@ -483,17 +502,17 @@ if __name__ == '__main__':
         'look_ahead_truncate_at_boundary': None,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        #'retrieval_trigers': [],
+        'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
-        'retrieval_trigers': [('\[Search\("', '")]')],
+        #'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
-        'force_generate': 685,
-        'forbid_generate_step': 5,
-        'truncate_at_prob': 0.0,
+        'force_generate': None,
+        'forbid_generate_step': None,
+        'truncate_at_prob': 0.2,
         'truncate_at_boundary': None,
         'append_retrieval': False,
-        'use_ctx_for_examplars': True,
-        'use_retrieval_instruction': True,
+        'use_ctx_for_examplars': 'gold',
+        'use_retrieval_instruction': False,
         'format_reference_method': 'default',
         'ctx_position': 'before_case',
         'prompt_type': 'cot_interleave_ret',
@@ -525,8 +544,14 @@ if __name__ == '__main__':
         use_gold_func = WikiMultiHopQA.get_gold_ctxs
     else:
         raise NotImplementedError
-    if qagent.use_ctx_for_examplars:
+    if qagent.use_ctx_for_examplars == 'gold':
         data.retrieval_augment_examplars(qagent, use_gold=use_gold_func)
+    elif qagent.use_ctx_for_examplars == 'ret':
+        data.retrieval_augment_examplars(qagent)
+    elif qagent.use_ctx_for_examplars == False:
+        pass
+    else:
+        raise NotImplementedError
     data.format(fewshot=args.fewshot)
     data = data.dataset
 

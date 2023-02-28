@@ -89,7 +89,7 @@ class BaseDataset:
                 ctxs: List[Tuple[str, str]] = use_gold(_id)
                 examplar['ctxs'] = ctxs
             else:  # search question
-                ctx_ids, ctx_texts = qagent.retrieve([question])
+                ctx_ids, ctx_texts = qagent.retrieve([question], is_question=True)
                 ctx_ids, ctx_texts = ctx_ids[0], ctx_texts[0]  # (ret_topk) * 2
                 examplar['ctxs'] = list(zip(ctx_ids, ctx_texts))
 

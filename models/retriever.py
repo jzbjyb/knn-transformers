@@ -68,7 +68,7 @@ class BM25:
         # load index
         assert engine in {'elasticsearch', 'brave', 'bing'}
         if engine == 'elasticsearch':
-            self.max_ret_topk = 100
+            self.max_ret_topk = 1000
             self.retriever = EvaluateRetrieval(
                 BM25Search(index_name=index_name, hostname='localhost', initialize=False, number_of_shards=1),
                 k_values=[self.max_ret_topk])

@@ -17,7 +17,7 @@ from transformers import AutoTokenizer
 from datasets import load_dataset
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
-from beir.retrieval.search.lexical import BM25Search as BM25
+from beir.retrieval.search.lexical import BM25Search
 from models.datasets import HotpotQA, WikiMultiHopQA
 
 class Wikipedia(object):
@@ -438,7 +438,7 @@ def convert_beir_to_fid_format(
     hostname = 'localhost'
     number_of_shards = 1  # TODO
     corpus, _, _ = GenericDataLoader(data_folder=beir_dir).load(split=splits[0])
-    model = BM25(index_name=dataset_name, hostname=hostname, initialize=True, number_of_shards=number_of_shards)
+    model = BM25Search(index_name=dataset_name, hostname=hostname, initialize=True, number_of_shards=number_of_shards)
     model.index(corpus)
     time.sleep(5)
 
@@ -446,7 +446,7 @@ def convert_beir_to_fid_format(
         corpus, queries, qrels = GenericDataLoader(data_folder=beir_dir).load(split=split)
 
         # retrieve
-        model = BM25(index_name=dataset_name, hostname=hostname, initialize=False, number_of_shards=number_of_shards)
+        model = BM25Search(index_name=dataset_name, hostname=hostname, initialize=False, number_of_shards=number_of_shards)
         retriever = EvaluateRetrieval(model)
         results = retriever.retrieve(corpus, queries)
         print(f'retriever evaluation for k in: {retriever.k_values}')
@@ -1174,6 +1174,51 @@ def build_elasticsearch(
         progress=progress)
 
 
+def mmlu_ret(
+        split: str = 'test',
+        index_name: str = 'wikipedia_dpr',
+        topk: int = 1000,
+        output: str = None):
+    from models.retriever import BM25
+    retriever = BM25(
+        tokenizer=None,
+        dataset=(None, None, None),
+        index_name=index_name,
+        use_decoder_input_ids=True,
+        engine='elasticsearch',
+        file_lock=None)
+    topics = ['abstract_algebra', 'anatomy', 'astronomy', 'business_ethics',
+        'clinical_knowledge', 'college_biology', 'college_chemistry', 'college_computer_science',
+        'college_mathematics', 'college_medicine', 'college_physics', 'computer_security',
+        'conceptual_physics', 'econometrics', 'electrical_engineering', 'elementary_mathematics',
+        'formal_logic', 'global_facts', 'high_school_biology', 'high_school_chemistry',
+        'high_school_computer_science', 'high_school_european_history', 'high_school_geography',
+        'high_school_government_and_politics', 'high_school_macroeconomics', 'high_school_mathematics',
+        'high_school_microeconomics', 'high_school_physics', 'high_school_psychology',
+        'high_school_statistics', 'high_school_us_history', 'high_school_world_history',
+        'human_aging', 'human_sexuality', 'international_law', 'jurisprudence', 'logical_fallacies',
+        'machine_learning', 'management', 'marketing', 'medical_genetics', 'miscellaneous', 'moral_disputes',
+        'moral_scenarios', 'nutrition', 'philosophy', 'prehistory', 'professional_accounting', 'professional_law',
+        'professional_medicine', 'professional_psychology', 'public_relations', 'security_studies', 'sociology',
+        'us_foreign_policy', 'virology', 'world_religions']
+    with open(output, 'w') as fout:
+        for topic in topics:
+            dataset = load_dataset('hendrycks_test', topic)[split]
+            for i in tqdm(range(len(dataset)), desc=topic):
+                q = dataset[i]['question']
+                ctx_ids, ctx_texts = retriever.retrieve_and_prepare(
+                    decoder_texts=[q],
+                    topk=topk,
+                    max_query_length=None)
+                result = {
+                    'topic': topic,
+                    'split': split,
+                    'index': i,
+                    'docs': [(idx, text) for idx, text in zip(ctx_ids[0].tolist(), ctx_texts[0].tolist())]
+                }
+                fout.write(json.dumps(result) + '\n')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
@@ -1182,7 +1227,7 @@ if __name__ == '__main__':
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
         'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare',
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
-        'build_elasticsearch', 'dpr_to_beir'])
+        'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--dataset', type=str, default='2wikihop', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop'])
     parser.add_argument('--out', type=str, default=None, help='output file')
@@ -1329,3 +1374,6 @@ if __name__ == '__main__':
     elif args.task == 'build_elasticsearch':
         beir_corpus_file, index_name = args.inp  # 'wikipedia_kilt'
         build_elasticsearch(beir_corpus_file, index_name)
+
+    elif args.task == 'mmlu_ret':
+        mmlu_ret(output=args.out)
