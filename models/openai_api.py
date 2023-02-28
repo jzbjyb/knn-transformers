@@ -41,6 +41,8 @@ class ApiReturn:
         self.probs = probs
         self.offsets = offsets
         self.finish_reason = finish_reason
+        if self.finish_reason is None:
+            self.finish_reason = 'stop'  # TODO: a bug from openai?
 
     @property
     def num_tokens(self):
@@ -127,6 +129,7 @@ class QueryAgent:
 
         # retrieval args
         self.retriever = retrieval_kwargs.get('retriever', None)
+        self.use_ctx = retrieval_kwargs.get('use_ctx', False)
         self.ret_frequency = retrieval_kwargs.get('frequency', 0)
         self.truncate_at_prob = retrieval_kwargs.get('truncate_at_prob', 0)
         self.truncate_at_boundary = retrieval_kwargs.get('truncate_at_boundary', None)
@@ -146,6 +149,8 @@ class QueryAgent:
         self.retrieval_trigers = retrieval_kwargs.get('retrieval_trigers', [])
         for rts, rte in self.retrieval_trigers:
             assert rte in self.ret_boundary, 'end of retrieval trigers must be used as boundary'
+        self.force_generate = retrieval_kwargs.get('force_generate', None)
+        self.forbid_generate_step = retrieval_kwargs.get('forbid_generate_step', None)
         self.use_gold_iterative = retrieval_kwargs.get('use_gold_iterative', False)
         self.append_retrieval = retrieval_kwargs.get('append_retrieval', False)
 
@@ -154,8 +159,8 @@ class QueryAgent:
 
         self.retrieval_at_beginning = retrieval_kwargs.get('retrieval_at_beginning', False)
         if self.retrieval_at_beginning:
-            self.ret_frequency = self.max_generation_len
-            self.ret_boundary = []
+            if self.ret_frequency:
+                self.ret_frequency = self.max_generation_len
 
     @property
     def use_retrieval(self):
@@ -177,6 +182,8 @@ class QueryAgent:
         queries: List[str],
         params: Dict[str, Any],
         max_num_req_per_min: int = 10,
+        force_generate: int = None,
+        forbid_generate: int = None,
     ) -> List[ApiReturn]:
         if 'max_tokens' in params:  # TODO: opt doesn't have this bug
             params['max_tokens'] = max(2, params['max_tokens'])  # openai returns nothing if set to 1
@@ -185,13 +192,18 @@ class QueryAgent:
         expbf = 2
         while True:
             try:
+                logit_bias = dict()
+                if force_generate:
+                    logit_bias={f'{force_generate}': 2.0}
+                elif forbid_generate:
+                    logit_bias={f'{forbid_generate}': -100}
                 responses = openai.Completion.create(
                     model=self.model,
                     prompt=queries,
                     temperature=self.temperature,
                     top_p=self.top_p,
                     logprobs=0,
-                    #logit_bias={'685': 1.0},  # 'Ġ['
+                    logit_bias=logit_bias,
                     **params)
                 generations = [ApiReturn(
                     prompt=q,
@@ -247,19 +259,20 @@ class QueryAgent:
 
         generate_queries: List[str] = []
         first_ret = True
+        step_ind = 0
         while len(queries) and max_gen_len < self.max_generation_len:
             # retrieve
             look_aheads: List[str] = [''] * len(queries)
             if self.look_ahead_steps:  # generate a fixed number tokens for retrieval
                 apireturns = self.complete(
-                    [q.format(use_ctx=True) for i, q in queries],
+                    [q.format(use_ctx=self.use_ctx) for i, q in queries],
                     params={'max_tokens': self.look_ahead_steps, 'stop': self.final_stop_sym})
                 if self.look_ahead_truncate_at_boundary:
                     apireturns = [ar.truncate_at_boundary(self.look_ahead_truncate_at_boundary) for ar in apireturns]
                 look_aheads = [ar.text for ar in apireturns]
             elif self.look_ahead_boundary:  # generate tokens until boundary for retrieval
                 apireturns = self.complete(
-                    [q.format(use_ctx=True) for i, q in queries],
+                    [q.format(use_ctx=self.use_ctx) for i, q in queries],
                     params={'max_tokens': self.max_generation_len, 'stop': self.look_ahead_boundary})
                 look_aheads = [ar.text for ar in apireturns]
             assert len(look_aheads) == len(queries)
@@ -275,7 +288,7 @@ class QueryAgent:
                 #    for (i, q), lh in zip(queries, look_aheads)]
                 queries_to_issue = [lh if self.only_use_look_ahead else (q.case + lh)
                     for (i, q), lh in zip(queries, look_aheads)]
-            if queries_to_issue:
+            if queries_to_issue and (not self.retrieval_at_beginning or first_ret):
                 if self.debug:
                     print('Query ->', queries_to_issue[0])
                 # (bs, ret_topk) * 2
@@ -315,8 +328,8 @@ class QueryAgent:
             # complete
             if self.ret_frequency:
                 apireturns = self.complete(
-                    [q.format(use_ctx=True) for i, q in queries],
-                    params={'max_tokens': self.ret_frequency, 'stop': self.final_stop_sym})
+                    [q.format(use_ctx=self.use_ctx) for i, q in queries],
+                    params={'max_tokens': min(self.max_generation_len - max_gen_len, self.ret_frequency), 'stop': self.final_stop_sym})
                 if self.truncate_at_prob > 0:
                     apireturns = [ar.truncate_at_prob(self.truncate_at_prob) for ar in apireturns]
                     max_gen_len += np.min([ar.num_tokens for ar in apireturns])
@@ -328,9 +341,20 @@ class QueryAgent:
                 else:
                     max_gen_len += self.ret_frequency
             elif self.ret_boundary:
+                if self.forbid_generate_step and self.retrieval_trigers and step_ind > 0:  # start from the second step to forbid the force_generate token
+                    apireturns = self.complete(
+                        [q.format(use_ctx=self.use_ctx) for i, q in queries],
+                        params={'max_tokens': min(self.max_generation_len - max_gen_len, self.forbid_generate_step), 'stop': self.final_stop_sym},
+                        forbid_generate=self.force_generate)
+                    for (i, query), ar in zip(queries, apireturns):
+                        cont = ar.text
+                        final_outputs[i] += cont
+                        traces[i].append((ar.prompt, cont))
+                        query.case += cont
                 apireturns = self.complete(
-                    [q.format(use_ctx=True) for i, q in queries],
-                    params={'max_tokens': self.max_generation_len - max_gen_len, 'stop': self.ret_boundary})
+                    [q.format(use_ctx=self.use_ctx) for i, q in queries],
+                    params={'max_tokens': self.max_generation_len - max_gen_len, 'stop': self.ret_boundary},
+                    force_generate=self.force_generate)
                 # used to collect the generation with ret_boundary
                 min_cont_len = 100000
                 for i, ar in enumerate(apireturns):
@@ -339,6 +363,7 @@ class QueryAgent:
                         if self.retrieval_trigers:
                             generate_queries.append(None)
                     elif reason == 'stop' and self.final_stop_sym not in cont:  # stop at ret_boundary
+                        remove_query = False
                         if self.retrieval_trigers:  # extract queries from generation
                             assert len(self.retrieval_trigers) == 1
                             # TODO: check if it stops at retrieval trigers
@@ -346,15 +371,19 @@ class QueryAgent:
                             if ret_tri_start is None:  # use all generated tokens as query
                                 generate_queries.append(cont)
                             else:
-                                found = re.search(ret_tri_start, cont)
-                                if found:
-                                    generate_queries.append(cont[found.span()[1]:].strip())
+                                found_query = re.search(ret_tri_start, cont)
+                                if found_query:
+                                    generate_queries.append(cont[found_query.span()[1]:].strip())
+                                    if self.forbid_generate_step:
+                                        remove_query = True
+                                        cont = cont[:found_query.span()[0]]  # remove queries
                                 else:
                                     generate_queries.append(None)
                         assert len(self.ret_boundary) == 1
-                        cont += self.ret_boundary[0]
+                        if not remove_query:
+                            cont += self.ret_boundary[0]
                         reason = 'boundary'
-                        assert len(cont) > 0, 'empty generation will cause dead lock'
+                        #assert len(cont) > 0, 'empty generation will cause dead lock'
                     else:
                         if self.retrieval_trigers:
                             generate_queries.append(None)
@@ -389,6 +418,7 @@ class QueryAgent:
                     raise ValueError
             queries = new_queries
             generate_queries = new_generate_queries
+            step_ind += 1
         return final_outputs, final_retrievals, traces
 
 
@@ -437,7 +467,8 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 1,
+        'topk': 3,
+        'use_ctx': True,
         'frequency': 0,
         #'boundary': [],
         #'boundary': ['Intermediate answer:'],
@@ -456,6 +487,8 @@ if __name__ == '__main__':
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
+        'force_generate': 685,
+        'forbid_generate_step': 5,
         'truncate_at_prob': 0.0,
         'truncate_at_boundary': None,
         'append_retrieval': False,
