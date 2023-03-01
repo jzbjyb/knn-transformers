@@ -14,6 +14,7 @@ DS_BUILD_OPS=1 DS_BUILD_FUSED_LAMB=1 DS_BUILD_SPARSE_ATTN=0 DS_BUILD_AIO=0 pip i
 pip install sentencepiece==0.1.83
 pip install filelock
 pip install spacy==3.5.0
+python -m spacy download en_core_web_sm
 
 # mongo for KILT
 #mongod --dbpath /path/to/data --logpath /path/to/mongod.log --fork

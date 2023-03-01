@@ -130,6 +130,17 @@ class ApiReturn:
             raise NotImplementedError
         return self
 
+    def use_as_query(self, low: float = None):
+        if not low:
+            return self.text
+        ok = False
+        for p in self.probs:
+            if p <= low:
+                ok = True
+                break
+        return self.text if ok else ''
+
+
 class QueryAgent:
     def __init__(
         self,
@@ -164,6 +175,7 @@ class QueryAgent:
         self.look_ahead_steps = retrieval_kwargs.get('look_ahead_steps', 0)
         self.look_ahead_boundary = retrieval_kwargs.get('look_ahead_boundary', 0)
         self.look_ahead_truncate_at_boundary = retrieval_kwargs.get('look_ahead_truncate_at_boundary', None)
+        self.look_ahead_filter_prob = retrieval_kwargs.get('look_ahead_filter_prob', 0)
         self.max_query_length = retrieval_kwargs.get('max_query_length', None)
         self.use_full_input_as_query = retrieval_kwargs.get('use_full_input_as_query', False)
         self.only_use_look_ahead = retrieval_kwargs.get('only_use_look_ahead', False)
@@ -204,6 +216,7 @@ class QueryAgent:
         queries: List[str],
         params: Dict[str, Any],
         max_num_req_per_min: int = 10,
+        error_retry: int = 3,
         force_generate: int = None,
         forbid_generate: int = None,
     ) -> List[ApiReturn]:
@@ -240,9 +253,17 @@ class QueryAgent:
                     input('-' * 50)
                 break
             except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout):
-                logging.info(f'sleep {add_sleep + min_sleep}')
+                logging.info(f'sleep {add_sleep + min_sleep} for rate')
                 time.sleep(add_sleep + min_sleep)
                 add_sleep = add_sleep * expbf
+            except KeyboardInterrupt as e:
+                raise e
+            except Exception as e:
+                if error_retry <= 0:
+                    raise e
+                error_retry -= 1
+                logging.info(f'sleep {min_sleep} for error')
+                time.sleep(min_sleep)
         time.sleep(min_sleep)
         return generations
 
@@ -291,7 +312,7 @@ class QueryAgent:
                     params={'max_tokens': self.look_ahead_steps, 'stop': self.final_stop_sym})
                 if self.look_ahead_truncate_at_boundary:
                     apireturns = [ar.truncate_at_boundary(self.look_ahead_truncate_at_boundary) for ar in apireturns]
-                look_aheads = [ar.text for ar in apireturns]
+                look_aheads = [ar.use_as_query(low=self.look_ahead_filter_prob) for ar in apireturns]
             elif self.look_ahead_boundary:  # generate tokens until boundary for retrieval
                 apireturns = self.complete(
                     [q.format(use_ctx=self.use_ctx) for i, q in queries],
@@ -302,44 +323,33 @@ class QueryAgent:
             # send queries to index
             if generate_queries:  # some queries might be None which means no queries are generated
                 assert len(generate_queries) == len(queries)
-                queries_to_issue = [lh if self.only_use_look_ahead else (gq + lh)
-                    for gq, lh in zip(generate_queries, look_aheads) if gq]
+                queries_to_issue = [lh if self.only_use_look_ahead else (gq + lh) for gq, lh in zip(generate_queries, look_aheads)]
             else:
                 # TODO: only use question
                 #queries_to_issue = [lh if self.only_use_look_ahead else (q.case.split('\n')[0].split(':', 1)[1].strip() + lh)
                 #    for (i, q), lh in zip(queries, look_aheads)]
-                queries_to_issue = [lh if self.only_use_look_ahead else (q.case + lh)
-                    for (i, q), lh in zip(queries, look_aheads)]
-            if queries_to_issue and (not self.retrieval_at_beginning or first_ret):
-                if self.debug:
-                    print('Query ->', queries_to_issue[0])
+                queries_to_issue = [lh if self.only_use_look_ahead else (q.case + lh) for (i, q), lh in zip(queries, look_aheads)]
+            if self.debug:
+                print('Query ->', queries_to_issue[0])
+            nonemp_queries_to_issue = [q for q in queries_to_issue if q]
+            if nonemp_queries_to_issue and (not self.retrieval_at_beginning or first_ret):
                 # (bs, ret_topk) * 2
-                ctx_ids, ctx_texts = self.retrieve(queries_to_issue, is_question=first_ret)
+                ctx_ids, ctx_texts = self.retrieve(nonemp_queries_to_issue, is_question=first_ret)
                 first_ret = False
                 idx = -1
                 for _i, (i, q) in enumerate(queries):
-                    if generate_queries:
-                        if generate_queries[_i]:
-                            idx += 1
-                            if self.use_gold_iterative:
-                                ret_id, ret_text = q.change_ctx()
-                                ret_id = [ret_id]
-                            else:
-                                ret_id, ret_text = ctx_ids[idx].tolist(), self.clean_retrieval(ctx_texts[idx])
-                            final_retrievals[i].append(ret_id)
-                            if self.append_retrieval:
-                                q.ctx = None
-                                q.append_retrieval(ret_text, add_index=False)
-                            else:
-                                q.update_retrieval(ret_text, method=self.ctx_increase)
-                    else:
-                        ret_id, ret_text = ctx_ids[_i].tolist(), self.clean_retrieval(ctx_texts[_i])
+                    if queries_to_issue[_i]:
+                        idx += 1
+                        if self.use_gold_iterative:
+                            ret_id, ret_text = q.change_ctx()
+                            ret_id = [ret_id]
+                        else:
+                            ret_id, ret_text = ctx_ids[idx].tolist(), self.clean_retrieval(ctx_texts[idx])
+                        final_retrievals[i].append(ret_id)
                         if self.append_retrieval:
-                            final_retrievals[i].append(ret_id)
                             q.ctx = None
                             q.append_retrieval(ret_text, add_index=False)
                         else:
-                            final_retrievals[i].append(ret_id)
                             q.update_retrieval(ret_text, method=self.ctx_increase)
             generate_queries = []
 
@@ -380,7 +390,7 @@ class QueryAgent:
                     cont, reason = ar.text, ar.finish_reason
                     if ar.has_endoftext:  # 003 stops proactively by returning endoftext
                         if self.retrieval_trigers:
-                            generate_queries.append(None)
+                            generate_queries.append('')
                     elif reason == 'stop' and self.final_stop_sym not in cont:  # stop at ret_boundary
                         remove_query = False
                         if self.retrieval_trigers:  # extract queries from generation
@@ -397,7 +407,7 @@ class QueryAgent:
                                         remove_query = True
                                         cont = cont[:found_query.span()[0]]  # remove queries
                                 else:
-                                    generate_queries.append(None)
+                                    generate_queries.append('')
                         assert len(self.ret_boundary) == 1
                         if not remove_query:
                             cont += self.ret_boundary[0]
@@ -405,7 +415,7 @@ class QueryAgent:
                         #assert len(cont) > 0, 'empty generation will cause dead lock'
                     else:
                         if self.retrieval_trigers:
-                            generate_queries.append(None)
+                            generate_queries.append('')
                     if self.final_stop_sym in cont:
                         cont = cont.split(self.final_stop_sym, 1)[0]
                         reason = 'stop'
@@ -495,21 +505,22 @@ if __name__ == '__main__':
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 16,
+        'max_query_length': 128,
         'use_full_input_as_query': True,
         'retrieval_at_beginning': False,
-        'look_ahead_steps': 0,
-        'look_ahead_truncate_at_boundary': None,
+        'look_ahead_steps': 128,
+        'look_ahead_truncate_at_boundary': 'sentence',
+        'look_ahead_filter_prob': None,
         'look_ahead_boundary': [],
-        'only_use_look_ahead': False,
+        'only_use_look_ahead': True,
         'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         #'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
         'force_generate': None,
         'forbid_generate_step': None,
-        'truncate_at_prob': 0.2,
-        'truncate_at_boundary': None,
+        'truncate_at_prob': 0.0,
+        'truncate_at_boundary': 'sentence',
         'append_retrieval': False,
         'use_ctx_for_examplars': 'gold',
         'use_retrieval_instruction': False,

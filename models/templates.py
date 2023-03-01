@@ -99,8 +99,8 @@ class CtxPrompt:
         # run on demo
         demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=False) for d in self.demo])  # TODO: no retrieval for demo
 
-        if use_ctx and self.ctx is None and len(self.ctxs):  # default is use all ctxs
-            self.ctx = ' '.join([ctx for _, ctx in self.ctxs])
+        #if use_ctx and self.ctx is None and len(self.ctxs):  # TODO: default is use all ctxs
+        #    self.ctx = ' '.join([ctx for _, ctx in self.ctxs])
         use_ctx = use_ctx and self.ctx
         use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
         ref = self.format_reference(self.ctx) if use_ctx else None

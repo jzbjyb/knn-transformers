@@ -1372,7 +1372,7 @@ if __name__ == '__main__':
         dpr_to_beir(dpr_file, beir_dir)
 
     elif args.task == 'build_elasticsearch':
-        beir_corpus_file, index_name = args.inp  # 'wikipedia_kilt'
+        beir_corpus_file, index_name = args.inp  # 'wikipedia_dpr'
         build_elasticsearch(beir_corpus_file, index_name)
 
     elif args.task == 'mmlu_ret':
