@@ -1049,6 +1049,8 @@ def eval(
             elif dataset in {'hotpotqa'}:
                 for k, v in HotpotQA.exact_match_score(pred_ans, final_ans).items():
                     final_metrics[k] += v
+                for k, v in HotpotQA.f1_score(pred_ans, final_ans).items():
+                    final_metrics[k] += v
             elif dataset in {'2wikihop'}:
                 for k, v in WikiMultiHopQA.exact_match_score(pred_ans, final_ans, ground_truth_id=ans_id).items():
                     final_metrics[k] += v
@@ -1062,7 +1064,7 @@ def eval(
         if has_search:
             search_per_example.append(len(re.findall('\[Search\(', pred)))
 
-        if debug:
+        if debug and wrongformat:
             print('Q->', question)
             print()
             print('T->')

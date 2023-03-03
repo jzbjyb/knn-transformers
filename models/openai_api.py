@@ -25,6 +25,7 @@ logging.basicConfig(level=logging.INFO)
 class ApiReturn:
     EOS = '<|endoftext|>'
     nlp = spacy.load('en_core_web_sm')
+    min_sent_len = 5
 
     def __init__(
         self,
@@ -59,7 +60,7 @@ class ApiReturn:
         if position == 'begin':
             break_at = len(text)
             for sent in doc.sents:
-                if sent.end_char > 0:
+                if sent.end_char >= cls.min_sent_len:
                     break_at = sent.end_char
                     break
             return text[:break_at], break_at
@@ -68,7 +69,7 @@ class ApiReturn:
             break_at = 0
             for i in range(len(sents)):
                 sent = sents[len(sents) - i - 1]
-                if len(text) - sent.start_char >= 5:  # TODO: argument
+                if len(text) - sent.start_char >= cls.min_sent_len:  # TODO: argument
                     break_at = sent.start_char
                     break
             return text[break_at:], break_at
@@ -111,7 +112,7 @@ class ApiReturn:
             doc = self.nlp(self.text)
             break_at = len(self.text)
             for sent in doc.sents:
-                if sent.end_char > 0:
+                if sent.end_char >= self.min_sent_len:
                     break_at = sent.end_char
                     break
 
@@ -193,7 +194,7 @@ class QueryAgent:
         for rts, rte in self.retrieval_trigers:
             assert rte in self.ret_boundary, 'end of retrieval trigers must be used as boundary'
         self.force_generate = retrieval_kwargs.get('force_generate', None)
-        self.forbid_generate_step = retrieval_kwargs.get('forbid_generate_step', None)
+        self.forbid_generate_step = retrieval_kwargs.get('forbid_generate_step', 0)
         self.use_gold_iterative = retrieval_kwargs.get('use_gold_iterative', False)
         self.append_retrieval = retrieval_kwargs.get('append_retrieval', False)
 
@@ -241,9 +242,10 @@ class QueryAgent:
             try:
                 logit_bias = dict()
                 if force_generate:
-                    logit_bias={f'{force_generate}': 2.0}
+                    logit_bias={f'{force_generate[0]}': force_generate[1]}
                 elif forbid_generate:
-                    logit_bias={f'{forbid_generate}': -100}
+                    logit_bias={f'{forbid_generate[0]}': -100}
+                logging.info(f'start query with key {api_key[-5:]}')
                 responses = openai.Completion.create(
                     api_key=api_key,
                     model=self.model,
@@ -260,13 +262,16 @@ class QueryAgent:
                     probs=[np.exp(lp) for lp in r['logprobs']['token_logprobs']],
                     offsets=r['logprobs']['text_offset'],
                     finish_reason=r['finish_reason']) for r, q in zip(responses['choices'], queries)]
+                logging.info(f'finish query with key {api_key[-5:]}')
+                logging.info(f'{queries[0][-128:]}\n->{generations[0].text}')
                 if self.debug:
+                    print('Params ->', params)
                     print('Prompt ->', queries[0])
                     print('Output ->', generations[0].text)
                     input('-' * 50)
                 break
             except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout):
-                logging.info(f'sleep {add_sleep + min_sleep} for rate')
+                logging.info(f'sleep for rate {add_sleep + min_sleep} with key {api_key[-5:]}')
                 time.sleep(add_sleep + min_sleep)
                 add_sleep = add_sleep * expbf
             except KeyboardInterrupt as e:
@@ -275,7 +280,7 @@ class QueryAgent:
                 if error_retry <= 0:
                     raise e
                 error_retry -= 1
-                logging.info(f'sleep {min_sleep} for error')
+                logging.info(f'sleep for error {min_sleep} with key {api_key[-5:]}')
                 time.sleep(min_sleep)
         time.sleep(min_sleep)
         return generations
@@ -309,6 +314,7 @@ class QueryAgent:
         self,
         queries: List[CtxPrompt],
         api_key: str = None,
+        max_iteration: int = 12,
     ):
         batch_size = len(queries)
         final_retrievals: List[List[List[str]]] = [[] for _ in range(len(queries))]  # (bs, n_ret_steps, ret_topk)
@@ -320,7 +326,7 @@ class QueryAgent:
         generate_queries: List[str] = []
         first_ret = True
         step_ind = 0
-        while len(queries) and max_gen_len < self.max_generation_len:
+        while len(queries) and max_gen_len < self.max_generation_len and step_ind <= max_iteration:
             # retrieve
             look_aheads: List[str] = [''] * len(queries)
             if self.look_ahead_steps:  # generate a fixed number tokens for retrieval
@@ -551,7 +557,7 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 1,
+        'topk': 2,
         'use_ctx': True,
         'frequency': 0,
         #'boundary': [],
@@ -560,7 +566,7 @@ if __name__ == '__main__':
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 128,
+        'max_query_length': 64,
         'use_full_input_as_query': True,
         'retrieval_at_beginning': False,
         'look_ahead_steps': 0,
@@ -573,7 +579,7 @@ if __name__ == '__main__':
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
-        'force_generate': 685,
+        'force_generate': (685, 2.0),
         'forbid_generate_step': 5,
         'truncate_at_prob': 0.0,
         'truncate_at_boundary': None,
@@ -617,14 +623,17 @@ if __name__ == '__main__':
         data = StrategyQA(args.input, prompt_type=retrieval_kwargs['prompt_type'])
     elif args.dataset == 'hotpotqa':
         data = HotpotQA('validation', prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = HotpotQA.get_gold_ctxs
     elif args.dataset == '2wikihop':
         data = WikiMultiHopQA(args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WikiMultiHopQA.get_gold_ctxs
     else:
         raise NotImplementedError
     if qagent.use_ctx_for_examplars == 'gold':
+        logging.info('gold ctx for examplars')
         data.retrieval_augment_examplars(qagent, use_gold=use_gold_func)
     elif qagent.use_ctx_for_examplars == 'ret':
+        logging.info('retrieve ctx for examplars')
         data.retrieval_augment_examplars(qagent)
     elif qagent.use_ctx_for_examplars == False:
         pass

@@ -14,9 +14,51 @@ from .templates import CtxPrompt
 
 class BaseDataset:
     @classmethod
-    def exact_match_score(cls, prediction, ground_truth):
-        correct = int(cls.normalize_answer(prediction) == cls.normalize_answer(ground_truth))
+    def exact_match_score(
+        cls,
+        prediction: str,
+        ground_truth: str,
+        ground_truth_id: str = None
+    ):
+        ground_truths = {ground_truth}
+        if ground_truth_id:
+            ground_truths.update(cls.get_all_alias(ground_truth_id))
+        correct = np.max([int(cls.normalize_answer(prediction) == cls.normalize_answer(gt)) for gt in ground_truths])
         return {'correct': correct, 'incorrect': 1 - correct}
+
+    @classmethod
+    def f1_score(
+        cls,
+        prediction: str,
+        ground_truth: str,
+        ground_truth_id: str = None
+    ):
+        ground_truths = {ground_truth}
+        if ground_truth_id:
+            ground_truths.update(cls.get_all_alias(ground_truth_id))
+
+        final_metric = {'f1': 0, 'precision': 0, 'recall': 0}
+        for ground_truth in ground_truths:
+            normalized_prediction = cls.normalize_answer(prediction)
+            normalized_ground_truth = cls.normalize_answer(ground_truth)
+
+            if normalized_prediction in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+                continue
+            if normalized_ground_truth in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
+                continue
+            prediction_tokens = normalized_prediction.split()
+            ground_truth_tokens = normalized_ground_truth.split()
+            common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
+            num_same = sum(common.values())
+            if num_same == 0:
+                continue
+
+            precision = 1.0 * num_same / len(prediction_tokens)
+            recall = 1.0 * num_same / len(ground_truth_tokens)
+            f1 = (2 * precision * recall) / (precision + recall)
+            for k in ['f1', 'precision', 'recall']:
+                final_metric[k] = max(eval(k), final_metric[k])
+        return final_metric
 
     @classmethod
     def normalize_answer(cls, s):
@@ -30,6 +72,28 @@ class BaseDataset:
         def lower(text):
             return text.lower()
         return white_space_fix(remove_articles(remove_punc(lower(s))))
+
+    @classmethod
+    def get_gold_ctxs(cls, _id: str, num_distractors: int = 1):
+        if not hasattr(cls, 'rawdata'):
+            rawdata = json.load(open(cls.raw_train_data_file, 'r'))
+            cls.rawdata: Dict[str, Dict] = {e['_id']: e for e in rawdata}
+        example = cls.rawdata[_id]
+        title2paras: Dict[str, List[str]] = {title: sents for title, sents in example['context']}
+        golds = [(f'{title}__{para_ind}', title2paras[title][para_ind].strip()) for title, para_ind in example['supporting_facts']
+            if title in title2paras and para_ind < len(title2paras[title])]
+        if num_distractors:
+            all_tp: Set[Tuple[str, int]] = set((title, para_ind) for title in title2paras for para_ind in range(len(title2paras[title])))
+            gold_tp: Set[Tuple[str, int]] = set((title, para_ind) for title, para_ind in example['supporting_facts'])
+            neg_tp: List[Tuple[str, int]] = list(all_tp - gold_tp)
+            random.shuffle(neg_tp)
+            neg_tp = neg_tp[:num_distractors]
+            negs = [(f'{title}__{para_ind}', title2paras[title][para_ind].strip()) for title, para_ind in neg_tp]
+            ctxs = golds + negs
+            random.shuffle(ctxs)  # shuffle golds and negs
+            return ctxs
+        else:
+            return golds
 
     def format(
         self,
@@ -353,6 +417,7 @@ class StrategyQA(BaseDataset):
 
 
 class HotpotQA(BaseDataset):
+    raw_train_data_file: str = 'data/hotpotqa/hotpot_train_v1.1.json'
     cot_examplars: List[Dict] = [
         {
             'question': "Which magazine was started first Arthur's Magazine or First for Women?",
@@ -424,140 +489,145 @@ class HotpotQA(BaseDataset):
 
     cot_interleave_examplars: List[Dict] = [
         {
-            'id': '5ab92dba554299131ca422a2',
-            'question': "Jeremy Theobald and Christopher Nolan share what profession?",
-            'cot': "Jeremy Theobald is an actor and producer. Christopher Nolan is a director, producer, and screenwriter. Therefore, they both share the profession of being a producer.",
-            'answer': "producer",
+            "id": "5ae0185b55429942ec259c1b",
+            "question": "What was the 2014 population of the city where Lake Wales Medical Center is located?",
+            "cot": "Lake Wales Medical Center is located in the city of Polk County, Florida. The population of Polk County in 2014 was 15,140.",
+            "answer": "15,140"
         },
         {
-            'id': '5a7bbc50554299042af8f7d0',
-            'question': "What film directed by Brian Patrick Butler was inspired by a film directed by F.W. Murnau?",
-            'cot': "Brian Patrick Butler directed the film The Phantom Hour. The Phantom Hour was inspired by the films such as Nosferatu and The Cabinet of Dr. Caligari. Of these Nosferatu was directed by F.W. Murnau.",
-            'answer': "The Phantom Hour",
+            "id": "5a758ea55542992db9473680",
+            "question": "who is older Jeremy Horn or Renato Sobral?",
+            "cot": "Jeremy Horn was born on August 25, 1975. Renato Sobral was born on September 7, 1975. Thus, Jeremy Horn is older.",
+            "answer": "Jeremy Horn"
         },
         {
-            'id': '5add363c5542990dbb2f7dc8',
-            'question': "How many episodes were in the South Korean television series in which Ryu Hye-young played Bo-ra?",
-            'cot': "The South Korean television series in which Ryu Hye-young played Bo-ra is Reply 1988. The number of episodes Reply 1988 has is 20.",
-            'answer': "20",
+            "id": "5a89d58755429946c8d6e9d9",
+            "question": "Does The Border Surrender or Unsane have more members?",
+            "cot": "The Border Surrender band has following members: Keith Austin, Simon Shields, Johnny Manning and Mark Austin. That is, it has 4 members. Unsane is a trio of 3 members. Thus, The Border Surrender has more members.",
+            "answer": "The Border Surrender"
         },
         {
-            'id': '5a835abe5542996488c2e426',
-            'question': "Vertical Limit stars which actor who also played astronaut Alan Shepard in \"The Right Stuff\"?",
-            'cot': "The actor who played astronaut Alan Shepard in \"The Right Stuff\" is Scott Glenn. The movie Vertical Limit also starred Scott Glenn.",
-            'answer': "Scott Glenn",
+            "id": "5adfad0c554299603e41835a",
+            "question": "Were Lonny and Allure both founded in the 1990s?",
+            "cot": "Lonny (magazine) was founded in 2009. Allure (magazine) was founded in 1991. Thus, of the two, only Allure was founded in 1990s.",
+            "answer": "no"
         },
         {
-            'id': '5ae0185b55429942ec259c1b',
-            'question': "What was the 2014 population of the city where Lake Wales Medical Center is located?",
-            'cot': "Lake Wales Medical Center is located in the city of Polk County, Florida. The population of Polk County in 2014 was 15,140.",
-            'answer': "15,140",
+            "id": "5abb14bd5542992ccd8e7f07",
+            "question": "In which country did this Australian who was detained in Guantanamo Bay detention camp and published \"Guantanamo: My Journey\" receive para-military training?",
+            "cot": "The Australian who was detained in Guantanamo Bay detention camp and published \"Guantanamo: My Journey\" is David Hicks. David Hicks received his para-military training in Afghanistan.",
+            "answer": "Afghanistan"
         },
         {
-            'id': '5a790e7855429970f5fffe3d',
-            'question': "Who was born first? Jan de Bont or Raoul Walsh?",
-            'cot': "Jan de Bont was born on 22 October 1943. Raoul Walsh was born on March 11, 1887. Thus, Raoul Walsh was born the first.",
-            'answer': "Raoul Walsh",
+            "id": "5a89c14f5542993b751ca98a",
+            "question": "Which of the following had a debut album entitled \"We Have an Emergency\": Hot Hot Heat or The Operation M.D.?",
+            "cot": "The debut album of the band \"Hot Hot Heat\" was \"Make Up the Breakdown\". The debut album of the band \"The Operation M.D.\" was \"We Have an Emergency\".",
+            "answer": "The Operation M.D."
         },
         {
-            'id': '5a754ab35542993748c89819',
-            'question': "In what country was Lost Gravity manufactured?",
-            'cot': "The Lost Gravity (roller coaster) was manufactured by Mack Rides. Mack Rides is a German company.",
-            'answer': "Germany",
+            "id": "5a790e7855429970f5fffe3d",
+            "question": "Who was born first? Jan de Bont or Raoul Walsh?",
+            "cot": "Jan de Bont was born on 22 October 1943. Raoul Walsh was born on March 11, 1887. Thus, Raoul Walsh was born the first.",
+            "answer": "Raoul Walsh"
         },
         {
-            'id': '5a89c14f5542993b751ca98a',
-            'question': "Which of the following had a debut album entitled \"We Have an Emergency\": Hot Hot Heat or The Operation M.D.?",
-            'cot': "The debut album of the band \"Hot Hot Heat\" was \"Make Up the Breakdown\". The debut album of the band \"The Operation M.D.\" was \"We Have an Emergency\".",
-            'answer': "The Operation M.D.",
+            "id": "5a88f9d55542995153361218",
+            "question": "Which band formed first, Sponge Cola or Hurricane No. 1?",
+            "cot": "Sponge Cola band was formed in 1998. Hurricane No. 1 was formed in 1996. Thus, Hurricane No. 1 band formed the first.",
+            "answer": "Hurricane No. 1."
         },
         {
-            'id': '5abb14bd5542992ccd8e7f07',
-            'question': "In which country did this Australian who was detained in Guantanamo Bay detention camp and published \"Guantanamo: My Journey\" receive para-military training?",
-            'cot': "The Australian who was detained in Guantanamo Bay detention camp and published \"Guantanamo: My Journey\" is David Hicks. David Hicks received his para-military training in Afghanistan.",
-            'answer': "Afghanistan",
+            "id": "5a7bbc50554299042af8f7d0",
+            "question": "What film directed by Brian Patrick Butler was inspired by a film directed by F.W. Murnau?",
+            "cot": "Brian Patrick Butler directed the film The Phantom Hour. The Phantom Hour was inspired by the films such as Nosferatu and The Cabinet of Dr. Caligari. Of these Nosferatu was directed by F.W. Murnau.",
+            "answer": "The Phantom Hour"
         },
         {
-            'id': '5a89d58755429946c8d6e9d9',
-            'question': "Does The Border Surrender or Unsane have more members?",
-            'cot': "The Border Surrender band has following members: Keith Austin, Simon Shields, Johnny Manning and Mark Austin. That is, it has 4 members. Unsane is a trio of 3 members. Thus, The Border Surrender has more members.",
-            'answer': "The Border Surrender",
+            "id": "5a77acab5542992a6e59df76",
+            "question": "Who was born first, James D Grant, who uses the pen name of Lee Child, or Bernhard Schlink?",
+            "cot": "James D Grant, who uses the pen name of Lee Child, was born in 1954. Bernhard Schlink was born in 1944. Thus, Bernhard Schlink was born first.",
+            "answer": "Bernhard Schlink"
         },
         {
-            'id': '5a88f9d55542995153361218',
-            'question': "Which band formed first, Sponge Cola or Hurricane No. 1?",
-            'cot': "Sponge Cola band was formed in 1998. Hurricane No. 1 was formed in 1996. Thus, Hurricane No. 1 band formed the first.",
-            'answer': "Hurricane No. 1.",
+            "id": "5a7fc53555429969796c1b55",
+            "question": "The actor that stars as Joe Proctor on the series \"Power\" also played a character on \"Entourage\" that has what last name?",
+            "cot": "The actor that stars as Joe Proctor on the series \"Power\" is Jerry Ferrara. Jerry Ferrara also played a character on Entourage named Turtle Assante. Thus, Turtle Assante's last name is Assante.",
+            "answer": "Assante"
         },
         {
-            'id': '5a90620755429933b8a20508',
-            'question': "James Paris Lee is best known for investing the Lee-Metford rifle and another rifle often referred to by what acronymn?",
-            'cot': "James Paris Lee is best known for investing the Lee-Metford rifle and Lee-Enfield series of rifles. Lee-Enfield is often referred to by the acronym of SMLE.",
-            'answer': "SMLE",
+            "id": "5a8ed9f355429917b4a5bddd",
+            "question": "Nobody Loves You was written by John Lennon and released on what album that was issued by Apple Records, and was written, recorded, and released during his 18 month separation from Yoko Ono?",
+            "cot": "The album issued by Apple Records, and written, recorded, and released during John Lennon's 18 month separation from Yoko Ono is Walls and Bridges. Nobody Loves You was written by John Lennon on Walls and Bridges album.",
+            "answer": "Walls and Bridges"
         },
         {
-            'id': '5a77acab5542992a6e59df76',
-            'question': "Who was born first, James D Grant, who uses the pen name of Lee Child, or Bernhard Schlink?",
-            'cot': "James D Grant, who uses the pen name of Lee Child, was born in 1954. Bernhard Schlink was born in 1944. Thus, Bernhard Schlink was born first.",
-            'answer': "Bernhard Schlink",
+            "id": "5a754ab35542993748c89819",
+            "question": "In what country was Lost Gravity manufactured?",
+            "cot": "The Lost Gravity (roller coaster) was manufactured by Mack Rides. Mack Rides is a German company.",
+            "answer": "Germany"
         },
         {
-
-            'id': '5abfb3435542990832d3a1c1',
-            'question': "Which American neo-noir science fiction has Pierce Gagnon starred?",
-            'cot': "Pierce Gagnon has starred in One Tree Hill, Looper, Wish I Was Here and Extant. Of these, Looper is an American neo-noir science fiction.",
-            'answer': "Looper",
+            "id": "5ac2ada5554299657fa2900d",
+            "question": "How many awards did the \"A Girl Like Me\" singer win at the American Music Awards of 2012?",
+            "cot": "The singer of \"A Girl Like Me\" singer is Rihanna. In the American Music Awards of 2012, Rihana won one award.",
+            "answer": "one"
         },
         {
-            'id': '5a8f44ab5542992414482a25',
-            'question': "What year did Edburga of Minster-in-Thanet's father die?",
-            'cot': "The father of Edburga of Minster-in-Thanet is King Centwine. Centwine died after 685.",
-            'answer': "after 685",
+            "id": "5ab92dba554299131ca422a2",
+            "question": "Jeremy Theobald and Christopher Nolan share what profession?",
+            "cot": "Jeremy Theobald is an actor and producer. Christopher Nolan is a director, producer, and screenwriter. Therefore, they both share the profession of being a producer.",
+            "answer": "producer"
         },
         {
-            'id': '5adfad0c554299603e41835a',
-            'question': "Were Lonny and Allure both founded in the 1990s?",
-            'cot': "Lonny (magazine) was founded in 2009. Allure (magazine) was founded in 1991. Thus, of the two, only Allure was founded in 1990s.",
-            'answer': "no",
+            "id": "5add363c5542990dbb2f7dc8",
+            "question": "How many episodes were in the South Korean television series in which Ryu Hye-young played Bo-ra?",
+            "cot": "The South Korean television series in which Ryu Hye-young played Bo-ra is Reply 1988. The number of episodes Reply 1988 has is 20.",
+            "answer": "20"
         },
         {
-            'id': '5a7fc53555429969796c1b55',
-            'question': "The actor that stars as Joe Proctor on the series \"Power\" also played a character on \"Entourage\" that has what last name?",
-            'cot': "The actor that stars as Joe Proctor on the series \"Power\" is Jerry Ferrara. Jerry Ferrara also played a character on Entourage named Turtle Assante. Thus, Turtle Assante's last name is Assante.",
-            'answer': "Assante",
+            "id": "5abfb3435542990832d3a1c1",
+            "question": "Which American neo-noir science fiction has Pierce Gagnon starred?",
+            "cot": "Pierce Gagnon has starred in One Tree Hill, Looper, Wish I Was Here and Extant. Of these, Looper is an American neo-noir science fiction.",
+            "answer": "Looper"
         },
         {
-            'id': '5a8ed9f355429917b4a5bddd',
-            'question': "Nobody Loves You was written by John Lennon and released on what album that was issued by Apple Records, and was written, recorded, and released during his 18 month separation from Yoko Ono?",
-            'cot': "The album issued by Apple Records, and written, recorded, and released during John Lennon's 18 month separation from Yoko Ono is Walls and Bridges. Nobody Loves You was written by John Lennon on Walls and Bridges album.",
-            'answer': "Walls and Bridges",
+            "id": "5a835abe5542996488c2e426",
+            "question": "Vertical Limit stars which actor who also played astronaut Alan Shepard in \"The Right Stuff\"?",
+            "cot": "The actor who played astronaut Alan Shepard in \"The Right Stuff\" is Scott Glenn. The movie Vertical Limit also starred Scott Glenn.",
+            "answer": "Scott Glenn"
         },
         {
-            'id': '5ac2ada5554299657fa2900d',
-            'question': "How many awards did the \"A Girl Like Me\" singer win at the American Music Awards of 2012?",
-            'cot': "The singer of \"A Girl Like Me\" singer is Rihanna. In the American Music Awards of 2012, Rihana won one award.",
-            'answer': "one",
+            "id": "5a8f44ab5542992414482a25",
+            "question": "What year did Edburga of Minster-in-Thanet's father die?",
+            "cot": "The father of Edburga of Minster-in-Thanet is King Centwine. Centwine died after 685.",
+            "answer": "after 685"
         },
         {
-            'id': '5a758ea55542992db9473680',
-            'question': "who is older Jeremy Horn or Renato Sobral?",
-            'cot': "Jeremy Horn was born on August 25, 1975. Renato Sobral was born on September 7, 1975. Thus, Jeremy Horn is older.",
-            'answer': "Jeremy Horn",
+            "id": "5a90620755429933b8a20508",
+            "question": "James Paris Lee is best known for investing the Lee-Metford rifle and another rifle often referred to by what acronymn?",
+            "cot": "James Paris Lee is best known for investing the Lee-Metford rifle and Lee-Enfield series of rifles. Lee-Enfield is often referred to by the acronym of SMLE.",
+            "answer": "SMLE"
         }
-    ]
+    ]  # shuffled
     cot_interleave_demo_input_template = cot_interleave_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer: '
     cot_interleave_output_template = lambda self, cot, ans: f'{cot} So the answer is {ans}.'
 
+    cot_interleave_ret_examplars = cot_interleave_examplars
+    cot_interleave_ret_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step): '
+    cot_interleave_ret_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    cot_interleave_ret_output_template = cot_interleave_output_template
+
     def __init__(self, split: str, prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'tool'}
+        assert prompt_type in {'cot', 'tool', 'cot_interleave', 'cot_interleave_ret'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
         self.examplars = getattr(self, f'{prompt_type}_examplars')
-        for e, ref_e in zip(self.examplars, self.cot_examplars):  # copy missing keys from cot_examplars
-            for k in ref_e:
-                if k not in e:
-                    e[k] = ref_e[k]
+        if len(self.examplars) == len(self.cot_examplars):
+            for e, ref_e in zip(self.examplars, self.cot_examplars):  # copy missing keys from cot_examplars
+                for k in ref_e:
+                    if k not in e:
+                        e[k] = ref_e[k]
         self.dataset = self.load_data(split)
 
     def load_data(self, split):
@@ -824,73 +894,6 @@ class WikiMultiHopQA(BaseDataset):
         if ground_truth_id and ground_truth_id in cls.wid2alias:
             return cls.wid2alias[ground_truth_id]
         return []
-
-    @classmethod
-    def exact_match_score(
-        cls,
-        prediction: str,
-        ground_truth: str,
-        ground_truth_id: str = None
-    ):
-        ground_truths = {ground_truth}
-        ground_truths.update(cls.get_all_alias(ground_truth_id))
-        correct = np.max([int(cls.normalize_answer(prediction) == cls.normalize_answer(gt)) for gt in ground_truths])
-        return {'correct': correct, 'incorrect': 1 - correct}
-
-    @classmethod
-    def f1_score(
-        cls,
-        prediction: str,
-        ground_truth: str,
-        ground_truth_id: str = None
-    ):
-        ground_truths = {ground_truth}
-        ground_truths.update(cls.get_all_alias(ground_truth_id))
-
-        final_metric = {'f1': 0, 'precision': 0, 'recall': 0}
-        for ground_truth in ground_truths:
-            normalized_prediction = cls.normalize_answer(prediction)
-            normalized_ground_truth = cls.normalize_answer(ground_truth)
-
-            if normalized_prediction in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
-                continue
-            if normalized_ground_truth in ['yes', 'no', 'noanswer'] and normalized_prediction != normalized_ground_truth:
-                continue
-            prediction_tokens = normalized_prediction.split()
-            ground_truth_tokens = normalized_ground_truth.split()
-            common = Counter(prediction_tokens) & Counter(ground_truth_tokens)
-            num_same = sum(common.values())
-            if num_same == 0:
-                continue
-
-            precision = 1.0 * num_same / len(prediction_tokens)
-            recall = 1.0 * num_same / len(ground_truth_tokens)
-            f1 = (2 * precision * recall) / (precision + recall)
-            for k in ['f1', 'precision', 'recall']:
-                final_metric[k] = max(eval(k), final_metric[k])
-        return final_metric
-
-    @classmethod
-    def get_gold_ctxs(cls, _id: str, num_distractors: int = 1):
-        if not hasattr(cls, 'rawdata'):
-            rawdata = json.load(open(cls.raw_train_data_file, 'r'))
-            cls.rawdata: Dict[str, Dict] = {e['_id']: e for e in rawdata}
-        example = cls.rawdata[_id]
-        title2paras: Dict[str, List[str]] = {title: sents for title, sents in example['context']}
-        golds = [(f'{title}__{para_ind}', title2paras[title][para_ind].strip()) for title, para_ind in example['supporting_facts']
-            if title in title2paras and para_ind < len(title2paras[title])]
-        if num_distractors:
-            all_tp: Set[Tuple[str, int]] = set((title, para_ind) for title in title2paras for para_ind in range(len(title2paras[title])))
-            gold_tp: Set[Tuple[str, int]] = set((title, para_ind) for title, para_ind in example['supporting_facts'])
-            neg_tp: List[Tuple[str, int]] = list(all_tp - gold_tp)
-            random.shuffle(neg_tp)
-            neg_tp = neg_tp[:num_distractors]
-            negs = [(f'{title}__{para_ind}', title2paras[title][para_ind].strip()) for title, para_ind in neg_tp]
-            ctxs = golds + negs
-            random.shuffle(ctxs)  # shuffle golds and negs
-            return ctxs
-        else:
-            return golds
 
     def load_data(self, beir_dir: str):
         query_file = os.path.join(beir_dir, 'queries.jsonl')
