@@ -8,8 +8,10 @@ import os
 import re
 import time
 import json
+import contextlib
 from filelock import FileLock
-from multiprocessing import Process, Queue
+from multiprocessing import Process, Queue, Lock
+from multiprocessing.managers import BaseManager
 from transformers import AutoTokenizer, GPT2TokenizerFast
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.search.lexical import BM25Search
@@ -20,6 +22,56 @@ from .templates import CtxPrompt, RetrievalInstruction
 from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA
 
 logging.basicConfig(level=logging.INFO)
+
+
+class KeyBrokenException(Exception):
+    pass
+
+
+class CustomManager(BaseManager):
+    pass
+
+
+class KeyManager:
+    def __init__(self, keys: List[str]):
+        assert len(keys)
+        self.key2inuse = {key: False for key in keys}
+        self.key2ind = {key: i for i, key in enumerate(keys)}
+        self.keys = keys
+        self.next_available_key_ind = 0
+        #self.lock = Lock()
+        #self.lock = FileLock('/tmp/openai')
+
+    def __len__(self):
+        return len(self.keys)
+
+    def get_key(self):
+        logging.info(f'get key {self.next_available_key_ind}')
+        # get key not in use
+        to_return = self.keys[self.next_available_key_ind]
+        assert not self.key2inuse[to_return]
+        self.key2inuse[to_return] = True
+        # set index
+        found_key_not_inuse = False
+        for _ in range(len(self)):
+            self.next_available_key_ind = (self.next_available_key_ind + 1) % len(self)
+            if not self.key2inuse[self.keys[self.next_available_key_ind]]:
+                found_key_not_inuse = True
+                break
+        if not found_key_not_inuse:
+            self.next_available_key_ind = None
+        logging.info(f'get key {to_return[-5:]} next avai {self.next_available_key_ind}')
+        return to_return
+
+    def return_key(self, key):
+        logging.info('return key')
+        # return key
+        assert self.key2inuse[key]
+        self.key2inuse[key] = False
+        # set index
+        if self.next_available_key_ind is None:
+            self.next_available_key_ind = self.key2ind[key]
+        logging.info('return key done')
 
 
 class ApiReturn:
@@ -227,7 +279,7 @@ class QueryAgent:
         queries: List[str],
         params: Dict[str, Any],
         max_num_req_per_min: int = 10,
-        error_retry: int = 3,
+        max_retry: int = 6,  # related to expbf
         force_generate: int = None,
         forbid_generate: int = None,
         api_key: str = None
@@ -270,16 +322,19 @@ class QueryAgent:
                     print('Output ->', generations[0].text)
                     input('-' * 50)
                 break
-            except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout):
+            except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:
+                if max_retry <= 0:
+                    raise KeyBrokenException()
+                max_retry -= 1
                 logging.info(f'sleep for rate {add_sleep + min_sleep} with key {api_key[-5:]}')
                 time.sleep(add_sleep + min_sleep)
                 add_sleep = add_sleep * expbf
             except KeyboardInterrupt as e:
                 raise e
             except Exception as e:
-                if error_retry <= 0:
-                    raise e
-                error_retry -= 1
+                if max_retry <= 0:
+                    raise KeyBrokenException()
+                max_retry -= 1
                 logging.info(f'sleep for error {min_sleep} with key {api_key[-5:]}')
                 time.sleep(min_sleep)
         time.sleep(min_sleep)
@@ -481,23 +536,42 @@ class QueryAgent:
 
 def query_agent_worker(
     qagent: QueryAgent,
-    api_key: str,
+    key_manager: KeyManager,
+    lock: Lock,
     input_queue: Queue,
-    output_queue: Queue
+    output_queue: Queue,
+    retry_key_times: int = 5  # retry other keys before abandon
 ):
     while True:
         batch = input_queue.get()
         if type(batch) is str and batch == 'DONE':
             break
         prompts = [CtxPrompt.from_dict(example) for example in batch]
-        generations, retrievals, traces = qagent.prompt(prompts, api_key)
-        retrievals = retrievals or [None] * len(generations)
-        traces = traces or [None] * len(generations)
-        for example, generation, retrieval, trace in zip(batch, generations, retrievals, traces):
-            example['output'] = generation
-            example['retrieval'] = retrieval
-            example['trace'] = trace
-            output_queue.put(example)
+        retry = 0
+        while True:
+            if retry > retry_key_times:
+                logging.error(f'skip {len(prompts)} examples because of key broken')
+                break
+            with lock:
+                key = key_manager.get_key()
+            try:
+                generations, retrievals, traces = qagent.prompt(prompts, api_key=key)
+            except KeyBrokenException:
+                with lock:
+                    key_manager.return_key(key)
+                retry += 1
+                continue
+            else:
+                with lock:
+                    key_manager.return_key(key)
+                retrievals = retrievals or [None] * len(generations)
+                traces = traces or [None] * len(generations)
+                for example, generation, retrieval, trace in zip(batch, generations, retrievals, traces):
+                    example['output'] = generation
+                    example['retrieval'] = retrieval
+                    example['trace'] = trace
+                    output_queue.put(example)
+                break
 
 
 def write_worker(output_file: str, output_queue: Queue, size: int = None):
@@ -557,7 +631,7 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 2,
+        'topk': 1,
         'use_ctx': True,
         'frequency': 0,
         #'boundary': [],
@@ -608,15 +682,22 @@ if __name__ == '__main__':
     CtxPrompt.add_ref_prefix = retrieval_kwargs['add_ref_prefix']
 
     if args.multiprocess:  # start query processes
-        logging.info(f'#keys {len(args.openai_keys)}')
+        lock = Lock()
+        CustomManager.register('KeyManager', KeyManager)
+        manager = CustomManager()
+        manager.start()
+        key_manager = manager.KeyManager(args.openai_keys)
+        logging.info(f'#keys {len(key_manager._getvalue())}')
         input_queue = Queue()
         output_queue = Queue()
         processes = []
-        for key in args.openai_keys:
-            p = Process(target=query_agent_worker, args=(qagent, key, input_queue, output_queue))
+        for _ in range(len(key_manager._getvalue())):
+            p = Process(target=query_agent_worker, args=(qagent, key_manager, lock, input_queue, output_queue))
             p.daemon = True
             p.start()
             processes.append(p)
+    else:
+        key_manager = KeyManager(args.openai_keys)
 
     # load data
     if args.dataset == 'strategyqa':
@@ -663,7 +744,9 @@ if __name__ == '__main__':
             for b in range(0, len(data), args.batch_size):
                 batch = data.select(range(b, min(b + args.batch_size, len(data))))
                 prompts = [CtxPrompt.from_dict(example) for example in batch]
-                generations, retrievals, traces = qagent.prompt(prompts, api_key=args.openai_keys[0])
+                key = key_manager.get_key()
+                generations, retrievals, traces = qagent.prompt(prompts, api_key=key)
+                key_manager.return_key(key)
                 retrievals = retrievals or [None] * len(generations)
                 traces = traces or [None] * len(generations)
                 for example, generation, retrieval, trace in zip(batch, generations, retrievals, traces):
@@ -690,3 +773,4 @@ if __name__ == '__main__':
             p.join()
         output_queue.put('DONE')
         write_p.join()
+        manager.shutdown()

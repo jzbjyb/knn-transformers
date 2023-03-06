@@ -7,7 +7,7 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=2wikihop
+dataset=hotpotqa
 max_generation_len=256
 batch_size=8
 model=code-davinci-002
