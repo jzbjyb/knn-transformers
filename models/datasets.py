@@ -7,12 +7,31 @@ from collections import Counter
 import re
 import string
 import numpy as np
+import spacy
 from datasets import Dataset, load_dataset
 from beir.datasets.data_loader import GenericDataLoader
 from .templates import CtxPrompt
 
 
 class BaseDataset:
+    nlp = spacy.load('en_core_web_sm')
+
+    @classmethod
+    def entity_f1_score(
+        cls,
+        prediction: str,
+        ground_truth: str,
+        ground_truth_id: str = None
+    ):
+        pred_ents: List[str] = [cls.normalize_answer(ent.text) for ent in cls.nlp(prediction).ents]
+        gold_ents: List[str] = [cls.normalize_answer(ent.text) for ent in cls.nlp(ground_truth).ents]
+        num_common_ents: int = sum((Counter(pred_ents) & Counter(gold_ents)).values())
+        p = num_common_ents / (len(pred_ents) or 1)
+        r = num_common_ents / (len(gold_ents) or 1)
+        assert p <= 1 and r <= 1
+        f1 = (2 * p * r) / ((p + r) or 1)
+        return {'ent_f1': f1, 'ent_precision': p, 'ent_recall': r}
+
     @classmethod
     def exact_match_score(
         cls,
@@ -74,7 +93,8 @@ class BaseDataset:
         return white_space_fix(remove_articles(remove_punc(lower(s))))
 
     @classmethod
-    def get_gold_ctxs(cls, _id: str, num_distractors: int = 1):
+    def get_gold_ctxs(cls, _id: str, num_golds: int = None, num_distractors: int = 1):
+        assert num_golds is None
         if not hasattr(cls, 'rawdata'):
             rawdata = json.load(open(cls.raw_train_data_file, 'r'))
             cls.rawdata: Dict[str, Dict] = {e['_id']: e for e in rawdata}
@@ -105,7 +125,10 @@ class BaseDataset:
             input_template_func: Callable = None,
         ):
             q = example['question']
-            cot = example['cot'] if type(example['cot']) is str else ''.join(example['cot'])
+            if 'cot' in example:
+                cot = example['cot'] if type(example['cot']) is str else ''.join(example['cot'])
+            else:
+                cot = None
             a = example['answer']
 
             query = input_template_func(q)
@@ -632,23 +655,22 @@ class HotpotQA(BaseDataset):
 
     def load_data(self, split):
         # follow "Rationale-Augmented Ensembles in Language Models"
-        dataset = load_dataset('hotpot_qa', 'distractor')[split].select(range(0, 1000))
+        dataset = load_dataset('hotpot_qa', 'distractor')[split]
         def _map(example: Dict):
             qid = example['id']
             question = example['question']
             qtype = example['type']
             level = example['level']
             ans = example['answer']
-            cot = ''
             title2paras: Dict[str, List[str]] = dict(zip(example['context']['title'], example['context']['sentences']))
             ctxs: List[Tuple[str, str]] = []
             for title, para_ind in zip(example['supporting_facts']['title'], example['supporting_facts']['sent_id']):
-                ctxs.append((None, title2paras[title][para_ind]))
-            output = self.output_template(cot, ans)
+                if title in title2paras and para_ind < len(title2paras[title]):
+                    ctxs.append((None, title2paras[title][para_ind]))
+            output = self.output_template(cot=None, ans=ans)
             return {
                 'qid': qid,
                 'question': question,
-                'cot': cot,
                 'answer': ans,
                 'gold_output': output,
                 'ctxs': ctxs,
@@ -903,18 +925,242 @@ class WikiMultiHopQA(BaseDataset):
                 example = json.loads(l)
                 qid = example['_id']
                 question = example['text']
-                cot = ''
                 ans = example['metadata']['answer']
                 ans_id = example['metadata']['answer_id']
                 ctxs = example['metadata']['ctxs']
-                output = self.output_template(cot, ans)
+                output = self.output_template(cot=None, ans=ans)
                 dataset.append({
                     'qid': qid,
                     'question': question,
-                    'cot': cot,
                     'answer': ans,
                     'answer_id': ans_id,
                     'gold_output': output,
                     'ctxs': ctxs,
                 })
+        return Dataset.from_list(dataset)
+
+class WikiSum(BaseDataset):
+    raw_train_data_file: str = ''
+    summary_examplars: List[Dict] = [
+        {
+            "id": "24951400",
+            "question": "marilyn artus",
+            "answer_raw": "Marilyn Artus -LRB- Marilyn McBrier Artus -RRB- is a visual artist whose work explores the female experience . </t> <t> Marilyn has also been a burlesque promoter , curator and female artist mentor . </t> <t> She has created shows that explore the suffragette era in the US , paid tribute to founding burlesque performers , and continues to expose the many different stereotypes that women navigate on a daily basis . </t> <t> Marilyn grew up in Norman and Tulsa , Oklahoma . </t> <t> She spent two years of college at University of the Incarnate Word in San Antonio , Texas . </t> <t> She then returned to Oklahoma and finished her Bachelor of Fine Arts in printmaking at the University of Oklahoma . </t> <t> She worked for 13 years in the gift industry designing products and packaging for United Design Corporation and Relevant Products for manufacturing worldwide . </t> <t> In 2008 , Marilyn became a full-time visual artist . </t> <t> Some of the highlights of Marilyn 's art career have been solo and group shows in Oklahoma and Washington , being the first to receive the annual Brady Craft Alliance Award for Innovation in Fiber Arts in 2011 , and in 2010 leading an art making workshop at the Brooklyn Museum in New York City in association with the retrospective exhibit Seductive Subversion : Women Pop Artists , 1958-1968 .",
+            "answer": "Marilyn Artus (Marilyn McBrier Artus) is a visual artist whose work explores the female experience. Marilyn has also been a burlesque promoter, curator and female artist mentor. She has created shows that explore the suffragette era in the US, paid tribute to founding burlesque performers, and continues to expose the many different stereotypes that women navigate on a daily basis. Marilyn grew up in Norman and Tulsa, Oklahoma. She spent two years of college at University of the Incarnate Word in San Antonio, Texas. She then returned to Oklahoma and finished her Bachelor of Fine Arts in printmaking at the University of Oklahoma. She worked for 13 years in the gift industry designing products and packaging for United Design Corporation and Relevant Products for manufacturing worldwide. In 2008, Marilyn became a full-time visual artist. Some of the highlights of Marilyn's art career have been solo and group shows in Oklahoma and Washington, being the first to receive the annual Brady Craft Alliance Award for Innovation in Fiber Arts in 2011, and in 2010 leading an art making workshop at the Brooklyn Museum in New York City in association with the retrospective exhibit Seductive Subversion: Women Pop Artists, 1958-1968."
+        },
+        {
+            "id": "45683026",
+            "question": "screening information dataset",
+            "answer_raw": "A screening information dataset -LRB- SIDS -RRB- is a study of the hazards associated with a particular chemical substance or group of related substances , prepared under the auspices of the Organisation for Economic Co-operation and Development -LRB- OECD -RRB- . </t> <t> The substances studied are high production volume -LRB- HPV -RRB- chemicals , which are manufactured or imported in quantities of more than 1000 tonnes per year for any single OECD market . </t> <t> The list of HPV chemicals is prepared by the OECD Secretariat and updated regularly . </t> <t> As of 2004 , 4,843 chemicals were on the list . </t> <t> Of these , roughly 1000 have been prioritised for special attention , and SIDS are prepared for these chemicals , usually by an official agency in one of the OECD member countries with the collaboration of the UN International Programme on Chemical Safety -LRB- IPCS -RRB- . </t> <t> The procedures for investigating the risks of an HPV chemical are described in the OECD Manual for Investigation of HPV Chemicals . </t> <t> The initial stage is the collection of existing information -LRB- either published or supplied by manufacturers -RRB- on the chemical . </t> <t> If the existing information is insufficient to make an assessment of the risks , the chemical may be tested at this stage to collect more data . </t> <t> The initial report of the investigation is discussed at a SIDS initial assessment meeting -LRB- SIAM -RRB- , which includes : representatives of OECD member countries experts nominated by the IPCS , the OECD Business and Industry Advisory Committee , Trade Union Advisory Committee , and environmental organizations representatives of companies which produce the chemical secretariat staff from OECD , IPCS , and UNEP chemicals The SIAM can either accept the draft report or call for revisions -LRB- including further testing -RRB- . </t> <t> Once the comments and discussion of the SIAM have been taken into account , the report is published by the United Nations Environment Programme -LRB- UNEP -RRB- . </t> <t> The possibility of new testing to complete the study is what distinguishes SIDS reports from similar studies such as Concise International Chemical Assessment Documents -LRB- CICADs -RRB- . </t> <t> In this sense , SIDS are similar to European Union Risk Assessment Reports -LRB- RARs -RRB- . </t> <t> The distinction is that the SIDS programme is specifically aimed at HPV chemicals , while the chemicals selected for EU RARs are chosen more on the basis of a hazard profile , so include chemicals with much lower production volumes .",
+            "answer": "A screening information dataset (SIDS) is a study of the hazards associated with a particular chemical substance or group of related substances, prepared under the auspices of the Organisation for Economic Co-operation and Development (OECD). The substances studied are high production volume (HPV) chemicals, which are manufactured or imported in quantities of more than 1000 tonnes per year for any single OECD market. The list of HPV chemicals is prepared by the OECD Secretariat and updated regularly. As of 2004, 4,843 chemicals were on the list. Of these, roughly 1000 have been prioritised for special attention, and SIDS are prepared for these chemicals, usually by an official agency in one of the OECD member countries with the collaboration of the UN International Programme on Chemical Safety (IPCS). The procedures for investigating the risks of an HPV chemical are described in the OECD Manual for Investigation of HPV Chemicals. The initial stage is the collection of existing information (either published or supplied by manufacturers) on the chemical. If the existing information is insufficient to make an assessment of the risks, the chemical may be tested at this stage to collect more data. The initial report of the investigation is discussed at a SIDS initial assessment meeting (SIAM), which includes: representatives of OECD member countries experts nominated by the IPCS, the OECD Business and Industry Advisory Committee, Trade Union Advisory Committee, and environmental organizations representatives of companies which produce the chemical secretariat staff from OECD, IPCS, and UNEP chemicals The SIAM can either accept the draft report or call for revisions (including further testing). Once the comments and discussion of the SIAM have been taken into account, the report is published by the United Nations Environment Programme (UNEP). The possibility of new testing to complete the study is what distinguishes SIDS reports from similar studies such as Concise International Chemical Assessment Documents (CICADs). In this sense, SIDS are similar to European Union Risk Assessment Reports (RARs). The distinction is that the SIDS programme is specifically aimed at HPV chemicals, while the chemicals selected for EU RARs are chosen more on the basis of a hazard profile, so include chemicals with much lower production volumes.",
+        },
+        {
+            "id": "17326014",
+            "question": "elliott smith",
+            "answer_raw": "Steven Paul `` Elliott '' Smith -LRB- August 6 , 1969 -- October 21 , 2003 -RRB- was an American singer , songwriter , and musician . </t> <t> Smith was born in Omaha , Nebraska , raised primarily in Texas , and lived for much of his life in Portland , Oregon , where he first gained popularity . </t> <t> Smith 's primary instrument was the guitar , though he was also proficient with piano , clarinet , bass guitar , drums , and harmonica . </t> <t> Smith had a distinctive vocal style , characterized by his `` whispery , spiderweb-thin delivery '' , and used multi-tracking to create vocal layers , textures , and harmonies . </t> <t> After playing in the rock band Heatmiser for several years , Smith began his solo career in 1994 , with releases on the independent record labels Cavity Search and Kill Rock Stars -LRB- KRS -RRB- . </t> <t> In 1997 , he signed a contract with DreamWorks Records , for which he recorded two albums . </t> <t> Smith rose to mainstream prominence when his song `` Miss Misery '' -- included in the soundtrack for the film Good Will Hunting -LRB- 1997 -RRB- -- was nominated for an Oscar in the Best Original Song category in 1998 . </t> <t> Smith had trouble with alcohol and other drugs throughout his life , while suffering from depression , and these topics often appear in his lyrics . </t> <t> In 2003 , aged 34 , he died in Los Angeles , California , from two stab wounds to the chest . </t> <t> The autopsy evidence was inconclusive as to whether the wounds were self-inflicted . </t> <t> At the time of his death , Smith was working on his sixth studio album , From a Basement on the Hill , which was posthumously completed and released in 2004 .",
+            "answer": "Steven Paul \"Elliott\" Smith (August 6, 1969 -- October 21, 2003) was an American singer, songwriter, and musician. Smith was born in Omaha, Nebraska, raised primarily in Texas, and lived for much of his life in Portland, Oregon, where he first gained popularity. Smith's primary instrument was the guitar, though he was also proficient with piano, clarinet, bass guitar, drums, and harmonica. Smith had a distinctive vocal style, characterized by his \"whispery, spiderweb-thin delivery\", and used multi-tracking to create vocal layers, textures, and harmonies. After playing in the rock band Heatmiser for several years, Smith began his solo career in 1994, with releases on the independent record labels Cavity Search and Kill Rock Stars (KRS). In 1997, he signed a contract with DreamWorks Records, for which he recorded two albums. Smith rose to mainstream prominence when his song \"Miss Misery\" -- included in the soundtrack for the film Good Will Hunting (1997) -- was nominated for an Oscar in the Best Original Song category in 1998. Smith had trouble with alcohol and other drugs throughout his life, while suffering from depression, and these topics often appear in his lyrics. In 2003, aged 34, he died in Los Angeles, California, from two stab wounds to the chest. The autopsy evidence was inconclusive as to whether the wounds were self-inflicted. At the time of his death, Smith was working on his sixth studio album, From a Basement on the Hill, which was posthumously completed and released in 2004.",
+        },
+        {
+            "id": "53050741",
+            "question": "susan wood -lrb- science fiction -rrb-",
+            "answer_raw": "Susan Joan Wood -LRB- August 22 , 1948 -- November 12 , 1980 -RRB- was a Canadian literary critic , professor , author and science fiction fan and editor , born in Ottawa , Ontario . </t> <t> Wood discovered science fiction fandom while she was studying at Carleton University in the 1960s . </t> <t> Wood met fellow fan Mike Glicksohn of Toronto at Boskone VI in 1969 . </t> <t> Wood and Glicksohn married in 1970 -LRB- she subsequently sometimes published as Susan Wood Glicksohn -RRB- , and they published the fanzine Energumen together until 1973 . </t> <t> Energumen won the 1973 Hugo for Best Fanzine . </t> <t> Wood and Glicksohn were co-guests of honor at the 1975 World Science Fiction Convention . </t> <t> Wood published a great deal of trenchant criticism of the field , both in fanzines and in more formal venues . </t> <t> She received three Hugo Awards for Best Fan Writer , in 1974 , 1977 , and 1981 . </t> <t> In 1976 she was instrumental in organizing the first feminist panel at a science fiction convention , at MidAmericon -LRB- that year 's WorldCon -RRB- . </t> <t> The reaction to this helped lead to the founding of A Women 's APA and of WisCon . </t> <t> Wood earned a B.A. -LRB- 1969 -RRB- and an M.A. -LRB- 1970 -RRB- from Carleton University and a Ph.D. -LRB- 1975 -RRB- from the University of Toronto . </t> <t> She joined the English Department at the University of British Columbia in 1975 and taught Canadian literature , science fiction and children 's literature . </t> <t> She was the Vancouver editor of the Pacific Northwest Review of Books -LRB- Jan.-Oct . </t> <t> 1978 -RRB- and also edited the special science fiction/fantasy issue of Room of One 's Own . </t> <t> She wrote numerous articles and book reviews that were published in books and academic journals , while continuing to write for fanzines . </t> <t> While teaching courses in science fiction at UBC , one of her students was William Gibson ; his first published story , `` Fragments of a Hologram Rose '' , was originally written as an assignment in the class . </t> <t> A memorial scholarship fund at Carleton University was established after her death , funded in part by donations from science fiction fandom -LRB- and from the sale of parts of her collection of science fiction art -RRB- .",
+            "answer": "Susan Joan Wood (August 22, 1948 -- November 12, 1980) was a Canadian literary critic, professor, author and science fiction fan and editor, born in Ottawa, Ontario. Wood discovered science fiction fandom while she was studying at Carleton University in the 1960s. Wood met fellow fan Mike Glicksohn of Toronto at Boskone VI in 1969. Wood and Glicksohn married in 1970 (she subsequently sometimes published as Susan Wood Glicksohn), and they published the fanzine Energumen together until 1973. Energumen won the 1973 Hugo for Best Fanzine. Wood and Glicksohn were co-guests of honor at the 1975 World Science Fiction Convention. Wood published a great deal of trenchant criticism of the field, both in fanzines and in more formal venues. She received three Hugo Awards for Best Fan Writer, in 1974, 1977, and 1981. In 1976 she was instrumental in organizing the first feminist panel at a science fiction convention, at MidAmericon (that year's WorldCon). The reaction to this helped lead to the founding of A Women's APA and of WisCon. Wood earned a B.A. (1969) and an M.A. (1970) from Carleton University and a Ph.D. (1975) from the University of Toronto. She joined the English Department at the University of British Columbia in 1975 and taught Canadian literature, science fiction and children's literature. She was the Vancouver editor of the Pacific Northwest Review of Books (Jan.-Oct. 1978) and also edited the special science fiction/fantasy issue of Room of One's Own. She wrote numerous articles and book reviews that were published in books and academic journals, while continuing to write for fanzines. While teaching courses in science fiction at UBC, one of her students was William Gibson; his first published story, \"Fragments of a Hologram Rose\", was originally written as an assignment in the class. A memorial scholarship fund at Carleton University was established after her death, funded in part by donations from science fiction fandom (and from the sale of parts of her collection of science fiction art).",
+        },
+        {
+            "id": "30068119",
+            "question": "al jafariyah district",
+            "answer_raw": "Al Jafariyah District is a district of the Raymah Governorate , Yemen . </t> <t> As of 2003 , the district had a population of 69,705 inhabitants .",
+            "answer": "Al Jafariyah District is a district of the Raymah Governorate, Yemen. As of 2003, the district had a population of 69,705 inhabitants.",
+        },
+        {
+            "id": "35625125",
+            "question": "md&di",
+            "answer_raw": "MD&DI is a trade magazine for the medical device and diagnostic industry published by UBM Canon -LRB- Los Angeles -RRB- . </t> <t> It includes peer-reviewed articles on specific technology issues and overviews of key business , industry , and regulatory topics . </t> <t> It was established in 1979 . </t> <t> In 2009 it had a monthly print circulation of 48,040 but is now an online publication with a claimed circulation of 89,000 . </t> <t> UBM Canon and the magazine has also sponsored the Medical Design and Manufacturing -LRB- MD&D -RRB- West Conference & Exposition -LRB- formerly the MD&DI West Conference & Expo -RRB- , a medical device trade show , since 1978 . </t> <t> The magazine sponsored the Medical Design Excellence Awards and produces a list of 100 Notable People in the Medical Device Industry . </t> <t> The term `` use error '' was first used in May 1995 in an MD&DI guest editorial , The Issue Is ` Use , ' Not ` User , ' Error , by William Hyman .",
+            "answer": "MD&DI is a trade magazine for the medical device and diagnostic industry published by UBM Canon (Los Angeles). It includes peer-reviewed articles on specific technology issues and overviews of key business, industry, and regulatory topics. It was established in 1979. In 2009 it had a monthly print circulation of 48,040 but is now an online publication with a claimed circulation of 89,000. UBM Canon and the magazine has also sponsored the Medical Design and Manufacturing (MD&D) West Conference & Exposition (formerly the MD&DI West Conference & Expo), a medical device trade show, since 1978. The magazine sponsored the Medical Design Excellence Awards and produces a list of 100 Notable People in the Medical Device Industry. The term \"use error\" was first used in May 1995 in an MD&DI guest editorial, The Issue Is 'Use,' Not 'User,' Error, by William Hyman.",
+        },
+        {
+            "id": "26697219",
+            "question": "lineage eternal",
+            "answer_raw": "Lineage Eternal is an upcoming massively multiplayer online role-playing game -LRB- MMORPG -RRB- by NCSOFT . </t> <t> It is part of the Lineage series and a sequel to the first Lineage game . </t> <t> Lineage Eternal was first announced in November 2011 but has suffered numerous delays in its release schedule , with the earliest beta testing planned for 2016 . </t> <t> NCSoft announced the first South Korea Closed Beta would begin on November 30 , 2016 and end on December 04 , 2016 .",
+            "answer": "Lineage Eternal is an upcoming massively multiplayer online role-playing game (MMORPG) by NCSOFT. It is part of the Lineage series and a sequel to the first Lineage game. Lineage Eternal was first announced in November 2011 but has suffered numerous delays in its release schedule, with the earliest beta testing planned for 2016. NCSoft announced the first South Korea Closed Beta would begin on November 30, 2016 and end on December 04, 2016.",
+        },
+        {
+            "id": "28034908",
+            "question": "clarksville-montgomery county school system",
+            "answer_raw": "Clarksville-Montgomery County School System -LRB- CMCSS -RRB- is a system of schools in Montgomery County , Tennessee serving a population of over 147,000 people . </t> <t> It is the seventh largest district in Tennessee and has earned whole district accreditation . </t> <t> CMCSS is also ISO 9001 certified . </t> <t> Dr. B. J. Worthington is the Director of Schools . </t> <t> There are 39 schools in the district serving approximately 32,000 children from pre-kindergarten through twelfth grade : one K-5 magnet school , 23 elementary , seven middle , seven high , and one middle college -LRB- on the campus of Austin Peay State University -RRB- . </t> <t> The middle college allows high school juniors to take one university course for credit , and high school seniors to take two courses for credit . </t> <t> The school system employs about 3,900 teachers , administrators and support staff .",
+            "answer": "Clarksville-Montgomery County School System (CMCSS) is a system of schools in Montgomery County, Tennessee serving a population of over 147,000 people. It is the seventh largest district in Tennessee and has earned whole district accreditation. CMCSS is also ISO 9001 certified. Dr. B. J. Worthington is the Director of Schools. There are 39 schools in the district serving approximately 32,000 children from pre-kindergarten through twelfth grade: one K-5 magnet school, 23 elementary, seven middle, seven high, and one middle college (on the campus of Austin Peay State University). The middle college allows high school juniors to take one university course for credit, and high school seniors to take two courses for credit. The school system employs about 3,900 teachers, administrators and support staff.",
+        },
+        {
+            "id": "4692135",
+            "question": "nancy wilson/cannonball adderley",
+            "answer_raw": "Nancy Wilson/Cannonball Adderley is a 1961 studio album by Nancy Wilson with Cannonball Adderley and his quintet . </t> <t> Wilson considered her vocals on the album `` as a sort of easy-going third horn '' -LRB- Wilson quoted in the liner notes -RRB- . </t> <t> All tracks were recorded in New York City , those with Wilson on June 27 and 29 , 1961 , and the instrumental tracks on August 23 and 24 , 1961 .",
+            "answer": "Nancy Wilson/Cannonball Adderley is a 1961 studio album by Nancy Wilson with Cannonball Adderley and his quintet. Wilson considered her vocals on the album \"as a sort of easy-going third horn\" (Wilson quoted in the liner notes). All tracks were recorded in New York City, those with Wilson on June 27 and 29, 1961, and the instrumental tracks on August 23 and 24, 1961.",
+        },
+        {
+            "id": "39199753",
+            "question": "kim bok-joo",
+            "answer_raw": "Kim Bok-joo -LRB- born 17 October 1960 -RRB- is a South Korean former middle distance runner who competed in the 1984 Summer Olympics .",
+            "answer": "Kim Bok-joo (born 17 October 1960) is a South Korean former middle distance runner who competed in the 1984 Summer Olympics.",
+        }
+    ]  # shuffled
+    summary_demo_input_template = summary_test_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary: '
+    summary_output_template = lambda self, cot, ans: ans
+
+    summary_ret_examplars = summary_examplars
+    summary_ret_demo_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary: '
+    summary_ret_test_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary (with search): '
+    summary_ret_output_template = summary_output_template
+
+    def __init__(self, beir_dir: str, split: str = 'test', prompt_type: str = 'summary'):
+        assert prompt_type in {'summary', 'summary_ret'}
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplars = getattr(self, f'{prompt_type}_examplars')
+        if len(self.examplars) == len(self.summary_examplars):
+            for e, ref_e in zip(self.examplars, self.summary_examplars):  # copy missing keys from cot_examplars
+                for k in ref_e:
+                    if k not in e:
+                        e[k] = ref_e[k]
+        self.dataset = self.load_data(beir_dir, split=split)
+
+    @classmethod
+    def clean_summary(cls, summary: str):
+        pass
+
+    @classmethod
+    def get_gold_ctxs(cls, _id: str, num_golds: int = 3, num_distractors: int = 0):
+        assert num_distractors == 0
+        if not hasattr(cls, 'rawdata'):
+            corpus, queries, qrels = GenericDataLoader('data/wikisum/wikisum_all_beir').load(split='train')
+            cls.rawdata: Tuple = (corpus, qrels)
+        corpus, qrels = cls.rawdata
+        rel_dids = [did for did, rel in qrels[_id].items() if rel]
+        golds = [(did, corpus[did].get('text')) for did in rel_dids]
+        if num_golds and num_golds < len(golds):
+            random.shuffle(golds)
+            golds = golds[:num_golds]
+        return golds
+
+    def load_data(self, beir_dir: str, split: str = 'test'):
+        qrel_file = os.path.join(beir_dir, 'qrels', f'{split}.tsv')
+        query_file = os.path.join(beir_dir, 'queries.jsonl')
+        qids: Set[str] = set()
+        with open(qrel_file, 'r') as fin:
+            fin.readline()  # skip header
+            for l in fin:
+                qid, did, rel = l.strip().split()
+                qids.add(qid)
+        dataset = []
+        with open(query_file, 'r') as fin:
+            for l in fin:
+                example = json.loads(l)
+                qid = example['_id']
+                if qid not in qids:
+                    continue
+                question = example['text']
+                ans = example['metadata']['summary']
+                output = self.output_template(cot=None, ans=ans)
+                dataset.append({
+                    'qid': qid,
+                    'question': question,
+                    'answer': ans,
+                    'gold_output': output,
+                })
+        return Dataset.from_list(dataset)
+
+
+class ELI5(BaseDataset):
+    raw_train_data_file: str = ''
+    cot_examplars: List[Dict] = [
+        {
+            "id": "1zl9do",
+            "question": "why is using water to scrub dried stains on your counter so much more affective than using a dry towel?",
+            "answer_raw": "Water is [really good at dissolving things](_URL_0_). The dried stuff will absorb some water and soften, making it easier to rub/scrape off.",
+            "answer": "Water is really good at dissolving things. The dried stuff will absorb some water and soften, making it easier to rub/scrape off."
+        },
+        {
+            "id": "1n40nj",
+            "question": "How do short films make a profit?",
+            "answer_raw": "There are tons of \"shorts\", after a fashion. They're just on television -- most TV shows are basically in the tradition of the serial shorts (once a staple of movie theaters), adapted from cinema to the small screen.\n\nModern short *films* mostly don't make a profit. Many get made by student filmmakers and artists, either as exercises, vanity projects, or to make an artistic point. They often don't cost very much to make: maybe $25,000. More expensive Hollywood/studio shorts get made essentially as prestige projects, to draw attention and praise to the studio, director, actors, etc. \n\nDisney/Pixar and their peers still make animated shorts for a few reasons. The short acts as a \"bonus\" attached to a feature film, which audiences like. It's a side project the crew can work on while taking breaks from a main project (often there's no voice talent required, so it's just animators). The short also sets a mood, without being a part of the feature film itself, which is useful to the director's storytelling. And the short is a chance to experiment with technical and storytelling techniques, which are still emerging in animation.",
+            "answer": "There are tons of \"shorts\", after a fashion. They're just on television -- most TV shows are basically in the tradition of the serial shorts (once a staple of movie theaters), adapted from cinema to the small screen. Modern short *films* mostly don't make a profit. Many get made by student filmmakers and artists, either as exercises, vanity projects, or to make an artistic point. They often don't cost very much to make: maybe $25,000. More expensive Hollywood/studio shorts get made essentially as prestige projects, to draw attention and praise to the studio, director, actors, etc. Disney/Pixar and their peers still make animated shorts for a few reasons. The short acts as a \"bonus\" attached to a feature film, which audiences like. It's a side project the crew can work on while taking breaks from a main project (often there's no voice talent required, so it's just animators). The short also sets a mood, without being a part of the feature film itself, which is useful to the director's storytelling. And the short is a chance to experiment with technical and storytelling techniques, which are still emerging in animation."
+        },
+        {
+            "id": "96bq3x",
+            "question": "Why aren't carrots tastier than they are? (high sugar but not a sweet \"treat\")",
+            "answer_raw": "Carrots have a lot of sugar compared to most other vegetables. Not compared to a candy bar. According to [this page](_URL_0_), it takes about two and a half pounds of carrots to get as much sugar as a single snickers bar.\n\nCorrespondingly, carrots are noticeably sweeter than most other vegetables, but not anywhere near as sweet as candy.",
+            "answer": "Carrots have a lot of sugar compared to most other vegetables. Not compared to a candy bar. According to this page, it takes about two and a half pounds of carrots to get as much sugar as a single snickers bar. Correspondingly, carrots are noticeably sweeter than most other vegetables, but not anywhere near as sweet as candy.",
+        },
+        {
+            "id": "6m5zsx",
+            "question": "Why do things seem funnier when your with a friend but then stop being funny when you're alone?",
+            "answer_raw": "Laughter seems to be a shared social behavior in many mammals. There are also different kinds of laughter , voluntary and involuntary. laughter mostly seems to happen in social settings. So far it appears as though its some sort of acceptance behavior like \" look we find the same thing comical\".There also huge differences in the sounds we make between involuntary and voluntary laughter. i cant find the link but i recently listened to the podcast \"undiscovered \" i think that was who did a special on laughter that was fascinating.",
+            "answer": "Laughter seems to be a shared social behavior in many mammals. There are also different kinds of laughter, voluntary and involuntary. laughter mostly seems to happen in social settings. So far it appears as though its some sort of acceptance behavior like \"look we find the same thing comical\". There also huge differences in the sounds we make between involuntary and voluntary laughter. i cant find the link but i recently listened to the podcast \"undiscovered\" i think that was who did a special on laughter that was fascinating."
+        },
+        {
+            "id": "5jr2g1",
+            "question": "Why are the legislative and executive branches of government seen as corrupt and bad, while the judicial branch (especially the Supreme Court) is so revered and respected?",
+            "answer_raw": "They have the highest barrier of entry.  A successful local high school basketball coach can run for Congress, and just about anyone with enough cash and/or popularity can make a serious run for President.  \n\nTechnically, the President can nominate literally anyone as a Justice, and the Senate can approve it.  \n\nHowever, historically speaking, to become a Supreme Court Judge, you first have to be a respected Federal District Judge, and before that a respected Circuit Judge, and before that a Lawyer a decade or so, and before that a Clerk in a high-powered legal office, and before that law student at a top-15 college, and before that a stellar Bacheleors and High School student.  \n\nAll along the way you need to join the right clubs and write legal opinions as a hobby so when the President's staff are making shortlists, everyone generally knows where you stand and can decide if there's a decent chance you both match the administration's views, America's needs, AND straddle enough lines to get Senate Approval. \n\nOh, and no scandals.  You need to get through the first ~50-60 years of your life in the most boring way possible.  \n\nRun the population of America through that filter and you get some pretty respectable people who are legal professionals first, politicians second.  They're not looking for fame or fortune, but are REALLY good at making a case.  \n\nGo to the SCOTUS blog and read some of their dissenting opinions on the most controversial cases and you'll really be able to get a better understanding of the 'other' side.  Because they're appointed for life* they aren't beholden to public opinion.  Since cameras aren't allowed in the proceedings, and their lives and personalities are pretty boring, it's really hard to make them a celebrity.  \n\nBasically, they're the only politicians in America that can just do their jobs as designed.",
+            "answer": "They have the highest barrier of entry. A successful local high school basketball coach can run for Congress, and just about anyone with enough cash and/or popularity can make a serious run for President. Technically, the President can nominate literally anyone as a Justice, and the Senate can approve it. However, historically speaking, to become a Supreme Court Judge, you first have to be a respected Federal District Judge, and before that a respected Circuit Judge, and before that a Lawyer a decade or so, and before that a Clerk in a high-powered legal office, and before that law student at a top-15 college, and before that a stellar Bacheleors and High School student. All along the way you need to join the right clubs and write legal opinions as a hobby so when the President's staff are making shortlists, everyone generally knows where you stand and can decide if there's a decent chance you both match the administration's views, America's needs, AND straddle enough lines to get Senate Approval. Oh, and no scandals. You need to get through the first ~50-60 years of your life in the most boring way possible. Run the population of America through that filter and you get some pretty respectable people who are legal professionals first, politicians second. They're not looking for fame or fortune, but are REALLY good at making a case. Go to the SCOTUS blog and read some of their dissenting opinions on the most controversial cases and you'll really be able to get a better understanding of the 'other' side. Because they're appointed for life* they aren't beholden to public opinion. Since cameras aren't allowed in the proceedings, and their lives and personalities are pretty boring, it's really hard to make them a celebrity. Basically, they're the only politicians in America that can just do their jobs as designed."
+        },
+        {
+            "id": "2qv5t2",
+            "question": "Going from the outside to the inside of your body, at what point does skin become membrane/part of an internal organ?",
+            "answer_raw": "At those points. You described it exactly. Skin is by definition on the outside of the body. As soon as it \"goes\" inside (mouth, anus, whatever), it is the gastrointestinal tract.",
+            "answer": "At those points. You described it exactly. Skin is by definition on the outside of the body. As soon as it \"goes\" inside (mouth, anus, whatever), it is the gastrointestinal tract."
+        },
+        {
+            "id": "84vt7j",
+            "question": "How exactly do press release distribution services work?",
+            "answer_raw": "First off, what is your goal by paying to have a press release distributed and what is the press about?\n\nThe idea of the press release is to get info in front of press to see if they are interested in covering whatever it is that you're publicizing... but you can't force people to cover it. Higher price services will target specific media in your industry, but others simply spam out to any and all media email addresses and websites.\n\nThere are those sites that will post everything, and as you mentioned, nobody reads them... because people don't read press releases in general. And a site that just posts everything and anything has too much garbage for people to weed through to find anything of use. Now having your press release on those sites will help a little bit with SEO, and help improve search results that drive people to your actual website.",
+            "answer": "First off, what is your goal by paying to have a press release distributed and what is the press about? The idea of the press release is to get info in front of press to see if they are interested in covering whatever it is that you're publicizing... but you can't force people to cover it. Higher price services will target specific media in your industry, but others simply spam out to any and all media email addresses and websites. There are those sites that will post everything, and as you mentioned, nobody reads them... because people don't read press releases in general. And a site that just posts everything and anything has too much garbage for people to weed through to find anything of use. Now having your press release on those sites will help a little bit with SEO, and help improve search results that drive people to your actual website."
+        },
+        {
+            "id": "2ubcsb",
+            "question": "Why do we lose our ability to hear as we age?",
+            "answer_raw": "Here is my very basic explanation:\n\nYour hearing sensors are very small hairs that line the inside of your ear canal.  Different hairs are calibrated for different frequencies (or 'pitches')  High frequencies, like sirens vibrate the hairs very quickly, while lower frequencies vibrate their hairs more slowly.  A\n\nPart of aging is our high-frequency hairs wear out and stop responding.  High frequency=more energy so they wear out faster than low-frequency hairs. The result of this is things sound 'muffled'. Eventually the hairs will be stuck 'off' permanently and gradually this takes over your ears.\n\nFun fact: when you come out of a loud concert, the 'cotton in your ears' effect is from your sensors largely being 'stunned' or 'stuck off' and not responding normally when you leave the concert for a while.  Also worth mentioning: whenever this happens some of the hairs never un-stun and you have slightly lost some of your hearing.\n\nAlso: the medical condition tinnitus or \"ringing in your ears\" is from a specific hair for a specific frequency being 'stuck on'.  Its caused (at least in the modern world) by listening to music too loud for too long.",
+            "answer": "Here is my very basic explanation: Your hearing sensors are very small hairs that line the inside of your ear canal. Different hairs are calibrated for different frequencies (or 'pitches') High frequencies, like sirens vibrate the hairs very quickly, while lower frequencies vibrate their hairs more slowly. A part of aging is our high-frequency hairs wear out and stop responding. High frequency=more energy so they wear out faster than low-frequency hairs. The result of this is things sound 'muffled'. Eventually the hairs will be stuck 'off' permanently and gradually this takes over your ears. Fun fact: when you come out of a loud concert, the 'cotton in your ears' effect is from your sensors largely being 'stunned' or 'stuck off' and not responding normally when you leave the concert for a while. Also worth mentioning: whenever this happens some of the hairs never un-stun and you have slightly lost some of your hearing. Also: the medical condition tinnitus or \"ringing in your ears\" is from a specific hair for a specific frequency being 'stuck on'. Its caused (at least in the modern world) by listening to music too loud for too long."
+        }
+    ]  # shuffled
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a descriptive answer for the following question: {ques}\Answer: '
+    cot_output_template = lambda self, cot, ans: ans
+
+    cot_ret_examplars = cot_examplars
+    cot_ret_demo_input_template = lambda self, ques: f'Generate a descriptive answer for the following question: {ques}\Answer: '
+    cot_ret_test_input_template = lambda self, ques: f'Generate a descriptive answer for the following question: {ques}\Answer (with search): '
+    cot_ret_output_template = cot_output_template
+
+    def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
+        assert prompt_type in {'cot', 'cot_ret'}
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplars = getattr(self, f'{prompt_type}_examplars')
+        if len(self.examplars) == len(self.cot_examplars):
+            for e, ref_e in zip(self.examplars, self.cot_examplars):  # copy missing keys from cot_examplars
+                for k in ref_e:
+                    if k not in e:
+                        e[k] = ref_e[k]
+        self.dataset = self.load_data()
+
+    def load_data(self, split: str = 'validation'):
+        rawdata = load_dataset('kilt_tasks', name='eli5')
+        dataset = []
+        for i, example in enumerate(rawdata[split]):
+            qid = example['id']
+            question = example['input']
+            answers: List[str] = []
+            for candidate in example['output']:
+                ans = candidate['answer'].strip()
+                if ans:
+                    answers.append(ans)
+            assert len(answers) >= 1
+            output = self.output_template(cot=None, ans=answers[0])
+            dataset.append({
+                'qid': qid,
+                'question': question,
+                'answer': answers[0],
+                'answers': answers,
+                'gold_output': output,
+            })
         return Dataset.from_list(dataset)

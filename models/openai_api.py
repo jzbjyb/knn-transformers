@@ -8,7 +8,8 @@ import os
 import re
 import time
 import json
-import contextlib
+import copy
+from collections import defaultdict
 from filelock import FileLock
 from multiprocessing import Process, Queue, Lock
 from multiprocessing.managers import BaseManager
@@ -19,7 +20,7 @@ import openai
 import spacy
 from .retriever import BM25
 from .templates import CtxPrompt, RetrievalInstruction
-from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA
+from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum
 
 logging.basicConfig(level=logging.INFO)
 
@@ -39,8 +40,7 @@ class KeyManager:
         self.key2ind = {key: i for i, key in enumerate(keys)}
         self.keys = keys
         self.next_available_key_ind = 0
-        #self.lock = Lock()
-        #self.lock = FileLock('/tmp/openai')
+        self.key2times: Dict[str, List[float]] = defaultdict(list)
 
     def __len__(self):
         return len(self.keys)
@@ -63,15 +63,23 @@ class KeyManager:
         logging.info(f'get key {to_return[-5:]} next avai {self.next_available_key_ind}')
         return to_return
 
-    def return_key(self, key):
+    def return_key(self, key, time_spent: float = None):
         logging.info('return key')
         # return key
         assert self.key2inuse[key]
         self.key2inuse[key] = False
+        if time_spent:
+            self.key2times[key].append(time_spent)
         # set index
         if self.next_available_key_ind is None:
             self.next_available_key_ind = self.key2ind[key]
         logging.info('return key done')
+
+    def get_report(self):
+        report: List[str] = []
+        for key in self.keys:
+            report.append(f'{key}\t{len(self.key2times[key])}\t{np.mean(self.key2times[key])}')
+        return '\n'.join(report)
 
 
 class ApiReturn:
@@ -257,6 +265,7 @@ class QueryAgent:
         if self.retrieval_at_beginning:
             if self.ret_frequency:
                 self.ret_frequency = self.max_generation_len
+        self.regenerate_at_end = retrieval_kwargs.get('regenerate_at_end', False)
 
     @property
     def use_retrieval(self):
@@ -279,24 +288,47 @@ class QueryAgent:
         queries: List[str],
         params: Dict[str, Any],
         max_num_req_per_min: int = 10,
-        max_retry: int = 6,  # related to expbf
+        max_retry: int = 6,  # retry before switching keys
+        max_keys: int = 5,  # max number of keys tried before raising exceptions
+        key_tried: int = 0,  # number of keys tried
         force_generate: int = None,
         forbid_generate: int = None,
-        api_key: str = None
+        api_key: str = None,
     ) -> List[ApiReturn]:
-        if 'max_tokens' in params:  # TODO: opt doesn't have this bug
-            params['max_tokens'] = max(2, params['max_tokens'])  # openai returns nothing if set to 1
+        # check num of keys tried
+        if key_tried >= max_keys:
+            logging.error(f'skip {len(queries)} examples because of key broken')
+            raise KeyBrokenException()
+
+        # init tracking variables
         min_sleep = 60 / max_num_req_per_min
         add_sleep = 3
         expbf = 2
-        api_key = api_key or os.getenv('OPENAI_API_KEY')
+        retry = 0
+
+        # init param
+        if 'max_tokens' in params:  # TODO: OPT doesn't have this bug
+            params['max_tokens'] = max(2, params['max_tokens'])  # openai returns nothing if set to 1
+        logit_bias = dict()
+        if force_generate:
+            logit_bias={f'{force_generate[0]}': force_generate[1]}
+        elif forbid_generate:
+            logit_bias={f'{forbid_generate[0]}': -100}
+
+        # init key
+        ori_api_key = api_key
+        get_key_func = return_key_func = None
+        if type(ori_api_key) is tuple:  # get and return function
+            get_key_func, return_key_func = ori_api_key
+        else:  # a specific key or none
+            api_key = ori_api_key or os.getenv('OPENAI_API_KEY')
+        if get_key_func:  # get key
+            start_t = time.time()
+            api_key = get_key_func()
+
+        # error-tolerant querying
         while True:
             try:
-                logit_bias = dict()
-                if force_generate:
-                    logit_bias={f'{force_generate[0]}': force_generate[1]}
-                elif forbid_generate:
-                    logit_bias={f'{forbid_generate[0]}': -100}
                 logging.info(f'start query with key {api_key[-5:]}')
                 responses = openai.Completion.create(
                     api_key=api_key,
@@ -321,22 +353,52 @@ class QueryAgent:
                     print('Prompt ->', queries[0])
                     print('Output ->', generations[0].text)
                     input('-' * 50)
-                break
-            except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:
-                if max_retry <= 0:
-                    raise KeyBrokenException()
-                max_retry -= 1
+            except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:  # limit-related errors
+                if retry >= max_retry:
+                    if return_key_func:  # return key
+                        end_t = time.time()
+                        return_key_func(api_key, time_spent=end_t - start_t)
+                    return self.complete(
+                        queries,
+                        params,
+                        max_num_req_per_min=max_num_req_per_min,
+                        max_retry=max_retry,
+                        max_keys=max_keys,
+                        key_tried=key_tried + 1,
+                        force_generate=force_generate,
+                        forbid_generate=forbid_generate,
+                        api_key=ori_api_key)
+                retry += 1
                 logging.info(f'sleep for rate {add_sleep + min_sleep} with key {api_key[-5:]}')
                 time.sleep(add_sleep + min_sleep)
                 add_sleep = add_sleep * expbf
             except KeyboardInterrupt as e:
                 raise e
-            except Exception as e:
-                if max_retry <= 0:
-                    raise KeyBrokenException()
-                max_retry -= 1
+            except Exception as e:  # other errors
+                if retry >= max_retry:
+                    if return_key_func:  # return key
+                        end_t = time.time()
+                        return_key_func(api_key, time_spent=end_t - start_t)
+                    return self.complete(
+                        queries,
+                        params,
+                        max_num_req_per_min=max_num_req_per_min,
+                        max_retry=max_retry,
+                        max_keys=max_keys,
+                        key_tried=key_tried + 1,
+                        force_generate=force_generate,
+                        forbid_generate=forbid_generate,
+                        api_key=ori_api_key)
+                retry += 1
                 logging.info(f'sleep for error {min_sleep} with key {api_key[-5:]}')
                 time.sleep(min_sleep)
+            else:
+                break
+
+        if return_key_func:  # return key
+            end_t = time.time()
+            return_key_func(api_key, time_spent=end_t - start_t)
+
         time.sleep(min_sleep)
         return generations
 
@@ -374,6 +436,8 @@ class QueryAgent:
         batch_size = len(queries)
         final_retrievals: List[List[List[str]]] = [[] for _ in range(len(queries))]  # (bs, n_ret_steps, ret_topk)
         final_outputs: List[str] = [''] * len(queries)
+        final_queries: List[CtxPrompt] = [None] * len(queries)
+        init_queries: List[CtxPrompt] = copy.deepcopy(queries)
         traces: List[List[Tuple[str, str]]] = [[] for _ in range(len(queries))]
         queries: List[Tuple[int, CtxPrompt]] = [(i, q) for i, q in enumerate(queries)]  # to query
         max_gen_len = 0
@@ -460,6 +524,7 @@ class QueryAgent:
                     for (i, query), ar in zip(queries, apireturns):
                         cont = ar.text
                         final_outputs[i] += cont
+                        final_queries[i] = query
                         traces[i].append((ar.prompt, cont))
                         query.case += cont
                 apireturns = self.complete(
@@ -518,6 +583,7 @@ class QueryAgent:
             for _i, ((i, query), ar) in enumerate(zip(queries, apireturns)):
                 cont, reason = ar.text, ar.finish_reason
                 final_outputs[i] += cont
+                final_queries[i] = query
                 traces[i].append((ar.prompt, cont))
                 if reason == 'stop':
                     pass
@@ -531,6 +597,19 @@ class QueryAgent:
             queries = new_queries
             generate_queries = new_generate_queries
             step_ind += 1
+
+        if self.regenerate_at_end:  # regenerate given retrieval results
+            for initq, query in zip(init_queries, final_queries):
+                query.case = initq.case
+            apireturns = self.complete(
+                [q.format(use_ctx=self.use_ctx) for q in final_queries],
+                params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym},
+                api_key=api_key)
+            for i, (query, ar) in enumerate(zip(final_queries, apireturns)):
+                cont, reason = ar.text, ar.finish_reason
+                final_outputs[i] = cont
+                traces[i].append((ar.prompt, cont))
+
         return final_outputs, final_retrievals, traces
 
 
@@ -540,38 +619,28 @@ def query_agent_worker(
     lock: Lock,
     input_queue: Queue,
     output_queue: Queue,
-    retry_key_times: int = 5  # retry other keys before abandon
 ):
+    def get_key_func():
+        with lock:
+            key = key_manager.get_key()
+            return key
+    def return_key_func(*args, **kwargs):
+        with lock:
+            key_manager.return_key(*args, **kwargs)
+
     while True:
         batch = input_queue.get()
         if type(batch) is str and batch == 'DONE':
             break
         prompts = [CtxPrompt.from_dict(example) for example in batch]
-        retry = 0
-        while True:
-            if retry > retry_key_times:
-                logging.error(f'skip {len(prompts)} examples because of key broken')
-                break
-            with lock:
-                key = key_manager.get_key()
-            try:
-                generations, retrievals, traces = qagent.prompt(prompts, api_key=key)
-            except KeyBrokenException:
-                with lock:
-                    key_manager.return_key(key)
-                retry += 1
-                continue
-            else:
-                with lock:
-                    key_manager.return_key(key)
-                retrievals = retrievals or [None] * len(generations)
-                traces = traces or [None] * len(generations)
-                for example, generation, retrieval, trace in zip(batch, generations, retrievals, traces):
-                    example['output'] = generation
-                    example['retrieval'] = retrieval
-                    example['trace'] = trace
-                    output_queue.put(example)
-                break
+        generations, retrievals, traces = qagent.prompt(prompts, api_key=(get_key_func, return_key_func))
+        retrievals = retrievals or [None] * len(generations)
+        traces = traces or [None] * len(generations)
+        for example, generation, retrieval, trace in zip(batch, generations, retrievals, traces):
+            example['output'] = generation
+            example['retrieval'] = retrieval
+            example['trace'] = trace
+            output_queue.put(example)
 
 
 def write_worker(output_file: str, output_queue: Queue, size: int = None):
@@ -586,7 +655,7 @@ def write_worker(output_file: str, output_queue: Queue, size: int = None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa', '2wikihop'])
+    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir'])
     parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003'])
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
@@ -611,9 +680,10 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
 
     # load retrieval corpus and index
-    corpus, queries, qrels = GenericDataLoader(data_folder=args.input).load(split='dev') if args.input else (None, None, None)
+    corpus, queries, qrels = None, None, None
     if args.build_index:
         if args.input:
+            corpus, queries, qrels = GenericDataLoader(data_folder=args.input).load(split='dev')
             BM25Search(index_name=args.index_name, hostname='localhost', initialize=True, number_of_shards=1).index(corpus)
             time.sleep(5)
         exit()
@@ -659,10 +729,10 @@ if __name__ == '__main__':
         'truncate_at_boundary': None,
         'append_retrieval': False,
         'use_ctx_for_examplars': 'ret',
-        'use_retrieval_instruction': True,
+        'use_retrieval_instruction': 'summary',
         'format_reference_method': 'default',
         'ctx_position': 'before_case',
-        'prompt_type': 'cot_interleave_ret',
+        'prompt_type': 'summary_ret',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,
@@ -675,7 +745,7 @@ if __name__ == '__main__':
         retrieval_kwargs=retrieval_kwargs,
         temperature=args.temperature)
     if retrieval_kwargs['use_retrieval_instruction']:
-        CtxPrompt.ret_instruction = RetrievalInstruction()
+        CtxPrompt.ret_instruction = RetrievalInstruction(method=retrieval_kwargs['use_retrieval_instruction'])
     CtxPrompt.format_reference_method = retrieval_kwargs['format_reference_method']
     CtxPrompt.ctx_position = retrieval_kwargs['ctx_position']
     CtxPrompt.add_ref_suffix = retrieval_kwargs['add_ref_suffix']
@@ -708,6 +778,9 @@ if __name__ == '__main__':
     elif args.dataset == '2wikihop':
         data = WikiMultiHopQA(args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WikiMultiHopQA.get_gold_ctxs
+    elif args.dataset == 'wikisum_all_beir':
+        data = WikiSum(args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = WikiSum.get_gold_ctxs
     else:
         raise NotImplementedError
     if qagent.use_ctx_for_examplars == 'gold':
@@ -740,13 +813,12 @@ if __name__ == '__main__':
         os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
     if not args.multiprocess:  # query for one process
+        key = key_manager.get_key()
         with tqdm(total=len(data)) as pbar, open(args.output, 'w') as fout:
             for b in range(0, len(data), args.batch_size):
                 batch = data.select(range(b, min(b + args.batch_size, len(data))))
                 prompts = [CtxPrompt.from_dict(example) for example in batch]
-                key = key_manager.get_key()
                 generations, retrievals, traces = qagent.prompt(prompts, api_key=key)
-                key_manager.return_key(key)
                 retrievals = retrievals or [None] * len(generations)
                 traces = traces or [None] * len(generations)
                 for example, generation, retrieval, trace in zip(batch, generations, retrievals, traces):
@@ -755,6 +827,7 @@ if __name__ == '__main__':
                     example['trace'] = trace
                     fout.write(json.dumps(example) + '\n')
                 pbar.update(len(batch))
+        key_manager.return_key(key)
     else:  # query for multi-process
         # start write process
         write_p = Process(target=write_worker, args=(args.output, output_queue, len(data)))
@@ -773,4 +846,8 @@ if __name__ == '__main__':
             p.join()
         output_queue.put('DONE')
         write_p.join()
+
+        # report key performance
+        logging.info('keys performance')
+        logging.info(key_manager._getvalue().get_report())
         manager.shutdown()

@@ -18,7 +18,7 @@ from datasets import load_dataset
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.lexical import BM25Search
-from models.datasets import HotpotQA, WikiMultiHopQA
+from models.datasets import HotpotQA, WikiMultiHopQA, WikiSum
 
 class Wikipedia(object):
     def __init__(self):
@@ -683,6 +683,60 @@ def summary_to_beir(
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
+def summary_to_beir_all(
+    train_file_pattern: str,
+    dev_file_pattern: str,
+    test_file_pattern: str,
+    spm_path: str,
+    beir_dir: str,
+    dedup_doc: bool = True,
+    dedup_question: bool = True,
+):
+    import sentencepiece
+    spm = sentencepiece.SentencePieceProcessor()
+    spm.Load(spm_path)
+
+    qid2dict: Dict[str, Dict] = {}
+    did2dict: Dict[str, Dict] = {}
+    question2qid: Dict[str, Dict] = {}
+    doc2did: Dict[str, str] = {}
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+
+    for file_pattern, split in [(test_file_pattern, 'test'), (dev_file_pattern, 'dev'), (train_file_pattern, 'train')]:
+        files = glob.glob(file_pattern)
+        for file in tqdm(files, desc=split):
+            data = torch.load(file)
+            for example in data:
+                if 'src_str' in example:
+                    docs = [doc.strip() for doc in example['src_str']]
+                else:
+                    docs = [spm.decode_ids(doc).strip() for doc in example['src']]
+                question = spm.decode_ids(example['query']).rstrip('<T>').strip()
+                summary = example['tgt_str'].strip()
+
+                if dedup_question and question in question2qid:
+                    qid = question2qid[question]
+                else:
+                    qid = str(len(qid2dict) + len(did2dict))
+                    qid2dict[qid] = {'_id': qid, 'text': question, 'metadata': {'summary': summary}}
+                    question2qid[question] = qid
+
+                docids: List[str] = []
+                for doc in docs:
+                    if dedup_doc and doc in doc2did:
+                        did = doc2did[doc]
+                    else:
+                        did = str(len(qid2dict) + len(did2dict))
+                        did2dict[did] = {'_id': did, 'title': '', 'text': doc}
+                        doc2did[doc] = did
+                    docids.append(did)
+                    split2qiddid[split].append((qid, did))
+
+                qid2dict[qid]['metadata']['ctx_ids'] = docids
+
+    save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
+
+
 def compare(file1: str, file2: str, only_show_diff: bool = False, only_first_right: bool = False):
     get_ans = lambda x: x.strip().rsplit(' ', 1)[-1][:-1].lower()
     with open(file1) as fin1, open(file2) as fin2:
@@ -978,12 +1032,21 @@ def eval(
 ):
     if beir_dir is not None:
         corpus, queries, qrels = GenericDataLoader(data_folder=beir_dir).load(split='dev')
+    else:
+        corpus = queries = qrels = None
+
+    def add_metric_kvs(metric_dict):
+        for k, v in metric_dict.items():
+            final_metrics[k] += v
 
     metric_func = evaluate.load('rouge')
 
     scount = 0
     search_per_example: List[int] = []
-    final_metrics = {k: 0 for k in ['correct', 'incorrect', 'wrongformat', 'f1', 'precision', 'recall']}
+    final_metrics = {k: 0 for k in [
+        'correct', 'incorrect', 'wrongformat',
+        'f1', 'precision', 'recall',
+        'ent_f1', 'ent_precision', 'ent_recall']}
     ret_accs: List[List[float]] = []
     ret_covers: List[List[float]] = []
     predictions: List[str] = []
@@ -1010,10 +1073,11 @@ def eval(
 
         # evaluate based on the aggregated example
         trace = example['trace'] if 'trace' in example else []
-        qid = example['qid']
-        question = example['question']
-        ref = example['gold_output']
+        qid = example['qid'] if 'qid' in example else example['id']
+        question = example['question'] if 'question' in example else None
+        ref = example['gold_output'] if 'gold_output' in example else example['output']
         pred = example['output'].split('\n\n', 1)[0].strip()
+        # pred = example['output'][len(example['prompt']):].split('\n\n', 1)[0].strip()
         if remove_followup:
             raw_pred = pred
             rms, rme = remove_followup
@@ -1022,7 +1086,7 @@ def eval(
             followups.append(fu)
         final_ans = example['answer']
         ans_id = example['answer_id'] if 'answer_id' in example else None
-        if anchor_text in final_ans:
+        if anchor_text and anchor_text in final_ans:
             final_ans = final_ans[final_ans.find(anchor_text) + len(anchor_text):].strip()[:-1].strip().lower()
         if dataset == 'strategyqa':
             assert final_ans in {'yes', 'no'}
@@ -1036,7 +1100,7 @@ def eval(
             ret_dids = np.array([['placeholder']], dtype=np.str_)
 
         wrongformat = 0
-        position = pred.find(anchor_text)
+        position = pred.find(anchor_text) if anchor_text else 0
         if position == -1:
             wrongformat = 1
             final_metrics['wrongformat'] += 1
@@ -1047,15 +1111,13 @@ def eval(
                 final_metrics['correct'] += correct
                 final_metrics['incorrect'] += 1 - correct
             elif dataset in {'hotpotqa'}:
-                for k, v in HotpotQA.exact_match_score(pred_ans, final_ans).items():
-                    final_metrics[k] += v
-                for k, v in HotpotQA.f1_score(pred_ans, final_ans).items():
-                    final_metrics[k] += v
+                add_metric_kvs(HotpotQA.exact_match_score(pred_ans, final_ans))
+                add_metric_kvs(HotpotQA.f1_score(pred_ans, final_ans))
             elif dataset in {'2wikihop'}:
-                for k, v in WikiMultiHopQA.exact_match_score(pred_ans, final_ans, ground_truth_id=ans_id).items():
-                    final_metrics[k] += v
-                for k, v in WikiMultiHopQA.f1_score(pred_ans, final_ans, ground_truth_id=ans_id).items():
-                    final_metrics[k] += v
+                add_metric_kvs(WikiMultiHopQA.exact_match_score(pred_ans, final_ans, ground_truth_id=ans_id))
+                add_metric_kvs(WikiMultiHopQA.f1_score(pred_ans, final_ans, ground_truth_id=ans_id))
+            elif dataset in {'wikisum'}:
+                add_metric_kvs(WikiSum.entity_f1_score(pred_ans, final_ans))
             else:
                 raise NotImplementedError
 
@@ -1064,7 +1126,7 @@ def eval(
         if has_search:
             search_per_example.append(len(re.findall('\[Search\(', pred)))
 
-        if debug and wrongformat:
+        if debug:
             print('Q->', question)
             print()
             print('T->')
@@ -1074,6 +1136,8 @@ def eval(
                 print('\n------------------\n')
             print()
             print('P->', pred)
+            print()
+            print('G->', ref)
             input()
 
         # retrieval
@@ -1081,7 +1145,7 @@ def eval(
         ret_covers.append([])
         if ret_dids is not None:
             ret_seq_len = len(ret_dids)
-            rel_dids: List[str] = np.array([d for d, r in qrels[qid].items() if r])
+            rel_dids: List[str] = np.array([d for d, r in qrels[qid].items() if r]) if qrels else []
             rels = np.isin(ret_dids, rel_dids).any(-1)  # (ret_seq_len)
             prev_pt = 0
             for pt in retrieval_percentiles:
@@ -1221,17 +1285,27 @@ def mmlu_ret(
                 fout.write(json.dumps(result) + '\n')
 
 
+def prompt_dump(jsonl_file: str, out_file: str):
+    with open(jsonl_file, 'r') as fin, open(out_file, 'w') as fout:
+        for l in fin:
+            example = json.loads(l)
+            _id = example['qid']
+            prompt, output = example['trace'][0]
+            ans = example['answer']
+            fout.write(json.dumps({'id': _id, 'prompt': prompt, 'answer': ans}) + '\n')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
         'kilt', 'retrieval_track', 'head_analysis', 'shuffle_evidence', 'retrieval_acc',
         'translation_to_beir', 'convert_beir_to_fid_format', 'use_answer_as_query_in_beir',
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
-        'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'compare',
+        'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'summary_to_beir_all', 'compare',
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
-        'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret'])
+        'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='2wikihop', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop'])
+    parser.add_argument('--dataset', type=str, default='wikisum', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum'])
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
 
@@ -1321,7 +1395,20 @@ if __name__ == '__main__':
     elif args.task == 'summary_to_beir':
         file_pattern, spm_path = args.inp
         beir_dir = args.out
-        summary_to_beir(file_pattern, spm_path, beir_dir, max_num_examples=1000)
+        summary_to_beir(file_pattern, spm_path, beir_dir, max_num_examples=None)
+
+    elif args.task == 'summary_to_beir_all':
+        root_dir, spm_path = args.inp
+        beir_dir = args.out
+        train_file_pattern = f'{root_dir}/WIKI.train.*.pt'
+        dev_file_pattern = f'{root_dir}/WIKI.valid.*.pt'
+        test_file_pattern = f'{root_dir}/WIKI.test.*.pt'
+        summary_to_beir_all(
+            train_file_pattern=train_file_pattern,
+            dev_file_pattern=dev_file_pattern,
+            test_file_pattern=test_file_pattern,
+            spm_path=spm_path,
+            beir_dir=beir_dir)
 
     elif args.task == 'compare':
         file1, file2 = args.inp
@@ -1362,6 +1449,11 @@ if __name__ == '__main__':
                 jsonl_files=jsonl_files,
                 anchor_text='answer is',
                 beir_dir='data/2wikimultihopqa/dev_beir')
+        elif dataset == 'wikisum':
+            eval(dataset=dataset,
+                jsonl_files=jsonl_files,
+                anchor_text='',
+                beir_dir=None)  # 'data/wikisum/wikisum_all_beir'
 
     elif args.task == 'kilt_to_beir':
         kilt_wiki_file = args.inp[0]
@@ -1379,3 +1471,8 @@ if __name__ == '__main__':
 
     elif args.task == 'mmlu_ret':
         mmlu_ret(output=args.out)
+
+    elif args.task == 'prompt_dump':
+        jsonl_file = args.inp[0]
+        out_file = args.out
+        prompt_dump(jsonl_file, out_file)

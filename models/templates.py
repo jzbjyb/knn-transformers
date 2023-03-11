@@ -135,7 +135,7 @@ class CtxPrompt:
 
 
 class RetrievalInstruction:
-    toolformer_instruction: Dict[str, Any] = {
+    cot_instruction: Dict[str, Any] = {
         'retrieval': '1. You should use a Search API to look up information. You can do so by writing "[Search(term)]" where "term" is the search term you want to look up. For example:',
         'task': '2. You should answer questions by thinking step-by-step. You can do so by first write out the reasoning steps and then draw the conclusion. For example:',
         'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw then conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible.',
@@ -159,8 +159,16 @@ class RetrievalInstruction:
         ]
     }
 
-    def __init__(self, method: str = 'toolformer', fewshot: int = None):
+    summary_instruction: Dict[str, Any] = {
+        'task': '2. You should generate a short paragraph of summary for an entity. For example:',
+        'ensemble': '3. Now, you should combine the aforementioned two abilities. You should generate a short paragraph of summary for an entity and utilize the Search API "[Search(term)]" whenever possible.',
+    }
+
+    def __init__(self, method: str = 'cot', fewshot: int = None):
         self.instruction = getattr(self, f'{method}_instruction')
+        for k, v in self.cot_instruction.items():
+            if k not in self.instruction:
+                self.instruction[k] = v
         self.fewshot = len(self.instruction['examplars']) if fewshot is None else self.fewshot
 
     def format(self, use_ctx: bool = False) -> Tuple[str, str]:

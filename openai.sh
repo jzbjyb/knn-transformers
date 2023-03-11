@@ -7,25 +7,32 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=hotpotqa
-max_generation_len=256
+dataset=wikisum_all_beir
 batch_size=8
 model=code-davinci-002
-index_name=wikipedia_dpr
+index_name=wikisum_all_beir  # wikipedia_dpr
 consistency=1
 
 if [[ ${dataset} == 'hotpotqa' ]]; then
     input=""
     fewshot=12
     max_num_examples=1000
+    max_generation_len=256
 elif [[ ${dataset} == 'strategyqa_dev' ]]; then
     input="--input data/strategyqa/dev_beir"
     fewshot=6
     max_num_examples=229
+    max_generation_len=256
 elif [[ ${dataset} == '2wikihop' ]]; then
     input="--input data/2wikimultihopqa/dev_beir"
     fewshot=15
     max_num_examples=1000
+    max_generation_len=256
+elif [[ ${dataset} == 'wikisum_all_beir' ]]; then
+    input="--input data/wikisum/wikisum_all_beir"
+    fewshot=8
+    max_num_examples=1000
+    max_generation_len=256
 else
     exit
 fi
@@ -354,8 +361,6 @@ retrieval_kwargs = {
 
 
 
-
-
 # ---- ret instruction ---
 
 # config of raw
@@ -389,7 +394,7 @@ retrieval_kwargs = {
     'truncate_at_boundary': None,
     'append_retrieval': False,
     'use_ctx_for_examplars': False,
-    'use_retrieval_instruction': True,
+    'use_retrieval_instruction': 'cot',
     'format_reference_method': 'default',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave_ret',
@@ -430,7 +435,7 @@ retrieval_kwargs = {
     'truncate_at_boundary': None,
     'append_retrieval': False,
     'use_ctx_for_examplars': 'gold',
-    'use_retrieval_instruction': True,
+    'use_retrieval_instruction': 'cot',
     'format_reference_method': 'default',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave_ret',
@@ -471,7 +476,7 @@ retrieval_kwargs = {
     'truncate_at_boundary': None,
     'append_retrieval': False,
     'use_ctx_for_examplars': 'gold',
-    'use_retrieval_instruction': True,
+    'use_retrieval_instruction': 'cot',
     'format_reference_method': 'default',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave_ret',
