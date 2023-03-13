@@ -20,16 +20,21 @@ class BaseDataset:
     def entity_f1_score(
         cls,
         prediction: str,
-        ground_truth: str,
+        ground_truth: Union[str, List[str]],
         ground_truth_id: str = None
     ):
-        pred_ents: List[str] = [cls.normalize_answer(ent.text) for ent in cls.nlp(prediction).ents]
-        gold_ents: List[str] = [cls.normalize_answer(ent.text) for ent in cls.nlp(ground_truth).ents]
-        num_common_ents: int = sum((Counter(pred_ents) & Counter(gold_ents)).values())
-        p = num_common_ents / (len(pred_ents) or 1)
-        r = num_common_ents / (len(gold_ents) or 1)
-        assert p <= 1 and r <= 1
-        f1 = (2 * p * r) / ((p + r) or 1)
+        if type(ground_truth) is str:
+            ground_truth = [ground_truth]
+        p = r = f1 = 0
+        for gold in ground_truth:
+            pred_ents: List[str] = [cls.normalize_answer(ent.text) for ent in cls.nlp(prediction).ents]
+            gold_ents: List[str] = [cls.normalize_answer(ent.text) for ent in cls.nlp(gold).ents]
+            num_common_ents: int = sum((Counter(pred_ents) & Counter(gold_ents)).values())
+            _p = num_common_ents / (len(pred_ents) or 1)
+            _r = num_common_ents / (len(gold_ents) or 1)
+            assert _p <= 1 and _r <= 1
+            _f1 = (2 * _p * _r) / ((_p + _r) or 1)
+            p, r, f1 = max(p, _p), max(r, _r), max(f1, _f1)
         return {'ent_f1': f1, 'ent_precision': p, 'ent_recall': r}
 
     @classmethod
@@ -1122,15 +1127,15 @@ class ELI5(BaseDataset):
             "answer": "Here is my very basic explanation: Your hearing sensors are very small hairs that line the inside of your ear canal. Different hairs are calibrated for different frequencies (or 'pitches') High frequencies, like sirens vibrate the hairs very quickly, while lower frequencies vibrate their hairs more slowly. A part of aging is our high-frequency hairs wear out and stop responding. High frequency=more energy so they wear out faster than low-frequency hairs. The result of this is things sound 'muffled'. Eventually the hairs will be stuck 'off' permanently and gradually this takes over your ears. Fun fact: when you come out of a loud concert, the 'cotton in your ears' effect is from your sensors largely being 'stunned' or 'stuck off' and not responding normally when you leave the concert for a while. Also worth mentioning: whenever this happens some of the hairs never un-stun and you have slightly lost some of your hearing. Also: the medical condition tinnitus or \"ringing in your ears\" is from a specific hair for a specific frequency being 'stuck on'. Its caused (at least in the modern world) by listening to music too loud for too long."
         }
     ]  # shuffled
-    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a descriptive answer for the following question: {ques}\Answer: '
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a long descriptive answer to the following question: {ques}\nAnswer: '
     cot_output_template = lambda self, cot, ans: ans
 
     cot_ret_examplars = cot_examplars
-    cot_ret_demo_input_template = lambda self, ques: f'Generate a descriptive answer for the following question: {ques}\Answer: '
-    cot_ret_test_input_template = lambda self, ques: f'Generate a descriptive answer for the following question: {ques}\Answer (with search): '
+    cot_ret_demo_input_template = lambda self, ques: f'Generate a long descriptive answer to the following question: {ques}\nAnswer: '
+    cot_ret_test_input_template = lambda self, ques: f'Generate a long descriptive answer to the following question: {ques}\nAnswer (with search): '
     cot_ret_output_template = cot_output_template
 
-    def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
+    def __init__(self, prompt_type: str = 'cot'):
         assert prompt_type in {'cot', 'cot_ret'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
@@ -1145,6 +1150,102 @@ class ELI5(BaseDataset):
 
     def load_data(self, split: str = 'validation'):
         rawdata = load_dataset('kilt_tasks', name='eli5')
+        dataset = []
+        for i, example in enumerate(rawdata[split]):
+            qid = example['id']
+            question = example['input']
+            answers: List[str] = []
+            for candidate in example['output']:
+                ans = candidate['answer'].strip()
+                if ans:
+                    answers.append(ans)
+            assert len(answers) >= 1
+            output = self.output_template(cot=None, ans=answers[0])
+            dataset.append({
+                'qid': qid,
+                'question': question,
+                'answer': answers[0],
+                'answers': answers,
+                'gold_output': output,
+            })
+        return Dataset.from_list(dataset)
+
+
+class WoW(BaseDataset):
+    raw_train_data_file: str = ''
+    cot_examplars: List[Dict] = [
+        {
+            "id": "540dc478-99d6-11ea-8a20-773209e30a7b_3",
+            "question": "I love Nachos. It is like a yummy chippy cheesy salad.\nI also love nachos. They are a Mexican dish from northern Mexico and I'm glad we have adopted them here! lol\nI would love to give a nice plate of authentic made Nachos with some peppers.\nA man named Ignacio \"Nacho\" Anaya is the creator of the nacho dish and I would like to personally thank him! lol Do you prefer beer or chicken or just cheese?\nI like black beans and cheese with Jalapenos. Yum!\nI so love black beans on my nachos! Also, there can never be enough cheese! lol When he was asked what he wanted to call them, he said \"Nacho's Especiales\" which I find quite perfect! \nTotally fun how he came up with the name. I bet he had everyone wanting to visit and have Nachos with him.",
+            "answer_raw": "I agree! As word spread about his nachos, the name just became \"special nachos\" which also works for me. Now i'm really hungry! lol",
+            "answer": "I agree! As word spread about his nachos, the name just became \"special nachos\" which also works for me. Now i'm really hungry! lol.",
+        },
+        {
+            "id": "52fddf1e-99d6-11ea-8a20-773209e30a7b_1",
+            "question": "I want to be an engineer, I would love to work at NASA, such a prestigious organization.\nYes, Nasa is ndependent agency of the executive branch of the United States federal government responsible for the civilian space program.\nDo you when it was created ? It must have an interesting history.",
+            "answer_raw": "President Dwight D. Eisenhower created NASA in 1958, with an orientation of encouraging peaceful applications in space science",
+            "answer": "President Dwight D. Eisenhower created NASA in 1958, with an orientation of encouraging peaceful applications in space science.",
+        },
+        {
+            "id": "5b621d64-99d6-11ea-8a20-773209e30a7b_2",
+            "question": "Have you ever read the book Oliver Twist? It is about an orphan trying to survive.\nYes i love that book, its really sad though. \"Oliver Twist\" is notable for its unromantic portrayal by Dickens of criminals and their sordid lives.\nYeah, I remember how he depicted criminals. Charles Dickens wrote some great novels. My favorite was \"David Copperfield\".\nReally good one i read it too although, I really wish their could be a solution to the amount of orphan kids their is in the world.\nI agree we need to find a better solution. Some countries don't have the money to make sure they are being taken care of.",
+            "answer_raw": "While the exact definition of orphan varies, one legal definition is a child bereft through \"death or disappearance etc, of their parents.",
+            "answer": "While the exact definition of orphan varies, one legal definition is a child bereft through \"death or disappearance etc, of their parents.",
+        },
+        {
+            "id": "6446ef40-99d6-11ea-8a20-773209e30a7b_0",
+            "question": "I've only done yoga a handful of times, do you know much about it?",
+            "answer_raw": "I have never really done it, I have tried to meditate. I know it originated in ancient india though, and I know sort of what they do",
+            "answer": "I have never really done it, I have tried to meditate. I know it originated in ancient india though, and I know sort of what they do.",
+        },
+        {
+            "id": "6058be0e-99d6-11ea-8a20-773209e30a7b_4",
+            "question": "I have a Boxer named Millie, she's a medium sized short haired Boxer from Germany\nA boxer! My brother was thinking about getting one of those. What do you like about them, or what do you know about them so far?\nWell they were bred from the Old English Bulldog and the now extinct Bullenbeisser.\nI had never heard of a Bullenbeiser... Hm, alright. What's something unique about them?\nThey're brachycephalic meaning they have broad short skulls with a square muzzle and very strong jaws.\nHm.. I see. Are there any positives of the breed?\nThey're very lovable despite their powerful biting ability ideal for hanging on to large prey\nI see. ",
+            "answer_raw": "They come in lots of colors also, fawn or brindled with or without white markings and some are even solid white.",
+            "answer": "They come in lots of colors also, fawn or brindled with or without white markings and some are even solid white.",
+        },
+        {
+            "id": "52dfd53c-99d6-11ea-8a20-773209e30a7b_0",
+            "question": "hello i do enjoy horseback riding",
+            "answer_raw": "Me too! I am a professional equestrian, I ride horses for practical working purposes in police work and I also help herd animals on a ranch.",
+            "answer": "Me too! I am a professional equestrian, I ride horses for practical working purposes in police work and I also help herd animals on a ranch.",
+        },
+        {
+            "id": "79ad45f0-99d6-11ea-8a20-773209e30a7b_1",
+            "question": "I enjoy playing cue sports, a wide variety of games generally played with a cue stick.  What about you?\nYears ago I used to play pool, but wasn't very good at it. My Grandfather was a very good billiards player.",
+            "answer_raw": "Did he not give you a few tips? I love to play either billiards, pool and snooker similar games but different meanings in various parts of the world.",
+            "answer": "Did he not give you a few tips? I love to play either billiards, pool and snooker similar games but different meanings in various parts of the world.",
+        },
+        {
+            "id": "5d16130e-99d6-11ea-8a20-773209e30a7b_2",
+            "question": "What is ovo vegetarian ?\nIt's basically vegetarianism but you can eat eggs and not dairy.\nReally?\nYeah, in contrast with lacto vegetarianism which is the opposite.\nWhy are people ovo vegans ?",
+            "answer_raw": "They see more morality to eating eggs than they do eating dairy products.",
+            "answer": "They see more morality to eating eggs than they do eating dairy products.",
+        }
+    ]  # shuffled
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Given the context, generate the next response. Context: {ques}\nResponse: '
+    cot_output_template = lambda self, cot, ans: ans
+
+    cot_ret_examplars = cot_examplars
+    cot_ret_demo_input_template = lambda self, ques: f'Given the context, generate the next response. Context: {ques}\nResponse: '
+    cot_ret_test_input_template = lambda self, ques: f'Given the context, generate the next response. Context: {ques}\nResponse (with search): '
+    cot_ret_output_template = cot_output_template
+
+    def __init__(self, prompt_type: str = 'cot'):
+        assert prompt_type in {'cot', 'cot_ret'}
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplars = getattr(self, f'{prompt_type}_examplars')
+        if len(self.examplars) == len(self.cot_examplars):
+            for e, ref_e in zip(self.examplars, self.cot_examplars):  # copy missing keys from cot_examplars
+                for k in ref_e:
+                    if k not in e:
+                        e[k] = ref_e[k]
+        self.dataset = self.load_data()
+
+    def load_data(self, split: str = 'validation'):
+        rawdata = load_dataset('kilt_tasks', name='wow')
         dataset = []
         for i, example in enumerate(rawdata[split]):
             qid = example['id']

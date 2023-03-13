@@ -101,7 +101,7 @@ class CtxPrompt:
 
         #if use_ctx and self.ctx is None and len(self.ctxs):  # TODO: default is use all ctxs
         #    self.ctx = ' '.join([ctx for _, ctx in self.ctxs])
-        use_ctx = use_ctx and self.ctx
+        use_ctx = use_ctx and self.ctx is not None
         use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
         ref = self.format_reference(self.ctx) if use_ctx else None
         task, ret, ensemble = self.ret_instruction.format(use_ctx=use_ctx) if use_ret_instruction else (None, None, None)

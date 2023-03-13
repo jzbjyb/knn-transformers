@@ -7,10 +7,10 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=wikisum_all_beir
+dataset=wow
 batch_size=8
 model=code-davinci-002
-index_name=wikisum_all_beir  # wikipedia_dpr
+index_name=wikipedia_dpr  # wikipedia_dpr, wikisum_all_beir
 consistency=1
 
 if [[ ${dataset} == 'hotpotqa' ]]; then
@@ -28,6 +28,16 @@ elif [[ ${dataset} == '2wikihop' ]]; then
     fewshot=15
     max_num_examples=1000
     max_generation_len=256
+elif [[ ${dataset} == 'eli5' ]]; then
+    input=""  # "--input data/eli5/val_astarget_selfprov_evidence.json.beir_dedup"
+    fewshot=8
+    max_num_examples=1000000
+    max_generation_len=256
+elif [[ ${dataset} == 'wow' ]]; then
+    input=""  # "--input data/wow/val_astarget_selfprov_evidence.json.beir_dedup"
+    fewshot=8
+    max_num_examples=1000
+    max_generation_len=256
 elif [[ ${dataset} == 'wikisum_all_beir' ]]; then
     input="--input data/wikisum/wikisum_all_beir"
     fewshot=8
@@ -43,10 +53,11 @@ fi
 
 if [[ ${index_name} == "test" && ${input} != "none" ]]; then  # build index
     BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
+        --model ${model} \
         --dataset ${dataset} ${input} \
         --fewshot ${fewshot} \
         --index_name ${index_name} \
-        --openai_keys "${keys[0]}" \
+        --openai_keys ${keys[0]} \
         --build_index
     echo '========= index built ========='
 fi

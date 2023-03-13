@@ -18,7 +18,7 @@ from datasets import load_dataset
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.lexical import BM25Search
-from models.datasets import HotpotQA, WikiMultiHopQA, WikiSum
+from models.datasets import HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW
 
 class Wikipedia(object):
     def __init__(self):
@@ -737,24 +737,36 @@ def summary_to_beir_all(
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
-def compare(file1: str, file2: str, only_show_diff: bool = False, only_first_right: bool = False):
+def compare(file1: str, file2: str, only_show_diff: bool = False, only_first_right: bool = False, show_final: bool = False):
     get_ans = lambda x: x.strip().rsplit(' ', 1)[-1][:-1].lower()
     with open(file1) as fin1, open(file2) as fin2:
-        for l in fin1:
-            example1 = json.loads(l)
-            example2 = json.loads(fin2.readline())
+        id2examples1 = [json.loads(l) for l in fin1]
+        id2examples2 = [json.loads(l) for l in fin2]
+        id2examples1 = {e['qid']: e for e in id2examples1}
+        id2examples2 = {e['qid']: e for e in id2examples2}
+
+        for _id in id2examples1:
+            example1 = id2examples1[_id]
+            example2 = id2examples2[_id]
+
             q = example1['question']
-            c = example1['ctxs'] if 'ctxs' in example1 else example1['references']
+            c = example1['ctxs'] if 'ctxs' in example1 else []
             a = example1['gold_output'] if 'gold_output' in example1 else example1['answer']
             a2 = example2['gold_output'] if 'gold_output' in example2 else example2['answer']
-            assert a == a2, f'{example1}\n{example2}'
-            assert example1['question'] == example2['question']
+            assert example1['question'] == example2['question'], f"{example1['question']}\n{example2['question']}"
             o1 = example1['output']
             o2 = example2['output']
+
             r1 = example1['retrieval']
             r2 = example2['retrieval']
             ts1 = example1['trace'] if 'trace' in example1 else []
             ts2 = example2['trace'] if 'trace' in example2 else []
+
+            if show_final:
+                #r1 = r1[-1:] if r1 else r1
+                #r2 = r2[-1:] if r2 else r2
+                ts1 = ts1[-1:] if ts1 else ts1
+                ts2 = ts2[-1:] if ts2 else ts2
 
             o1a = get_ans(o1)
             o2a = get_ans(o2)
@@ -1028,6 +1040,7 @@ def eval(
     remove_followup: Tuple[str, str] = ('Follow up[^:]*:', '?'),
     beir_dir: str = None,
     consistency_suffix: str = 'run',
+    use_multi_ref: bool = False,
     debug: bool = False,
 ):
     if beir_dir is not None:
@@ -1038,6 +1051,24 @@ def eval(
     def add_metric_kvs(metric_dict):
         for k, v in metric_dict.items():
             final_metrics[k] += v
+
+    def choose_reference(example):
+        if 'answers' in example and use_multi_ref:  # multiple
+            return example['answers']
+        return example['gold_output'] if 'gold_output' in example else example['output']
+
+    def choose_final_answer(example):
+        if 'answers' in example and use_multi_ref:  # multiple
+            answers = example['answers']
+        else:
+            answers = [example['answer']]
+        for i, answer in enumerate(answers):
+            if anchor_text and anchor_text in answer:
+                answer = answer[answer.find(anchor_text) + len(anchor_text):].strip()[:-1].strip().lower()
+                answers[i] = answer
+                if dataset == 'strategyqa':
+                    assert answer in {'yes', 'no'}
+        return answers if len(answers) > 1 else answers[0]
 
     metric_func = evaluate.load('rouge')
 
@@ -1064,18 +1095,20 @@ def eval(
     total = len(examples_all_files[0])
 
     consistency_examples: List[Dict] = []
-    for i in range(total):
+    for i in tqdm(range(total)):
         examples: List[Dict] = [file[i] for file in examples_all_files]
 
         # aggregate multiple examples with consistency
         example = self_consistency(examples, anchor_text=anchor_text)
         consistency_examples.append(example)
 
-        # evaluate based on the aggregated example
+        # get necessary info for evaluation
         trace = example['trace'] if 'trace' in example else []
         qid = example['qid'] if 'qid' in example else example['id']
         question = example['question'] if 'question' in example else None
-        ref = example['gold_output'] if 'gold_output' in example else example['output']
+        ref = choose_reference(example)
+        final_ans = choose_final_answer(example)
+        ans_id = example['answer_id'] if 'answer_id' in example else None
         pred = example['output'].split('\n\n', 1)[0].strip()
         # pred = example['output'][len(example['prompt']):].split('\n\n', 1)[0].strip()
         if remove_followup:
@@ -1084,12 +1117,6 @@ def eval(
             pred = re.sub(f'{rms}[^\{rme}]*\{rme}', '', raw_pred)
             fu = ' '.join(re.findall(f'{rms}[^\{rme}]*\{rme}', raw_pred))
             followups.append(fu)
-        final_ans = example['answer']
-        ans_id = example['answer_id'] if 'answer_id' in example else None
-        if anchor_text and anchor_text in final_ans:
-            final_ans = final_ans[final_ans.find(anchor_text) + len(anchor_text):].strip()[:-1].strip().lower()
-        if dataset == 'strategyqa':
-            assert final_ans in {'yes', 'no'}
 
         references.append(ref)
         predictions.append(pred)
@@ -1118,6 +1145,10 @@ def eval(
                 add_metric_kvs(WikiMultiHopQA.f1_score(pred_ans, final_ans, ground_truth_id=ans_id))
             elif dataset in {'wikisum'}:
                 add_metric_kvs(WikiSum.entity_f1_score(pred_ans, final_ans))
+            elif dataset in {'eli5'}:
+                add_metric_kvs(ELI5.entity_f1_score(pred_ans, final_ans))
+            elif dataset in {'wow'}:
+                add_metric_kvs(WoW.entity_f1_score(pred_ans, final_ans))
             else:
                 raise NotImplementedError
 
@@ -1181,7 +1212,7 @@ def eval(
     print('\t'.join(metrics.keys()))
     print('\t'.join(map(str, metrics.values())))
     print('#pred\t#gold')
-    print(f'{np.mean([len(p) for p in predictions])}\t{np.mean([len(r) for r in references])}')
+    print(f'{np.mean([len(p) for p in predictions])}\t{np.mean([len(r) if type(r) is str else np.mean([len(_r) for _r in r]) for r in references])}')
     print('')
 
     if remove_followup:
@@ -1295,6 +1326,40 @@ def prompt_dump(jsonl_file: str, out_file: str):
             fout.write(json.dumps({'id': _id, 'prompt': prompt, 'answer': ans}) + '\n')
 
 
+def kilt_dataset_to_beir(
+        dataset: str,
+        split: str,
+        beir_dir: str):
+    raise NotImplementedError
+    rawdata = load_dataset('kilt_tasks', name='dataset')[split]
+
+    qid2dict: Dict[str, Dict] = {}
+    did2dict: Dict[str, Dict] = {}
+    question2qid: Dict[str, Dict] = {}
+    doc2did: Dict[str, str] = {}
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+
+    for i, example in enumerate(rawdata):
+        qid = example['id']
+        question = example['input']
+        answers: List[str] = []
+        docs: List[str] = []
+        for candidate in example['output']:
+            ans = candidate['answer'].strip()
+            if ans:
+                answers.append(ans)
+        assert len(answers) >= 1
+        output = self.output_template(cot=None, ans=answers[0])
+        dataset.append({
+            'qid': qid,
+            'question': question,
+            'answer': answers[0],
+            'answers': answers,
+            'gold_output': output,
+        })
+    return Dataset.from_list(dataset)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
@@ -1303,9 +1368,9 @@ if __name__ == '__main__':
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
         'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'summary_to_beir_all', 'compare',
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
-        'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump'])
+        'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='wikisum', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum'])
+    parser.add_argument('--dataset', type=str, default='eli5', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum', 'eli5', 'wow'])
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
 
@@ -1412,7 +1477,7 @@ if __name__ == '__main__':
 
     elif args.task == 'compare':
         file1, file2 = args.inp
-        compare(file1, file2, only_show_diff=True, only_first_right=True)
+        compare(file1, file2, only_show_diff=True, only_first_right=False, show_final=True)
 
     elif args.task == 'strategyqa_to_beir':
         strategyqa_file = args.inp[0]
@@ -1454,6 +1519,11 @@ if __name__ == '__main__':
                 jsonl_files=jsonl_files,
                 anchor_text='',
                 beir_dir=None)  # 'data/wikisum/wikisum_all_beir'
+        elif dataset in {'eli5', 'wow'}:
+            eval(dataset=dataset,
+                jsonl_files=jsonl_files,
+                anchor_text='',
+                beir_dir=None)
 
     elif args.task == 'kilt_to_beir':
         kilt_wiki_file = args.inp[0]
@@ -1476,3 +1546,8 @@ if __name__ == '__main__':
         jsonl_file = args.inp[0]
         out_file = args.out
         prompt_dump(jsonl_file, out_file)
+
+    elif args.task == 'kilt_dataset_to_beir':
+        dataset, split = args.inp
+        beir_dir = args.out
+        kilt_dataset_to_beir(dataset, split, beir_dir)

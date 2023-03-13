@@ -20,7 +20,7 @@ import openai
 import spacy
 from .retriever import BM25
 from .templates import CtxPrompt, RetrievalInstruction
-from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum
+from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW
 
 logging.basicConfig(level=logging.INFO)
 
@@ -247,6 +247,8 @@ class QueryAgent:
         self.look_ahead_truncate_at_boundary = retrieval_kwargs.get('look_ahead_truncate_at_boundary', None)
         self.look_ahead_filter_prob = retrieval_kwargs.get('look_ahead_filter_prob', 0)
         self.look_ahead_mask_prob = retrieval_kwargs.get('look_ahead_mask_prob', 0)
+        self.look_ahead_pre_retrieval = retrieval_kwargs.get('look_ahead_pre_retrieval', False)
+        assert self.look_ahead_pre_retrieval in {False, 'first', 'all'}
         self.max_query_length = retrieval_kwargs.get('max_query_length', None)
         self.use_full_input_as_query = retrieval_kwargs.get('use_full_input_as_query', False)
         self.only_use_look_ahead = retrieval_kwargs.get('only_use_look_ahead', False)
@@ -288,7 +290,7 @@ class QueryAgent:
         queries: List[str],
         params: Dict[str, Any],
         max_num_req_per_min: int = 10,
-        max_retry: int = 6,  # retry before switching keys
+        max_retry: int = 5,  # retry before switching keys
         max_keys: int = 5,  # max number of keys tried before raising exceptions
         key_tried: int = 0,  # number of keys tried
         force_generate: int = None,
@@ -338,6 +340,7 @@ class QueryAgent:
                     top_p=self.top_p,
                     logprobs=0,
                     logit_bias=logit_bias,
+                    frequency_penalty=0.0,
                     **params)
                 generations = [ApiReturn(
                     prompt=q,
@@ -347,7 +350,6 @@ class QueryAgent:
                     offsets=r['logprobs']['text_offset'],
                     finish_reason=r['finish_reason']) for r, q in zip(responses['choices'], queries)]
                 logging.info(f'finish query with key {api_key[-5:]}')
-                logging.info(f'{queries[0][-128:]}\n->{generations[0].text}')
                 if self.debug:
                     print('Params ->', params)
                     print('Prompt ->', queries[0])
@@ -449,6 +451,16 @@ class QueryAgent:
             # retrieve
             look_aheads: List[str] = [''] * len(queries)
             if self.look_ahead_steps:  # generate a fixed number tokens for retrieval
+                if (self.look_ahead_pre_retrieval == 'first' and step_ind == 0) or self.look_ahead_pre_retrieval == 'all':  # pre-retrieval for look ahead
+                    ctx_ids, ctx_texts = self.retrieve([q.case for i, q in queries], is_question=first_ret)
+                    for _i, (i, q) in enumerate(queries):
+                        ret_id, ret_text = ctx_ids[_i].tolist(), self.clean_retrieval(ctx_texts[_i])
+                        final_retrievals[i].append(ret_id)
+                        if self.append_retrieval:
+                            q.ctx = None
+                            q.append_retrieval(ret_text, add_index=False)
+                        else:
+                            q.update_retrieval(ret_text, method=self.ctx_increase)
                 apireturns = self.complete(
                     [q.format(use_ctx=self.use_ctx) for i, q in queries],
                     params={'max_tokens': self.look_ahead_steps, 'stop': self.final_stop_sym},
@@ -655,7 +667,7 @@ def write_worker(output_file: str, output_queue: Queue, size: int = None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir'])
+    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow'])
     parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003'])
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
@@ -703,36 +715,36 @@ if __name__ == '__main__':
         'retriever': retriever,
         'topk': 1,
         'use_ctx': True,
-        'frequency': 0,
-        #'boundary': [],
+        'frequency': 1,
+        'boundary': [],
         #'boundary': ['Intermediate answer:'],
-        'boundary': ['")]'],
+        #'boundary': ['")]'],
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 64,
+        'max_query_length': 16,
         'use_full_input_as_query': True,
-        'retrieval_at_beginning': False,
+        'retrieval_at_beginning': True,
         'look_ahead_steps': 0,
         'look_ahead_truncate_at_boundary': None,
         'look_ahead_filter_prob': 0.0,
         'look_ahead_mask_prob': 0.0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        #'retrieval_trigers': [],
+        'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
-        'retrieval_trigers': [('\[Search\("', '")]')],
+        #'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
-        'force_generate': (685, 2.0),
-        'forbid_generate_step': 5,
+        'force_generate': None,
+        'forbid_generate_step': 0,
         'truncate_at_prob': 0.0,
         'truncate_at_boundary': None,
         'append_retrieval': False,
         'use_ctx_for_examplars': 'ret',
-        'use_retrieval_instruction': 'summary',
+        'use_retrieval_instruction': False,
         'format_reference_method': 'default',
         'ctx_position': 'before_case',
-        'prompt_type': 'summary_ret',
+        'prompt_type': 'cot',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,
@@ -778,6 +790,12 @@ if __name__ == '__main__':
     elif args.dataset == '2wikihop':
         data = WikiMultiHopQA(args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WikiMultiHopQA.get_gold_ctxs
+    elif args.dataset == 'eli5':
+        data = ELI5(prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = ELI5.get_gold_ctxs
+    elif args.dataset == 'wow':
+        data = WoW(prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = WoW.get_gold_ctxs
     elif args.dataset == 'wikisum_all_beir':
         data = WikiSum(args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WikiSum.get_gold_ctxs
