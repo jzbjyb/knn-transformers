@@ -47,7 +47,7 @@ class Wikipedia(object):
                         prov.append(page['text'][pi][:ce])
                 else:
                     prov.append(page['text'][pi])
-        return ' '.join(prov)
+        return ' '.join(prov).strip(), page['text']
 
 def prep_kilt(
     output_file: str,
@@ -164,6 +164,34 @@ def prep_kilt(
             json.dump(dpr_data, fout, indent=True)
     else:
         raise NotImplementedError
+
+
+def add_ref_to_kilt(
+    dataset_name: str,
+    split: str = 'validation',
+    output_file: str = None):
+    assert dataset_name in {'eli5', 'wow'}
+
+    data = load_dataset('kilt_tasks', name=dataset_name)[split]
+    wikipedia = Wikipedia()
+
+    provnum2count: Dict[int, int] = defaultdict(lambda: 0)
+    with open(output_file, 'w') as fout:
+        for i, example in tqdm(enumerate(data), desc='format data'):
+            # collect refs
+            provnum = 0
+            for out in example['output']:
+                for prov in out['provenance']:
+                    wiki_id = prov['wikipedia_id']
+                    ps, pe, cs, ce = prov['start_paragraph_id'], prov['end_paragraph_id'], prov['start_character'], prov['end_character']
+                    evi, paras = wikipedia.get_provenance(wiki_id, ps, pe, cs, ce, whole_paragraph=True)
+                    prov['wikipedia_paragraphs'] = paras
+                    prov['wikipedia_evidence'] = evi
+                    provnum += 1
+            provnum2count[provnum] += 1
+            fout.write(json.dumps(example) + '\n')
+    print('provnum2count', [(k, v / len(data)) for k, v in provnum2count.items()])
+
 
 class PredictionWithRetrieval(object):
     def __init__(self, n_heads: int, topk: int, tokenizer: AutoTokenizer, use_tokenizer: bool = False):
@@ -1078,7 +1106,8 @@ def eval(
     final_metrics = {k: 0 for k in [
         'correct', 'incorrect', 'wrongformat',
         'f1', 'precision', 'recall',
-        'ent_f1', 'ent_precision', 'ent_recall']}
+        'ent_f1', 'ent_precision', 'ent_recall',
+        'avg_nll', 'ppl', 'tokens']}
     ret_accs: List[List[float]] = []
     ret_covers: List[List[float]] = []
     predictions: List[str] = []
@@ -1118,6 +1147,10 @@ def eval(
             pred = re.sub(f'{rms}[^\{rme}]*\{rme}', '', raw_pred)
             fu = ' '.join(re.findall(f'{rms}[^\{rme}]*\{rme}', raw_pred))
             followups.append(fu)
+        probs = -np.log(example['output_prob']) if 'output_prob' in example else []
+        final_metrics['avg_nll'] += np.mean(probs)
+        final_metrics['ppl'] += np.sum(probs)
+        final_metrics['tokens'] += len(probs)
 
         references.append(ref)
         predictions.append(pred)
@@ -1133,9 +1166,9 @@ def eval(
             wrongformat = 1
             final_metrics['wrongformat'] += 1
         else:
-            pred_ans = pred[position + len(anchor_text):].strip().lower()
+            pred_ans = pred[position + len(anchor_text):].strip()
             if dataset == 'strategyqa':
-                correct = int(final_ans in pred_ans)
+                correct = int(final_ans.lower() in pred_ans.lower())
                 final_metrics['correct'] += correct
                 final_metrics['incorrect'] += 1 - correct
             elif dataset in {'hotpotqa'}:
@@ -1207,7 +1240,7 @@ def eval(
     ret_covers = np.array(ret_covers, dtype=float).mean(0)
     format_list = lambda arr: ', '.join(map(lambda x: '{:.3f}'.format(x), arr.tolist()))
     print('\t'.join(final_metrics.keys()))
-    print('\t'.join(map(lambda x: str(x / total), final_metrics.values())))
+    print('\t'.join(map(lambda kv: str(np.exp(kv[1] / final_metrics['tokens'] or 1)) if kv[0] == 'ppl' else str(kv[1] / total), final_metrics.items())))
     print('')
 
     print('\t'.join(metrics.keys()))
@@ -1298,7 +1331,7 @@ def mmlu_ret(
         'machine_learning', 'management', 'marketing', 'medical_genetics', 'miscellaneous', 'moral_disputes',
         'moral_scenarios', 'nutrition', 'philosophy', 'prehistory', 'professional_accounting', 'professional_law',
         'professional_medicine', 'professional_psychology', 'public_relations', 'security_studies', 'sociology',
-        'us_foreign_policy', 'virology', 'world_religions']
+        'us_foreign_policy', 'virology', 'world_religions', 'add_ref_to_kilt']
     with open(output, 'w') as fout:
         for topic in topics:
             dataset = load_dataset('hendrycks_test', topic)[split]
@@ -1369,7 +1402,7 @@ if __name__ == '__main__':
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
         'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'summary_to_beir_all', 'compare',
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
-        'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir'])
+        'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir', 'add_ref_to_kilt'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--dataset', type=str, default='eli5', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum', 'eli5', 'wow'])
     parser.add_argument('--out', type=str, default=None, help='output file')
@@ -1552,3 +1585,8 @@ if __name__ == '__main__':
         dataset, split = args.inp
         beir_dir = args.out
         kilt_dataset_to_beir(dataset, split, beir_dir)
+
+    elif args.task == 'add_ref_to_kilt':
+        dataset, split = args.inp
+        out_file = args.out
+        add_ref_to_kilt(dataset, split, out_file)

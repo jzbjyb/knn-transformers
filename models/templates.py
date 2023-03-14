@@ -1,5 +1,6 @@
 from typing import List, Dict, Any, Tuple
 from operator import itemgetter
+import spacy
 
 
 class CtxPrompt:
@@ -16,6 +17,7 @@ class CtxPrompt:
         ctxs: List[Tuple[str, str]] = [],
         case: str = None,
         qid: str = None,
+        gold_output: str = None,
     ):
         assert self.ctx_position in {'before_case', 'begin'}
         self.demo = demo
@@ -25,8 +27,10 @@ class CtxPrompt:
         self.ctxs_idx = 0
         self.case = case
         self.qid = qid
+        self.gold_output = gold_output
         self.ind = 0
         self.gen_len = 0
+        self.gold_used_len = 0
 
     @staticmethod
     def get_append_retrieval(ret_to_append: str, index: int = None):
@@ -39,11 +43,14 @@ class CtxPrompt:
         adict = dict(adict)
         if 'demo' in adict:
             adict['demo'] = [cls.from_dict(d) for d in adict['demo']]
-        return cls(**{k: adict[k] for k in ['demo', 'ctx', 'ctxs', 'case', 'qid'] if k in adict})
+        return cls(**{k: adict[k] for k in ['demo', 'ctx', 'ctxs', 'case', 'qid', 'gold_output'] if k in adict})
 
     def add_generation(self, cont: str):
         self.case += cont
         self.gen_len += len(cont)
+        if self.gold_used_len != 0:  # use gold
+            self.gold_output = self.gold_output[self.gold_used_len:]
+            self.gold_used_len = 0
 
     def reset_generation(self):
         if self.gen_len <= 0:
@@ -102,6 +109,21 @@ class CtxPrompt:
             return ' '.join(formatted)
         raise NotImplementedError
 
+    def get_prefix(
+            self,
+            qagent: "QueryAgent",
+            prefix_method: str = 'sentence') -> Tuple[str, int]:
+        if not self.gold_output:  # finish
+            return qagent.final_stop_sym, 0
+        if prefix_method == 'sentence':
+            prefix, self.gold_used_len = ApiReturn.get_sent(self.gold_output, position='begin')
+            return prefix, 0
+        elif prefix_method == 'all':
+            prefix, self.gold_used_len = self.gold_output, len(self.gold_output)
+            return prefix, 0
+        else:
+            raise NotImplementedError
+
     def format(
         self,
         use_ctx: bool = False,
@@ -110,8 +132,6 @@ class CtxPrompt:
         # run on demo
         demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=False)[0] for d in self.demo])  # TODO: no retrieval for demo
 
-        #if use_ctx and self.ctx is None and len(self.ctxs):  # TODO: default is use all ctxs
-        #    self.ctx = ' '.join([ctx for _, ctx in self.ctxs])
         use_ctx = use_ctx and self.ctx is not None
         use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
         ref = self.format_reference(self.ctx) if use_ctx else None
@@ -143,6 +163,151 @@ class CtxPrompt:
             elements.append(self.case)
 
         return '\n\n'.join(elements), self.gen_len
+
+
+class ApiReturn:
+    EOS = '<|endoftext|>'
+    nlp = spacy.load('en_core_web_sm')
+    min_sent_len = 5
+
+    def __init__(
+        self,
+        prompt: str,
+        text: str,
+        tokens: List[str] = [],
+        probs: List[float] = [],
+        offsets: List[int] = [],
+        finish_reason: str = 'stop',
+        skip_len: int = 0,
+    ):
+        self.prompt = prompt
+        self.text = text
+        assert len(tokens) == len(probs) == len(offsets)
+        self.tokens = tokens
+        self.probs = probs
+        self.offsets = offsets
+        self.finish_reason = finish_reason
+        if self.finish_reason is None:
+            self.finish_reason = 'stop'  # TODO: a bug from openai?
+
+        if skip_len:  # skip `skip_len` chars at the beginning
+            self.text = self.text[skip_len:]
+            i = 0
+            for i, off in enumerate(self.offsets):
+                if off == skip_len:
+                    break
+                elif off > skip_len:  # the previous token span across the boundary
+                    i = i - 1
+                    assert i >= 0
+                    break
+            self.tokens = self.tokens[i:]
+            self.probs = self.probs[i:]
+            self.offsets = self.offsets[i:]
+
+    @property
+    def num_tokens(self):
+        return len(self.tokens)
+
+    @property
+    def has_endoftext(self):
+        return self.EOS in self.tokens
+
+    @classmethod
+    def get_sent(cls, text: str, position: str = 'begin'):
+        doc = cls.nlp(text)
+        if position == 'begin':
+            break_at = len(text)
+            for sent in doc.sents:
+                if sent.end_char >= cls.min_sent_len:
+                    break_at = sent.end_char
+                    break
+            return text[:break_at], break_at
+        if position == 'end':
+            sents = list(doc.sents)
+            break_at = 0
+            for i in range(len(sents)):
+                sent = sents[len(sents) - i - 1]
+                if len(text) - sent.start_char >= cls.min_sent_len:  # TODO: argument
+                    break_at = sent.start_char
+                    break
+            return text[break_at:], break_at
+        raise NotImplementedError
+
+    def truncate_at_prob(self, low: float):
+        if self.num_tokens <= 1:
+            return self
+
+        break_point = self.num_tokens
+        for i in range(self.num_tokens):
+            t, p, o = self.tokens[i], self.probs[i], self.offsets[i]
+            if p <= low:
+                break_point = i
+                break
+        if break_point == 0 and self.num_tokens > 0:  # avoid deadlock
+            break_point = 1
+
+        while break_point < self.num_tokens:  # truncation
+            assert break_point > 0
+            keep = self.offsets[break_point] - len(self.prompt)
+            if keep <= 0:
+                break_point += 1
+                continue
+
+            self.text = self.text[:keep]
+            self.tokens = self.tokens[:break_point]
+            self.probs = self.probs[:break_point]
+            self.offsets = self.offsets[:break_point]
+            self.finish_reason = 'boundary'
+            break
+
+        return self
+
+    def truncate_at_boundary(self, unit: str = 'sentence'):
+        if self.num_tokens <= 1:
+            return self
+
+        if unit == 'sentence':
+            doc = self.nlp(self.text)
+            break_at = len(self.text)
+            for sent in doc.sents:
+                if sent.end_char >= self.min_sent_len:
+                    break_at = sent.end_char
+                    break
+
+            if break_at > 0 and break_at < len(self.text):  # truncation
+                i = 0
+                for i in range(self.num_tokens):
+                    if self.offsets[i] - len(self.prompt) >= break_at:
+                        break_at = self.offsets[i] - len(self.prompt)
+                        break
+                assert i > 0 and break_at > 0
+                self.text = self.text[:break_at]
+                self.tokens = self.tokens[:i]
+                self.probs = self.probs[:i]
+                self.offsets = self.offsets[:i]
+                self.finish_reason = 'boundary'
+        else:
+            raise NotImplementedError
+        return self
+
+    def use_as_query(
+        self,
+        low: float = None,
+        mask: float = None
+    ):
+        if low is None and mask is None:
+            return self.text
+        if low:
+            ok = False
+            for p in self.probs:
+                if p <= low:
+                    ok = True
+                    break
+            return self.text if ok else ''
+        elif mask:
+            keep = [(t if p > mask else ' ') for t, p in zip(self.tokens, self.probs)]
+            keep = ''.join(keep).strip()
+            return keep
 
 
 class RetrievalInstruction:

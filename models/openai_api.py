@@ -18,9 +18,8 @@ from transformers import AutoTokenizer, GPT2TokenizerFast
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.search.lexical import BM25Search
 import openai
-import spacy
 from .retriever import BM25
-from .templates import CtxPrompt, RetrievalInstruction
+from .templates import CtxPrompt, ApiReturn, RetrievalInstruction
 from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW
 
 logging.basicConfig(level=logging.INFO)
@@ -83,135 +82,6 @@ class KeyManager:
         return '\n'.join(report)
 
 
-class ApiReturn:
-    EOS = '<|endoftext|>'
-    nlp = spacy.load('en_core_web_sm')
-    min_sent_len = 5
-
-    def __init__(
-        self,
-        prompt: str,
-        text: str,
-        tokens: List[str] = [],
-        probs: List[float] = [],
-        offsets: List[int] = [],
-        finish_reason: str = 'stop',
-    ):
-        self.prompt = prompt
-        self.text = text
-        assert len(tokens) == len(probs) == len(offsets)
-        self.tokens = tokens
-        self.probs = probs
-        self.offsets = offsets
-        self.finish_reason = finish_reason
-        if self.finish_reason is None:
-            self.finish_reason = 'stop'  # TODO: a bug from openai?
-
-    @property
-    def num_tokens(self):
-        return len(self.tokens)
-
-    @property
-    def has_endoftext(self):
-        return self.EOS in self.tokens
-
-    @classmethod
-    def get_sent(cls, text: str, position: str = 'begin'):
-        doc = cls.nlp(text)
-        if position == 'begin':
-            break_at = len(text)
-            for sent in doc.sents:
-                if sent.end_char >= cls.min_sent_len:
-                    break_at = sent.end_char
-                    break
-            return text[:break_at], break_at
-        if position == 'end':
-            sents = list(doc.sents)
-            break_at = 0
-            for i in range(len(sents)):
-                sent = sents[len(sents) - i - 1]
-                if len(text) - sent.start_char >= cls.min_sent_len:  # TODO: argument
-                    break_at = sent.start_char
-                    break
-            return text[break_at:], break_at
-        raise NotImplementedError
-
-    def truncate_at_prob(self, low: float):
-        if self.num_tokens <= 1:
-            return self
-
-        break_point = self.num_tokens
-        for i in range(self.num_tokens):
-            t, p, o = self.tokens[i], self.probs[i], self.offsets[i]
-            if p <= low:
-                break_point = i
-                break
-        if break_point == 0 and self.num_tokens > 0:  # avoid deadlock
-            break_point = 1
-
-        while break_point < self.num_tokens:  # truncation
-            assert break_point > 0
-            keep = self.offsets[break_point] - len(self.prompt)
-            if keep <= 0:
-                break_point += 1
-                continue
-
-            self.text = self.text[:keep]
-            self.tokens = self.tokens[:break_point]
-            self.probs = self.probs[:break_point]
-            self.offsets = self.offsets[:break_point]
-            self.finish_reason = 'boundary'
-            break
-
-        return self
-
-    def truncate_at_boundary(self, unit: str = 'sentence'):
-        if self.num_tokens <= 1:
-            return self
-
-        if unit == 'sentence':
-            doc = self.nlp(self.text)
-            break_at = len(self.text)
-            for sent in doc.sents:
-                if sent.end_char >= self.min_sent_len:
-                    break_at = sent.end_char
-                    break
-
-            if break_at > 0 and break_at < len(self.text):  # truncation
-                i = 0
-                for i in range(self.num_tokens):
-                    if self.offsets[i] - len(self.prompt) >= break_at:
-                        break_at = self.offsets[i] - len(self.prompt)
-                        break
-                assert i > 0 and break_at > 0
-                self.text = self.text[:break_at]
-                self.tokens = self.tokens[:i]
-                self.probs = self.probs[:i]
-                self.offsets = self.offsets[:i]
-                self.finish_reason = 'boundary'
-        else:
-            raise NotImplementedError
-        return self
-
-    def use_as_query(
-        self,
-        low: float = None,
-        mask: float = None
-    ):
-        if low is None and mask is None:
-            return self.text
-        if low:
-            ok = False
-            for p in self.probs:
-                if p <= low:
-                    ok = True
-                    break
-            return self.text if ok else ''
-        elif mask:
-            keep = [(t if p > mask else ' ') for t, p in zip(self.tokens, self.probs)]
-            keep = ''.join(keep).strip()
-            return keep
-
 class QueryAgent:
     def __init__(
         self,
@@ -273,6 +143,8 @@ class QueryAgent:
         self.frequency_penalty = retrieval_kwargs.get('frequency_penalty', 0.0)
         self.frequency_penalty_in_prompt = retrieval_kwargs.get('frequency_penalty_in_prompt', 0.0)
 
+        self.prefix_method = retrieval_kwargs.get('prefix_method', None)
+
     @property
     def use_retrieval(self):
         return self.ret_frequency > 0 or self.ret_boundary or self.use_gold
@@ -291,7 +163,7 @@ class QueryAgent:
 
     def complete(
         self,
-        queries: List[Tuple[str, int]],
+        queries: List[CtxPrompt],
         params: Dict[str, Any],
         max_num_req_per_min: int = 10,
         max_retry: int = 5,  # retry before switching keys
@@ -322,10 +194,24 @@ class QueryAgent:
         elif forbid_generate:
             logit_bias={f'{forbid_generate[0]}': -100}
 
+        # format to get the final prompt
+        prompts: List[Tuple[str, int]] = [q.format(use_ctx=self.use_ctx) for q in queries]
+        prompts_to_issue: List[str] = list(map(itemgetter(0), prompts))
+
+        # get prefix
+        echo = False
+        if self.prefix_method:
+            echo = True
+            prefixes: List[Tuple[str, int]] = [q.get_prefix(qagent=self, prefix_method=self.prefix_method) for q in queries]
+            params['max_tokens'] = max(map(itemgetter(1), prefixes))
+            assert len(prompts_to_issue) == len(prefixes)
+            for i in range(len(prompts_to_issue)):
+                prompts_to_issue[i] += prefixes[i][0]
+
         # add penalty
         if self.frequency_penalty_in_prompt:
             assert len(queries) == 1, 'batching is not supported'
-            current_cases: List[str] = [q[-l:] if l else '' for q, l in queries]  # only use the generated content
+            current_cases: List[str] = [q[-l:] if l else '' for q, l in prompts]  # only use the generated content
             counter = Counter(sum(self.tokenizer(current_cases)['input_ids'], []))
             tokid2count: Dict[int, int] = dict(sorted(counter.items(), key=lambda x: (-x[1], x[0]))[:200])  # penalize at most 200 tokens
             for tokid, count in tokid2count.items():
@@ -351,25 +237,32 @@ class QueryAgent:
                 responses = openai.Completion.create(
                     api_key=api_key,
                     model=self.model,
-                    prompt=list(map(itemgetter(0), queries)),
+                    prompt=prompts_to_issue,
                     temperature=self.temperature,
                     top_p=self.top_p,
                     logprobs=0,
                     logit_bias=logit_bias,
                     frequency_penalty=self.frequency_penalty,
+                    echo=echo,
                     **params)
+
                 generations = [ApiReturn(
                     prompt=q,
                     text=r['text'],
                     tokens=r['logprobs']['tokens'],
-                    probs=[np.exp(lp) for lp in r['logprobs']['token_logprobs']],
+                    probs=[np.exp(lp) if lp is not None else lp for lp in r['logprobs']['token_logprobs']],
                     offsets=r['logprobs']['text_offset'],
-                    finish_reason=r['finish_reason']) for r, (q, l) in zip(responses['choices'], queries)]
+                    finish_reason=r['finish_reason'],
+                    skip_len=len(q) if echo else 0) for r, (q, _) in zip(responses['choices'], prompts)]
+
                 logging.info(f'finish query with key {api_key[-5:]}')
                 if self.debug:
                     print('Params ->', params)
-                    print('Prompt ->', queries[0][0], queries[0][1])
+                    print('Prompt ->', generations[0].prompt)
                     print('Output ->', generations[0].text)
+                    print('Output ->', generations[0].tokens)
+                    #print('q', f'|{queries[0].case}')
+                    #print('p', f'|{queries[0].gold_output}')
                     input('-' * 50)
             except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:  # limit-related errors
                 if retry >= max_retry:
@@ -427,23 +320,27 @@ class QueryAgent:
     ):
         if self.use_retrieval:
             if self.use_gold:  # directly generate all with gold context
+                for query in queries:
+                    query.ctx = ' '.join(query.ctxs)
                 ars = self.complete(
-                    [q.format(use_ctx=True) for q in queries],
+                    queries,
                     params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym},
                     api_key=api_key)
                 outputs = [ar.text for ar in ars]
+                probs = [ar.probs for ar in ars]
                 traces = [[(ar.prompt, ar.text)] for ar in ars]
-                return outputs, None, traces
+                return outputs, probs, None, traces
             else:
                 return self.ret_prompt(queries, api_key=api_key)
         else:  # directly generate all without gold context
             ars = self.complete(
-                [q.format(use_ctx=False) for q in queries],
+                queries,
                 params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym},
                 api_key=api_key)
             outputs = [ar.text for ar in ars]
+            probs = [ar.probs for ar in ars]
             traces = [[(ar.prompt, ar.text)] for ar in ars]
-            return outputs, None, traces
+            return outputs, probs, None, traces
 
     def ret_prompt(
         self,
@@ -454,8 +351,8 @@ class QueryAgent:
         batch_size = len(queries)
         final_retrievals: List[List[List[str]]] = [[] for _ in range(len(queries))]  # (bs, n_ret_steps, ret_topk)
         final_outputs: List[str] = [''] * len(queries)
+        final_probs: List[List[float]] = [[] for _ in range(len(queries))]
         final_queries: List[CtxPrompt] = [None] * len(queries)
-        init_queries: List[CtxPrompt] = copy.deepcopy(queries)
         traces: List[List[Tuple[str, str]]] = [[] for _ in range(len(queries))]
         queries: List[Tuple[int, CtxPrompt]] = [(i, q) for i, q in enumerate(queries)]  # to query
         max_gen_len = 0
@@ -478,7 +375,7 @@ class QueryAgent:
                         else:
                             q.update_retrieval(ret_text, method=self.ctx_increase)
                 apireturns = self.complete(
-                    [q.format(use_ctx=self.use_ctx) for i, q in queries],
+                    list(map(itemgetter(1), queries)),
                     params={'max_tokens': self.look_ahead_steps, 'stop': self.final_stop_sym},
                     api_key=api_key)
                 if self.look_ahead_truncate_at_boundary:
@@ -486,7 +383,7 @@ class QueryAgent:
                 look_aheads = [ar.use_as_query(low=self.look_ahead_filter_prob, mask=self.look_ahead_mask_prob) for ar in apireturns]
             elif self.look_ahead_boundary:  # generate tokens until boundary for retrieval
                 apireturns = self.complete(
-                    [q.format(use_ctx=self.use_ctx) for i, q in queries],
+                    list(map(itemgetter(1), queries)),
                     params={'max_tokens': self.max_generation_len, 'stop': self.look_ahead_boundary},
                     api_key=api_key)
                 look_aheads = [ar.text for ar in apireturns]
@@ -528,7 +425,7 @@ class QueryAgent:
             # complete
             if self.ret_frequency:
                 apireturns = self.complete(
-                    [q.format(use_ctx=self.use_ctx) for i, q in queries],
+                    list(map(itemgetter(1), queries)),
                     params={'max_tokens': min(self.max_generation_len - max_gen_len, self.ret_frequency), 'stop': self.final_stop_sym},
                     api_key=api_key)
                 if self.truncate_at_prob > 0:
@@ -542,21 +439,26 @@ class QueryAgent:
                     generate_queries = [ar.text for ar in apireturns]
                 else:
                     max_gen_len += self.ret_frequency
+                for ar in apireturns:  # check final sym
+                    if self.final_stop_sym in ar.text:
+                        ar.text = ar.text.split(self.final_stop_sym, 1)[0]
+                        ar.finish_reason = 'stop'
             elif self.ret_boundary:
                 if self.forbid_generate_step and self.retrieval_trigers and step_ind > 0:  # start from the second step to forbid the force_generate token
                     apireturns = self.complete(
-                        [q.format(use_ctx=self.use_ctx) for i, q in queries],
+                        list(map(itemgetter(1), queries)),
                         params={'max_tokens': min(self.max_generation_len - max_gen_len, self.forbid_generate_step), 'stop': self.final_stop_sym},
                         forbid_generate=self.force_generate,
                         api_key=api_key)
                     for (i, query), ar in zip(queries, apireturns):
                         cont = ar.text
                         final_outputs[i] += cont
+                        final_probs[i].extend(ar.probs)
                         final_queries[i] = query
                         traces[i].append((ar.prompt, cont))
                         query.add_generation(cont)
                 apireturns = self.complete(
-                    [q.format(use_ctx=self.use_ctx) for i, q in queries],
+                    list(map(itemgetter(1), queries)),
                     params={'max_tokens': self.max_generation_len - max_gen_len, 'stop': self.ret_boundary},
                     force_generate=self.force_generate,
                     api_key=api_key)
@@ -611,6 +513,7 @@ class QueryAgent:
             for _i, ((i, query), ar) in enumerate(zip(queries, apireturns)):
                 cont, reason = ar.text, ar.finish_reason
                 final_outputs[i] += cont
+                final_probs[i].extend(ar.probs)
                 final_queries[i] = query
                 traces[i].append((ar.prompt, cont))
                 if reason == 'stop':
@@ -630,15 +533,16 @@ class QueryAgent:
             for query in final_queries:
                 query.reset_generation()
             apireturns = self.complete(
-                [q.format(use_ctx=self.use_ctx) for q in final_queries],
+                final_queries,
                 params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym},
                 api_key=api_key)
             for i, (query, ar) in enumerate(zip(final_queries, apireturns)):
                 cont, reason = ar.text, ar.finish_reason
                 final_outputs[i] = cont
+                final_probs[i] = ar.probs
                 traces[i].append((ar.prompt, cont))
 
-        return final_outputs, final_retrievals, traces
+        return final_outputs, final_probs, final_retrievals, traces
 
 
 def query_agent_worker(
@@ -661,11 +565,12 @@ def query_agent_worker(
         if type(batch) is str and batch == 'DONE':
             break
         prompts = [CtxPrompt.from_dict(example) for example in batch]
-        generations, retrievals, traces = qagent.prompt(prompts, api_key=(get_key_func, return_key_func))
+        generations, probs, retrievals, traces = qagent.prompt(prompts, api_key=(get_key_func, return_key_func))
         retrievals = retrievals or [None] * len(generations)
         traces = traces or [None] * len(generations)
-        for example, generation, retrieval, trace in zip(batch, generations, retrievals, traces):
+        for example, generation, prob, retrieval, trace in zip(batch, generations, probs, retrievals, traces):
             example['output'] = generation
+            example['output_prob'] = prob
             example['retrieval'] = retrieval
             example['trace'] = trace
             output_queue.put(example)
@@ -729,34 +634,32 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 3,
-        'frequency_penalty': 1.0,
-        'frequency_penalty_in_prompt': 1.0,
+        'topk': 1,
         'use_ctx': True,
-        'frequency': 64,
+        'frequency': 1,
         'boundary': [],
         #'boundary': ['Intermediate answer:'],
         #'boundary': ['")]'],
         #'boundary': ['. '],
-        'use_gold': False,
+        'use_gold': True,
         'use_gold_iterative': False,
-        'max_query_length': 64,
+        'max_query_length': 16,
         'use_full_input_as_query': True,
-        'retrieval_at_beginning': False,
-        'look_ahead_steps': 64,
-        'look_ahead_truncate_at_boundary': 'sentence',
+        'retrieval_at_beginning': True,
+        'look_ahead_steps': 0,
+        'look_ahead_truncate_at_boundary': None,
         'look_ahead_filter_prob': 0.0,
-        'look_ahead_mask_prob': 0.2,
+        'look_ahead_mask_prob': 0.0,
         'look_ahead_boundary': [],
-        'only_use_look_ahead': True,
+        'only_use_look_ahead': False,
         'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         #'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
         'force_generate': None,
-        'forbid_generate_step': None,
+        'forbid_generate_step': 0,
         'truncate_at_prob': 0.0,
-        'truncate_at_boundary': 'sentence',
+        'truncate_at_boundary': None,
         'append_retrieval': False,
         'use_ctx_for_examplars': 'ret',
         'use_retrieval_instruction': False,
@@ -776,6 +679,7 @@ if __name__ == '__main__':
         temperature=args.temperature)
     if retrieval_kwargs['use_retrieval_instruction']:
         CtxPrompt.ret_instruction = RetrievalInstruction(method=retrieval_kwargs['use_retrieval_instruction'])
+    CtxPrompt.retrieval_kwargs = retrieval_kwargs
     CtxPrompt.format_reference_method = retrieval_kwargs['format_reference_method']
     CtxPrompt.ctx_position = retrieval_kwargs['ctx_position']
     CtxPrompt.add_ref_suffix = retrieval_kwargs['add_ref_suffix']
@@ -854,11 +758,12 @@ if __name__ == '__main__':
             for b in range(0, len(data), args.batch_size):
                 batch = data.select(range(b, min(b + args.batch_size, len(data))))
                 prompts = [CtxPrompt.from_dict(example) for example in batch]
-                generations, retrievals, traces = qagent.prompt(prompts, api_key=key)
+                generations, probs, retrievals, traces = qagent.prompt(prompts, api_key=key)
                 retrievals = retrievals or [None] * len(generations)
                 traces = traces or [None] * len(generations)
-                for example, generation, retrieval, trace in zip(batch, generations, retrievals, traces):
+                for example, generation, prob, retrieval, trace in zip(batch, generations, probs, retrievals, traces):
                     example['output'] = generation
+                    example['output_prob'] = prob
                     example['retrieval'] = retrieval
                     example['trace'] = trace
                     fout.write(json.dumps(example) + '\n')

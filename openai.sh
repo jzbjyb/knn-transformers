@@ -8,7 +8,7 @@ num_keys=${#keys[@]}
 
 output=$1
 dataset=eli5
-batch_size=1
+batch_size=8
 model=code-davinci-002
 index_name=wikipedia_dpr  # wikipedia_dpr, wikisum_all_beir
 consistency=1

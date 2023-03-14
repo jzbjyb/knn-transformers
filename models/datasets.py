@@ -3,7 +3,7 @@ import os
 import json
 import random
 from operator import itemgetter
-from collections import Counter
+from collections import Counter, defaultdict
 import re
 import string
 import numpy as np
@@ -30,8 +30,8 @@ class BaseDataset:
             pred_ents: List[str] = [cls.normalize_answer(ent.text) for ent in cls.nlp(prediction).ents]
             gold_ents: List[str] = [cls.normalize_answer(ent.text) for ent in cls.nlp(gold).ents]
             num_common_ents: int = sum((Counter(pred_ents) & Counter(gold_ents)).values())
-            _p = num_common_ents / (len(pred_ents) or 1)
-            _r = num_common_ents / (len(gold_ents) or 1)
+            _p = (num_common_ents / len(pred_ents)) if len(pred_ents) else 1
+            _r = (num_common_ents / len(gold_ents)) if len(gold_ents) else 1
             assert _p <= 1 and _r <= 1
             _f1 = (2 * _p * _r) / ((_p + _r) or 1)
             p, r, f1 = max(p, _p), max(r, _r), max(f1, _f1)
@@ -1076,7 +1076,7 @@ class WikiSum(BaseDataset):
 
 
 class ELI5(BaseDataset):
-    raw_train_data_file: str = ''
+    raw_train_data_file: str = 'data/eli5/val_with_ref.jsonl'
     cot_examplars: List[Dict] = [
         {
             "id": "1zl9do",
@@ -1149,6 +1149,16 @@ class ELI5(BaseDataset):
         self.dataset = self.load_data()
 
     def load_data(self, split: str = 'validation'):
+        id2ctxs: Dict[str, List[str]] = defaultdict(list)
+        with open(self.raw_train_data_file, 'r') as fin:
+            for l in fin:
+                example = json.loads(l)
+                _id = example['id']
+                for out in example['output']:
+                    for prov in out['provenance']:
+                        ctx = prov['wikipedia_evidence'].strip()
+                        id2ctxs[_id].append(ctx)
+
         rawdata = load_dataset('kilt_tasks', name='eli5')
         dataset = []
         for i, example in enumerate(rawdata[split]):
@@ -1160,6 +1170,8 @@ class ELI5(BaseDataset):
                 if ans:
                     answers.append(ans)
             assert len(answers) >= 1
+            ctxs = id2ctxs[qid]
+            assert len(ctxs), 'no gold ctxs'
             output = self.output_template(cot=None, ans=answers[0])
             dataset.append({
                 'qid': qid,
@@ -1167,6 +1179,7 @@ class ELI5(BaseDataset):
                 'answer': answers[0],
                 'answers': answers,
                 'gold_output': output,
+                'ctxs': ctxs,
             })
         return Dataset.from_list(dataset)
 
