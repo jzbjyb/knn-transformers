@@ -7,8 +7,8 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=wow
-batch_size=8
+dataset=eli5
+batch_size=1
 model=code-davinci-002
 index_name=wikipedia_dpr  # wikipedia_dpr, wikisum_all_beir
 consistency=1

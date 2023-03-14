@@ -803,6 +803,7 @@ def compare(file1: str, file2: str, only_show_diff: bool = False, only_first_rig
                 print('')
 
                 print('^' * 100)
+                print('ID->', _id)
                 print('Q->', q)
                 print('C->', c)
                 print('A->', a)

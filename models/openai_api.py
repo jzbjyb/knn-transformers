@@ -9,7 +9,8 @@ import re
 import time
 import json
 import copy
-from collections import defaultdict
+from operator import itemgetter
+from collections import defaultdict, Counter
 from filelock import FileLock
 from multiprocessing import Process, Queue, Lock
 from multiprocessing.managers import BaseManager
@@ -269,6 +270,9 @@ class QueryAgent:
                 self.ret_frequency = self.max_generation_len
         self.regenerate_at_end = retrieval_kwargs.get('regenerate_at_end', False)
 
+        self.frequency_penalty = retrieval_kwargs.get('frequency_penalty', 0.0)
+        self.frequency_penalty_in_prompt = retrieval_kwargs.get('frequency_penalty_in_prompt', 0.0)
+
     @property
     def use_retrieval(self):
         return self.ret_frequency > 0 or self.ret_boundary or self.use_gold
@@ -287,7 +291,7 @@ class QueryAgent:
 
     def complete(
         self,
-        queries: List[str],
+        queries: List[Tuple[str, int]],
         params: Dict[str, Any],
         max_num_req_per_min: int = 10,
         max_retry: int = 5,  # retry before switching keys
@@ -312,10 +316,22 @@ class QueryAgent:
         if 'max_tokens' in params:  # TODO: OPT doesn't have this bug
             params['max_tokens'] = max(2, params['max_tokens'])  # openai returns nothing if set to 1
         logit_bias = dict()
+
         if force_generate:
             logit_bias={f'{force_generate[0]}': force_generate[1]}
         elif forbid_generate:
             logit_bias={f'{forbid_generate[0]}': -100}
+
+        # add penalty
+        if self.frequency_penalty_in_prompt:
+            assert len(queries) == 1, 'batching is not supported'
+            current_cases: List[str] = [q[-l:] if l else '' for q, l in queries]  # only use the generated content
+            counter = Counter(sum(self.tokenizer(current_cases)['input_ids'], []))
+            tokid2count: Dict[int, int] = dict(sorted(counter.items(), key=lambda x: (-x[1], x[0]))[:200])  # penalize at most 200 tokens
+            for tokid, count in tokid2count.items():
+                if tokid not in logit_bias:
+                    logit_bias[str(tokid)] = 0
+                logit_bias[str(tokid)] -= self.frequency_penalty_in_prompt * count
 
         # init key
         ori_api_key = api_key
@@ -335,12 +351,12 @@ class QueryAgent:
                 responses = openai.Completion.create(
                     api_key=api_key,
                     model=self.model,
-                    prompt=queries,
+                    prompt=list(map(itemgetter(0), queries)),
                     temperature=self.temperature,
                     top_p=self.top_p,
                     logprobs=0,
                     logit_bias=logit_bias,
-                    frequency_penalty=0.0,
+                    frequency_penalty=self.frequency_penalty,
                     **params)
                 generations = [ApiReturn(
                     prompt=q,
@@ -348,11 +364,11 @@ class QueryAgent:
                     tokens=r['logprobs']['tokens'],
                     probs=[np.exp(lp) for lp in r['logprobs']['token_logprobs']],
                     offsets=r['logprobs']['text_offset'],
-                    finish_reason=r['finish_reason']) for r, q in zip(responses['choices'], queries)]
+                    finish_reason=r['finish_reason']) for r, (q, l) in zip(responses['choices'], queries)]
                 logging.info(f'finish query with key {api_key[-5:]}')
                 if self.debug:
                     print('Params ->', params)
-                    print('Prompt ->', queries[0])
+                    print('Prompt ->', queries[0][0], queries[0][1])
                     print('Output ->', generations[0].text)
                     input('-' * 50)
             except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:  # limit-related errors
@@ -538,7 +554,7 @@ class QueryAgent:
                         final_outputs[i] += cont
                         final_queries[i] = query
                         traces[i].append((ar.prompt, cont))
-                        query.case += cont
+                        query.add_generation(cont)
                 apireturns = self.complete(
                     [q.format(use_ctx=self.use_ctx) for i, q in queries],
                     params={'max_tokens': self.max_generation_len - max_gen_len, 'stop': self.ret_boundary},
@@ -600,7 +616,7 @@ class QueryAgent:
                 if reason == 'stop':
                     pass
                 elif reason in {'length', 'boundary'}:
-                    query.case += cont
+                    query.add_generation(cont)
                     new_queries.append((i, query))
                     if len(generate_queries):
                         new_generate_queries.append(generate_queries[_i])
@@ -611,8 +627,8 @@ class QueryAgent:
             step_ind += 1
 
         if self.regenerate_at_end:  # regenerate given retrieval results
-            for initq, query in zip(init_queries, final_queries):
-                query.case = initq.case
+            for query in final_queries:
+                query.reset_generation()
             apireturns = self.complete(
                 [q.format(use_ctx=self.use_ctx) for q in final_queries],
                 params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym},
@@ -713,32 +729,34 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 1,
+        'topk': 3,
+        'frequency_penalty': 1.0,
+        'frequency_penalty_in_prompt': 1.0,
         'use_ctx': True,
-        'frequency': 1,
+        'frequency': 64,
         'boundary': [],
         #'boundary': ['Intermediate answer:'],
         #'boundary': ['")]'],
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 16,
+        'max_query_length': 64,
         'use_full_input_as_query': True,
-        'retrieval_at_beginning': True,
-        'look_ahead_steps': 0,
-        'look_ahead_truncate_at_boundary': None,
+        'retrieval_at_beginning': False,
+        'look_ahead_steps': 64,
+        'look_ahead_truncate_at_boundary': 'sentence',
         'look_ahead_filter_prob': 0.0,
-        'look_ahead_mask_prob': 0.0,
+        'look_ahead_mask_prob': 0.2,
         'look_ahead_boundary': [],
-        'only_use_look_ahead': False,
+        'only_use_look_ahead': True,
         'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         #'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
         'force_generate': None,
-        'forbid_generate_step': 0,
+        'forbid_generate_step': None,
         'truncate_at_prob': 0.0,
-        'truncate_at_boundary': None,
+        'truncate_at_boundary': 'sentence',
         'append_retrieval': False,
         'use_ctx_for_examplars': 'ret',
         'use_retrieval_instruction': False,

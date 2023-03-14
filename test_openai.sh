@@ -8,8 +8,10 @@ curl https://api.openai.com/v1/completions \
   -H 'Authorization: Bearer '${key} \
   -d '{
   "model": "code-davinci-002",
-  "prompt": "Tell me the name of the president of the US.",
+  "prompt": "What is water? What is water? What is water?",
   "max_tokens": 128,
   "temperature": 0,
-  "logprobs": 0
+  "logprobs": 0,
+  "echo": false,
+  "frequency_penalty": 1.0
 }'

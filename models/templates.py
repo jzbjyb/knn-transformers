@@ -26,6 +26,7 @@ class CtxPrompt:
         self.case = case
         self.qid = qid
         self.ind = 0
+        self.gen_len = 0
 
     @staticmethod
     def get_append_retrieval(ret_to_append: str, index: int = None):
@@ -39,6 +40,16 @@ class CtxPrompt:
         if 'demo' in adict:
             adict['demo'] = [cls.from_dict(d) for d in adict['demo']]
         return cls(**{k: adict[k] for k in ['demo', 'ctx', 'ctxs', 'case', 'qid'] if k in adict})
+
+    def add_generation(self, cont: str):
+        self.case += cont
+        self.gen_len += len(cont)
+
+    def reset_generation(self):
+        if self.gen_len <= 0:
+            return
+        self.case = self.case[:-self.gen_len]
+        self.gen_len = 0
 
     def change_ctx(self):
         assert len(self.ctxs)
@@ -97,7 +108,7 @@ class CtxPrompt:
         use_ret_instruction: bool = True
     ):
         # run on demo
-        demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=False) for d in self.demo])  # TODO: no retrieval for demo
+        demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=False)[0] for d in self.demo])  # TODO: no retrieval for demo
 
         #if use_ctx and self.ctx is None and len(self.ctxs):  # TODO: default is use all ctxs
         #    self.ctx = ' '.join([ctx for _, ctx in self.ctxs])
@@ -131,7 +142,7 @@ class CtxPrompt:
         else:
             elements.append(self.case)
 
-        return '\n\n'.join(elements)
+        return '\n\n'.join(elements), self.gen_len
 
 
 class RetrievalInstruction:
