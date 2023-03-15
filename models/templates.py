@@ -290,6 +290,23 @@ class ApiReturn:
             raise NotImplementedError
         return self
 
+    def truncate_at_substring(self, substr: str):
+        position = self.text.find(substr)
+        if position == -1:
+            return
+        self.text = self.text[:position]
+        i = 0
+        for i, off in enumerate(self.offsets):
+            if off - len(self.prompt) == position:
+                break
+            elif off - len(self.prompt) > position:  # the previous token span across the boundary
+                i = i - 1
+                assert i >= 0
+                break
+        self.tokens = self.tokens[:i]
+        self.probs = self.probs[:i]
+        self.offsets = self.offsets[:i]
+
     def use_as_query(
         self,
         low: float = None,

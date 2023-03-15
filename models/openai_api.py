@@ -261,8 +261,9 @@ class QueryAgent:
                     print('Prompt ->', generations[0].prompt)
                     print('Output ->', generations[0].text)
                     print('Output ->', generations[0].tokens)
-                    #print('q', f'|{queries[0].case}')
-                    #print('p', f'|{queries[0].gold_output}')
+                    print('Output ->', generations[0].probs)
+                    print('q', f'|{queries[0].case}')
+                    print('p', f'|{queries[0].gold_output}')
                     input('-' * 50)
             except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:  # limit-related errors
                 if retry >= max_retry:
@@ -441,8 +442,8 @@ class QueryAgent:
                     max_gen_len += self.ret_frequency
                 for ar in apireturns:  # check final sym
                     if self.final_stop_sym in ar.text:
-                        ar.text = ar.text.split(self.final_stop_sym, 1)[0]
                         ar.finish_reason = 'stop'
+                    ar.truncate_at_substring(self.final_stop_sym)
             elif self.ret_boundary:
                 if self.forbid_generate_step and self.retrieval_trigers and step_ind > 0:  # start from the second step to forbid the force_generate token
                     apireturns = self.complete(
@@ -634,8 +635,9 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 3,
-        'use_ctx': True,
+        'prefix_method': 'sentence',
+        'topk': 1,
+        'use_ctx': False,
         'frequency': 64,
         'boundary': [],
         #'boundary': ['Intermediate answer:'],
@@ -646,12 +648,12 @@ if __name__ == '__main__':
         'max_query_length': 64,
         'use_full_input_as_query': True,
         'retrieval_at_beginning': False,
-        'look_ahead_steps': 64,
-        'look_ahead_truncate_at_boundary': 'sentence',
+        'look_ahead_steps': 0,
+        'look_ahead_truncate_at_boundary': None,
         'look_ahead_filter_prob': 0.0,
-        'look_ahead_mask_prob': 0.2,
+        'look_ahead_mask_prob': 0.0,
         'look_ahead_boundary': [],
-        'only_use_look_ahead': True,
+        'only_use_look_ahead': False,
         'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         #'retrieval_trigers': [('\[Search\("', '")]')],
