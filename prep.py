@@ -169,18 +169,22 @@ def prep_kilt(
 def add_ref_to_kilt(
     dataset_name: str,
     split: str = 'validation',
-    output_file: str = None):
+    output_file: str = None,
+    skip_empty_ctx: bool = False):
     assert dataset_name in {'eli5', 'wow'}
 
     data = load_dataset('kilt_tasks', name=dataset_name)[split]
     wikipedia = Wikipedia()
 
     provnum2count: Dict[int, int] = defaultdict(lambda: 0)
+    examples: List[Tuple[int, Dict]] = []
     with open(output_file, 'w') as fout:
         for i, example in tqdm(enumerate(data), desc='format data'):
             # collect refs
             provnum = 0
+            ans = None
             for out in example['output']:
+                ans = out['answer'].strip() if ans is None else ans
                 for prov in out['provenance']:
                     wiki_id = prov['wikipedia_id']
                     ps, pe, cs, ce = prov['start_paragraph_id'], prov['end_paragraph_id'], prov['start_character'], prov['end_character']
@@ -189,6 +193,12 @@ def add_ref_to_kilt(
                     prov['wikipedia_evidence'] = evi
                     provnum += 1
             provnum2count[provnum] += 1
+            if skip_empty_ctx and provnum <= 0:
+                continue
+            examples.append((len(ans), example))
+
+        examples = sorted(examples, key=lambda x: -x[0])
+        for _, example in examples:
             fout.write(json.dumps(example) + '\n')
     print('provnum2count', [(k, v / len(data)) for k, v in provnum2count.items()])
 
@@ -1404,7 +1414,7 @@ if __name__ == '__main__':
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
         'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir', 'add_ref_to_kilt'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='eli5', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum', 'eli5', 'wow'])
+    parser.add_argument('--dataset', type=str, default='wow', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum', 'eli5', 'wow'])
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
 
@@ -1589,4 +1599,4 @@ if __name__ == '__main__':
     elif args.task == 'add_ref_to_kilt':
         dataset, split = args.inp
         out_file = args.out
-        add_ref_to_kilt(dataset, split, out_file)
+        add_ref_to_kilt(dataset, split, out_file, skip_empty_ctx=True)

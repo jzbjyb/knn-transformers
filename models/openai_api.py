@@ -20,7 +20,7 @@ from beir.retrieval.search.lexical import BM25Search
 import openai
 from .retriever import BM25
 from .templates import CtxPrompt, ApiReturn, RetrievalInstruction
-from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW
+from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, WoWLong
 
 logging.basicConfig(level=logging.INFO)
 
@@ -588,7 +588,7 @@ def write_worker(output_file: str, output_queue: Queue, size: int = None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow'])
+    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow', 'wow_train_1k'])
     parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003'])
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
@@ -634,32 +634,32 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 1,
+        'topk': 3,
         'use_ctx': True,
-        'frequency': 1,
+        'frequency': 64,
         'boundary': [],
         #'boundary': ['Intermediate answer:'],
         #'boundary': ['")]'],
         #'boundary': ['. '],
-        'use_gold': True,
+        'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 16,
+        'max_query_length': 64,
         'use_full_input_as_query': True,
-        'retrieval_at_beginning': True,
-        'look_ahead_steps': 0,
-        'look_ahead_truncate_at_boundary': None,
+        'retrieval_at_beginning': False,
+        'look_ahead_steps': 64,
+        'look_ahead_truncate_at_boundary': 'sentence',
         'look_ahead_filter_prob': 0.0,
-        'look_ahead_mask_prob': 0.0,
+        'look_ahead_mask_prob': 0.2,
         'look_ahead_boundary': [],
-        'only_use_look_ahead': False,
+        'only_use_look_ahead': True,
         'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         #'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
         'force_generate': None,
-        'forbid_generate_step': 0,
+        'forbid_generate_step': None,
         'truncate_at_prob': 0.0,
-        'truncate_at_boundary': None,
+        'truncate_at_boundary': 'sentence',
         'append_retrieval': False,
         'use_ctx_for_examplars': 'ret',
         'use_retrieval_instruction': False,
@@ -718,6 +718,9 @@ if __name__ == '__main__':
     elif args.dataset == 'wow':
         data = WoW(prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WoW.get_gold_ctxs
+    elif args.dataset == 'wow_train_1k':
+        data = WoWLong(jsonl_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = WoWLong.get_gold_ctxs
     elif args.dataset == 'wikisum_all_beir':
         data = WikiSum(args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WikiSum.get_gold_ctxs

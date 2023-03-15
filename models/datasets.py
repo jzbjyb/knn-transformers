@@ -1185,7 +1185,7 @@ class ELI5(BaseDataset):
 
 
 class WoW(BaseDataset):
-    raw_train_data_file: str = ''
+    raw_train_data_file: str = 'data/wow/val_with_ref.jsonl'
     cot_examplars: List[Dict] = [
         {
             "id": "540dc478-99d6-11ea-8a20-773209e30a7b_3",
@@ -1244,7 +1244,7 @@ class WoW(BaseDataset):
     cot_ret_test_input_template = lambda self, ques: f'Given the context, generate the next response. Context: {ques}\nResponse (with search): '
     cot_ret_output_template = cot_output_template
 
-    def __init__(self, prompt_type: str = 'cot'):
+    def __init__(self, jsonl_file: str = None, prompt_type: str = 'cot'):
         assert prompt_type in {'cot', 'cot_ret'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
@@ -1255,26 +1255,120 @@ class WoW(BaseDataset):
                 for k in ref_e:
                     if k not in e:
                         e[k] = ref_e[k]
-        self.dataset = self.load_data()
+        self.dataset = self.load_data(jsonl_file)
 
-    def load_data(self, split: str = 'validation'):
-        rawdata = load_dataset('kilt_tasks', name='wow')
+    def load_data(self, jsonl_file: str = None, split: str = 'validation'):
+        id2ctxs_file = jsonl_file or self.raw_train_data_file
+        id2ctxs: Dict[str, List[str]] = defaultdict(list)
+        with open(id2ctxs_file, 'r') as fin:
+            for l in fin:
+                example = json.loads(l)
+                _id = example['id']
+                for out in example['output']:
+                    for prov in out['provenance']:
+                        ctx = prov['wikipedia_evidence'].strip()
+                        id2ctxs[_id].append(ctx)
         dataset = []
-        for i, example in enumerate(rawdata[split]):
-            qid = example['id']
-            question = example['input']
-            answers: List[str] = []
-            for candidate in example['output']:
-                ans = candidate['answer'].strip()
-                if ans:
-                    answers.append(ans)
-            assert len(answers) >= 1
-            output = self.output_template(cot=None, ans=answers[0])
-            dataset.append({
-                'qid': qid,
-                'question': question,
-                'answer': answers[0],
-                'answers': answers,
-                'gold_output': output,
-            })
+        ids_in_demo = set(e['id'] for e in self.examplars)
+        if jsonl_file:
+            with open(jsonl_file, 'r') as fin:
+                for l in fin:
+                    example = json.loads(l)
+                    qid = example['id']
+                    if qid in ids_in_demo:
+                        continue
+                    question = example['input']
+                    answers: List[str] = []
+                    for candidate in example['output']:
+                        ans = candidate['answer'].strip()
+                        if ans:
+                            answers.append(ans)
+                    assert len(answers) >= 1
+                    ctxs = id2ctxs[qid]
+                    assert len(ctxs), 'no gold ctxs'
+                    output = self.output_template(cot=None, ans=answers[0])
+                    dataset.append({
+                        'qid': qid,
+                        'question': question,
+                        'answer': answers[0],
+                        'answers': answers,
+                        'gold_output': output,
+                        'ctxs': ctxs,
+                    })
+        else:
+            rawdata = load_dataset('kilt_tasks', name='wow')
+            for i, example in enumerate(rawdata[split]):
+                qid = example['id']
+                question = example['input']
+                answers: List[str] = []
+                for candidate in example['output']:
+                    ans = candidate['answer'].strip()
+                    if ans:
+                        answers.append(ans)
+                assert len(answers) >= 1
+                ctxs = id2ctxs[qid]
+                assert len(ctxs), 'no gold ctxs'
+                output = self.output_template(cot=None, ans=answers[0])
+                dataset.append({
+                    'qid': qid,
+                    'question': question,
+                    'answer': answers[0],
+                    'answers': answers,
+                    'gold_output': output,
+                    'ctxs': ctxs,
+                })
         return Dataset.from_list(dataset)
+
+
+class WoWLong(WoW):
+    raw_train_data_file: str = 'data/wow/val_with_ref.jsonl'
+    cot_examplars: List[Dict] = [
+        {
+            "id": "60f4c402-99d6-11ea-8a20-773209e30a7b_2",
+            "question": "I've recently tried to become an expert on hoarding, since my mom apparently has become one. It was really interesting to find out that natural disasters can lead to people becoming hoarders, and I think that's what happened to her with the last hurricane.\nAren't you concerned about her health?\nAbsolutely, especially because hoarders can make their homes into fire hazards what with all the blocked exists. This is not to mention the vermin infestations, or the waste from the animals she's collecting.. I'm worried about the common problem of stacks of things possibly falling onto her, as well.\nGood lord. What are some other factors that can lead to hoarding? It sounds like a form of OCD.",
+            "answer_raw": "You're absolutely right, it is. Excessive acquisition of items, and the inability/unwillingness to get rid of the large amassed amount of things they collect, is a pattern of behavior that comes about because it apparently causes them distress/impairment to lose these things. It's not just health risks... She's dealt with the common economic burden and loss of family/friends wanting to deal with her, which often happens to hoarders",
+            "answer": "You're absolutely right, it is. Excessive acquisition of items, and the inability/unwillingness to get rid of the large amassed amount of things they collect, is a pattern of behavior that comes about because it apparently causes them distress/impairment to lose these things. It's not just health risks... She's dealt with the common economic burden and loss of family/friends wanting to deal with her, which often happens to hoarders."
+        },
+        {
+            "id": "64b2d5e8-99d6-11ea-8a20-773209e30a7b_3",
+            "question": "I play guitar and I own two Fender Guitars in my collection. They are the iconic Stratocaster and Telecaster. Both were designed by Leo Fender in California in the 50s. \nI bet they sound amazing. I love the sound of guitars.\nThe telecaster is the 1st commercial successful guitar. Leo copied Ford's assembly line approach. Many players use tele in diverse music styles, Johhny Greenwood, Radiohead, Bruce Springsteen and Luther Perkins from Johnny Cash all played telecasters.\nWow, that must have been a long time ago. Johnny Cash has passed away already.\nYes, the telecaster came out in the early 1950s. Perkins used it until his un-timely death in 1968.\nIt is amazing how music changes over time and yet some beautiful elements remain the same.",
+            "answer_raw": "Agreed, George Harrison also used a telecaster. His was made of Rosewood which is rare and expensive. He played on the roof of Abbey Roads studios in the Beatles last live performance. George was also a really into Indian Classical music and played sitar.",
+            "answer": "Agreed, George Harrison also used a telecaster. His was made of Rosewood which is rare and expensive. He played on the roof of Abbey Roads studios in the Beatles last live performance. George was also a really into Indian Classical music and played sitar."
+        },
+        {
+            "id": "533b8602-99d6-11ea-8a20-773209e30a7b_2",
+            "question": "I really like dogs and have two myself. I know they come in many shape, sizes and colors and are great companions. Do you like dogs?\nI love dogs! I have a Lab myself, what kind of dog do you have?\nI have a Chihuahua and a Shi-tzu. After getting mine, I can see why they are termed, \"man's best friend\", but woman's best friend applies too!\nI had a Shi-tzu as a kid, he was naughy but fun.  Do tou know how long have dogs been living around humans?",
+            "answer_raw": "I don't know that, but I do know they were the first species to be bred domestically. Of course, they have been continued to be bred throughout the years for various reasons, including behavior, physical attributes and sensory capabilities.",
+            "answer": "I don't know that, but I do know they were the first species to be bred domestically. Of course, they have been continued to be bred throughout the years for various reasons, including behavior, physical attributes and sensory capabilities."
+        },
+        {
+            "id": "61e138f0-99d6-11ea-8a20-773209e30a7b_3",
+            "question": "I drink  hydroxyl alcohol from time to time, clear liquors are allowed on the Keto diet which is nice\nI have never heard of that, what exactly is that?\nHydroxyl alcohol or Ketogenic dieting?\nHydroxyl Alcohol, but really both!\nHydroxyl Alcohol is any organic compound that is bound to a saturated carbon atom. The Ketogenic diet is a high fat high protein diet that functions with very limited carbs for glucogenisi\nHuh, that seems like an interesting diet, I wonder what type of food you usually eat as part of a keto diet",
+            "answer_raw": "Honestly, everything you would eat just made differently. I had pizza for lunch, except instead of crust, you throw mozzarella on a pan and it becomes the crust, tastes identical to thin crust. It's a diet that can actually regulate epilepsy in children",
+            "answer": "Honestly, everything you would eat just made differently. I had pizza for lunch, except instead of crust, you throw mozzarella on a pan and it becomes the crust, tastes identical to thin crust. It's a diet that can actually regulate epilepsy in children."
+        },
+        {
+            "id": "6f3ce152-99d6-11ea-8a20-773209e30a7b_3",
+            "question": "I really like Granny Smith apples. Can you tell me anything about them?\nI love cooking with granny smith apples that have such a great flavor for a cooking apple. From my memory the origins are a bit fuzzy, but they were an accidental discovery by a lady in Australia in 1868.\nOh wow was she a Grandma by any chance lol.\nI imagine she was, the apple variety was discovered shortly before her passing. She gave birth to 8 children in her life, 5 survived infancy so I would say there was a good chance she had grandkids. \nWell that is quite a progeny. I am sure she has many ancestors. So what color are the apples, red?\nGranny Smith apples are typically green and turn yellow when they are over-ripened (aka rotten). They are a bit tart. \nOh ok. I seem to remember they are often dipped in caramel and sold at fairs. They are quite delicious.",
+            "answer_raw": "They are also good for eating raw or dipped in caramel. From what I understand she found the tree growing out of a pile of her rubbish and it actually had really good apples. It is theorized that one of her apples trees cross pollinated with a crab apple.",
+            "answer": "They are also good for eating raw or dipped in caramel. From what I understand she found the tree growing out of a pile of her rubbish and it actually had really good apples. It is theorized that one of her apples trees cross pollinated with a crab apple."
+        },
+        {
+            "id": "717286e8-99d6-11ea-8a20-773209e30a7b_2",
+            "question": "I love watching Hockey.\nOh awesome, but consider this there are actually different variations of hockey like bandy, field hockey, and ice hockey! Many people dont know that about it.\nI've never heard of bandy.\nYes the origin of the word hockey is unknown but it is thought of as a derivative of hoquet which is a middle french word for shepherd's stave.\nWhen did hockey first start?",
+            "answer_raw": "The first recorded use of the word hockey was in 1773 in the book of Juvenile sports nd pastimes to which are prefixed, memoirs of the author: including  anew mode to infant education. All of that is the title so it could have been played beforehand but that is the first recorded use of the title hockey!",
+            "answer": "The first recorded use of the word hockey was in 1773 in the book of Juvenile sports nd pastimes to which are prefixed, memoirs of the author: including  anew mode to infant education. All of that is the title so it could have been played beforehand but that is the first recorded use of the title hockey!"
+        },
+        {
+            "id": "530735f0-99d6-11ea-8a20-773209e30a7b_2",
+            "question": "Reading is my hubby ,and you?\nI like to read. It's a very complex process. It's a way to decode symbols and get meaning from them.\nThat's nice to know! How many hours do you spend studying?\nWell, reading takes a lot of practice and refinement. I probably spend 30 hours a week reading. There are a lot of tips and tricks I know for reading better.\nThat's good! What do you know about reading speed?",
+            "answer_raw": "Well, there are a lot of strategies. To improve your reading speed I recommend Looking at the center of the column you are reading and moving just your eyes. Try to use your peripheral vision to see the edges of the columns. What do you like to read?",
+            "answer": "Well, there are a lot of strategies. To improve your reading speed I recommend Looking at the center of the column you are reading and moving just your eyes. Try to use your peripheral vision to see the edges of the columns. What do you like to read?"
+        },
+        {
+            "id": "5c5660fe-99d6-11ea-8a20-773209e30a7b_3",
+            "question": "I love cats but i have terrible allergies to them.  It is an alergic reaction to something the cat produces.  Are you allergic?\nOh no! I wonder if it is to the cat's dander? No I am not alllergic to cats. What symptoms do you experience?\nI have a coughing fit, wheezing, chest tightening, itching, rash, watering eyes - you name it.  I get it!\nThat's awful. Have you seen a doctor about it?\nYes the doctor just explained that an allergen is a type of antigen that produces an abnornally vigorous immune response. and he basically recommended that I stay away from cats.  Not much else can be done aparently.\nWow, that's no fun at all.",
+            "answer_raw": "Nope.  My immune system just doesnt cope with cats.  It works well detecting a wide variety of agents known as pathogens that it does not like, then it reacts! its ok though I just have dogs instead.  They are lovely pets to have too.",
+            "answer": "Nope.  My immune system just doesnt cope with cats.  It works well detecting a wide variety of agents known as pathogens that it does not like, then it reacts! its ok though I just have dogs instead.  They are lovely pets to have too."
+        }
+    ]  # shuffled
