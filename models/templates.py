@@ -1,9 +1,14 @@
 from typing import List, Dict, Any, Tuple
+from operator import itemgetter
+import spacy
 
 
 class CtxPrompt:
     ctx_position: str = 'begin'
     ret_instruction: "RetrievalInstruction" = None
+    format_reference_method: str = 'default'
+    add_ref_suffix: str = None
+    add_ref_prefix: str = None
 
     def __init__(
         self,
@@ -12,6 +17,7 @@ class CtxPrompt:
         ctxs: List[Tuple[str, str]] = [],
         case: str = None,
         qid: str = None,
+        gold_output: str = None,
     ):
         assert self.ctx_position in {'before_case', 'begin'}
         self.demo = demo
@@ -21,7 +27,10 @@ class CtxPrompt:
         self.ctxs_idx = 0
         self.case = case
         self.qid = qid
+        self.gold_output = gold_output
         self.ind = 0
+        self.gen_len = 0
+        self.gold_used_len = 0
 
     @staticmethod
     def get_append_retrieval(ret_to_append: str, index: int = None):
@@ -34,7 +43,20 @@ class CtxPrompt:
         adict = dict(adict)
         if 'demo' in adict:
             adict['demo'] = [cls.from_dict(d) for d in adict['demo']]
-        return cls(**{k: adict[k] for k in ['demo', 'ctx', 'ctxs', 'case', 'qid'] if k in adict})
+        return cls(**{k: adict[k] for k in ['demo', 'ctx', 'ctxs', 'case', 'qid', 'gold_output'] if k in adict})
+
+    def add_generation(self, cont: str):
+        self.case += cont
+        self.gen_len += len(cont)
+        if self.gold_used_len != 0:  # use gold
+            self.gold_output = self.gold_output[self.gold_used_len:]
+            self.gold_used_len = 0
+
+    def reset_generation(self):
+        if self.gen_len <= 0:
+            return
+        self.case = self.case[:-self.gen_len]
+        self.gen_len = 0
 
     def change_ctx(self):
         assert len(self.ctxs)
@@ -64,10 +86,16 @@ class CtxPrompt:
             else:
                 raise NotImplementedError
 
-    def format_reference(self, ref: str, method: str = 'default'):
-        assert method in {'default', 'ignore', 'ignore_for_retrieval_instruct'}
+    @classmethod
+    def format_reference(cls, ref: str):
+        if cls.add_ref_suffix and not ref.endswith(cls.add_ref_suffix):
+            ref += cls.add_ref_suffix
+        if cls.add_ref_prefix and not ref.startswith(cls.add_ref_prefix):
+            ref = cls.add_ref_prefix + ref
+        method = cls.format_reference_method
+        assert method in {'default', 'ignore', 'ignore_for_retrieval_instruct', 'short_ignore'}
         if method == 'default':
-            return 'Reference:\n' + ref
+            return 'Reference: ' + ref
         if method == 'ignore':
             formatted = [
                 '1. The reference below might be helpful when answering questions but it is noisy. Free free to ignore irrelevant information in it.', ref.strip(),
@@ -76,20 +104,38 @@ class CtxPrompt:
         if method == 'ignore_for_retrieval_instruct':
             formatted = ['The reference below might be helpful when answering questions but it is noisy. Free free to ignore irrelevant information in it.', ref.strip()]
             return '\n\n'.join(formatted)
+        if method == 'short_ignore':
+            formatted = ['The reference below might be helpful but it is noisy. Free free to ignore irrelevant information in it:', ref.strip()]
+            return ' '.join(formatted)
         raise NotImplementedError
+
+    def get_prefix(
+            self,
+            qagent: "QueryAgent",
+            prefix_method: str = 'sentence') -> Tuple[str, int]:
+        if not self.gold_output:  # finish
+            return qagent.final_stop_sym, 0
+        if prefix_method == 'sentence':
+            prefix, self.gold_used_len = ApiReturn.get_sent(self.gold_output, position='begin')
+            return prefix, 0
+        elif prefix_method == 'all':
+            prefix, self.gold_used_len = self.gold_output, len(self.gold_output)
+            return prefix, 0
+        else:
+            raise NotImplementedError
 
     def format(
         self,
         use_ctx: bool = False,
         use_ret_instruction: bool = True
     ):
-        if use_ctx and self.ctx is None:  # default is use all ctxs
-            self.ctx = ' '.join([ctx for _, ctx in self.ctxs])
-        use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
+        # run on demo
+        demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=False)[0] for d in self.demo])  # TODO: no retrieval for demo
 
-        demo_formatted: str = '\n\n'.join([d.format(use_ctx=False, use_ret_instruction=False) for d in self.demo])  # TODO: no retrieval for demo
-        ref = self.format_reference(self.ctx, method='ignore') if use_ctx else None
-        task, ret, ensemble = self.ret_instruction.format() if use_ret_instruction else (None, None, None)
+        use_ctx = use_ctx and self.ctx is not None
+        use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
+        ref = self.format_reference(self.ctx) if use_ctx else None
+        task, ret, ensemble = self.ret_instruction.format(use_ctx=use_ctx) if use_ret_instruction else (None, None, None)
         elements: List[str] = []
 
         if use_ctx and self.ctx_position == 'begin':
@@ -112,46 +158,208 @@ class CtxPrompt:
             elements.append(ensemble)
 
         if use_ctx and self.ctx_position == 'before_case':
-            elements.append(ref)
+            elements.append(ref + '\n' + self.case)
+        else:
+            elements.append(self.case)
 
-        # append test case
-        elements.append(self.case)
+        return '\n\n'.join(elements), self.gen_len
 
-        return '\n\n'.join(elements)
+
+class ApiReturn:
+    EOS = '<|endoftext|>'
+    nlp = spacy.load('en_core_web_sm')
+    min_sent_len = 5
+
+    def __init__(
+        self,
+        prompt: str,
+        text: str,
+        tokens: List[str] = [],
+        probs: List[float] = [],
+        offsets: List[int] = [],
+        finish_reason: str = 'stop',
+        skip_len: int = 0,
+    ):
+        self.prompt = prompt
+        self.text = text
+        assert len(tokens) == len(probs) == len(offsets)
+        self.tokens = tokens
+        self.probs = probs
+        self.offsets = offsets
+        self.finish_reason = finish_reason
+        if self.finish_reason is None:
+            self.finish_reason = 'stop'  # TODO: a bug from openai?
+
+        if skip_len:  # skip `skip_len` chars at the beginning
+            self.text = self.text[skip_len:]
+            i = 0
+            for i, off in enumerate(self.offsets):
+                if off == skip_len:
+                    break
+                elif off > skip_len:  # the previous token span across the boundary
+                    i = i - 1
+                    assert i >= 0
+                    break
+            self.tokens = self.tokens[i:]
+            self.probs = self.probs[i:]
+            self.offsets = self.offsets[i:]
+
+    @property
+    def num_tokens(self):
+        return len(self.tokens)
+
+    @property
+    def has_endoftext(self):
+        return self.EOS in self.tokens
+
+    @classmethod
+    def get_sent(cls, text: str, position: str = 'begin'):
+        doc = cls.nlp(text)
+        if position == 'begin':
+            break_at = len(text)
+            for sent in doc.sents:
+                if sent.end_char >= cls.min_sent_len:
+                    break_at = sent.end_char
+                    break
+            return text[:break_at], break_at
+        if position == 'end':
+            sents = list(doc.sents)
+            break_at = 0
+            for i in range(len(sents)):
+                sent = sents[len(sents) - i - 1]
+                if len(text) - sent.start_char >= cls.min_sent_len:  # TODO: argument
+                    break_at = sent.start_char
+                    break
+            return text[break_at:], break_at
+        raise NotImplementedError
+
+    def truncate_at_prob(self, low: float):
+        if self.num_tokens <= 1:
+            return self
+
+        break_point = self.num_tokens
+        for i in range(self.num_tokens):
+            t, p, o = self.tokens[i], self.probs[i], self.offsets[i]
+            if p <= low:
+                break_point = i
+                break
+        if break_point == 0 and self.num_tokens > 0:  # avoid deadlock
+            break_point = 1
+
+        while break_point < self.num_tokens:  # truncation
+            assert break_point > 0
+            keep = self.offsets[break_point] - len(self.prompt)
+            if keep <= 0:
+                break_point += 1
+                continue
+
+            self.text = self.text[:keep]
+            self.tokens = self.tokens[:break_point]
+            self.probs = self.probs[:break_point]
+            self.offsets = self.offsets[:break_point]
+            self.finish_reason = 'boundary'
+            break
+
+        return self
+
+    def truncate_at_boundary(self, unit: str = 'sentence'):
+        if self.num_tokens <= 1:
+            return self
+
+        if unit == 'sentence':
+            doc = self.nlp(self.text)
+            break_at = len(self.text)
+            for sent in doc.sents:
+                if sent.end_char >= self.min_sent_len:
+                    break_at = sent.end_char
+                    break
+
+            if break_at > 0 and break_at < len(self.text):  # truncation
+                i = 0
+                for i in range(self.num_tokens):
+                    if self.offsets[i] - len(self.prompt) >= break_at:
+                        break_at = self.offsets[i] - len(self.prompt)
+                        break
+                assert i > 0 and break_at > 0
+                self.text = self.text[:break_at]
+                self.tokens = self.tokens[:i]
+                self.probs = self.probs[:i]
+                self.offsets = self.offsets[:i]
+                self.finish_reason = 'boundary'
+        else:
+            raise NotImplementedError
+        return self
+
+    def use_as_query(
+        self,
+        low: float = None,
+        mask: float = None
+    ):
+        if low is None and mask is None:
+            return self.text
+        if low:
+            ok = False
+            for p in self.probs:
+                if p <= low:
+                    ok = True
+                    break
+            return self.text if ok else ''
+        elif mask:
+            keep = [(t if p > mask else ' ') for t, p in zip(self.tokens, self.probs)]
+            keep = ''.join(keep).strip()
+            return keep
 
 
 class RetrievalInstruction:
-    toolformer_instruction: Dict[str, Any] = {
+    cot_instruction: Dict[str, Any] = {
         'retrieval': '1. You should use a Search API to look up information. You can do so by writing "[Search(term)]" where "term" is the search term you want to look up. For example:',
-        'task': '2. You should answer a question by thinking step-by-step. You can do so by first write out the reasoning steps and then draw you conclusion. For example:',
-        'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw you conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible.',
+        'task': '2. You should answer questions by thinking step-by-step. You can do so by first write out the reasoning steps and then draw the conclusion. For example:',
+        'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw then conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible.',
         #'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw you conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible. However, you should not directly copy chunks of words from "reference".',
         'examplars': [
             {
                 'question': 'But what are the risks during production of nanomaterials?',
+                'ctxs': [(None, 'The increased production of manufactured nanomaterials (MNMs) and their use in consumer and industrial products means that workers in all countries will be at the front line of any exposure, placing...')],
                 'answer': '[Search("nanomaterial production risks")] Some nanomaterials may give rise to various kinds of lung damage.',
             },
             {
                 'question': 'The colors on the flag of Ghana have the following meanings.',
+                'ctxs': [(None, "The flag of Ghana comprises of the Pan-African colors of red, yellow and green. These colors are horizontal stripes that make up the background of the flag. Red is represents the nation's fight for independence, the gold is a sign of the country's mineral wealth, and the green is a representation of the country's natural wealth...")],
                 'answer': 'Red is for [Search("Ghana flag red meaning")] the blood of martyrs, green for forests, and gold for mineral wealth.',
             },
             {
                 'question': 'Metformin is the first-line drug for what?',
+                'ctxs': [(None, "Metformin, sold under the brand name Glucophage, among others, is the main first-line medication for the treatment of type 2 diabetes,[6][7][8][9] particularly in people who are overweight.[7] It is also used in the treatment of polycystic ovary syndrome...")],
                 'answer': '[Search("Metformin first-line drug")] patients with type 2 diabetes and obesity.'
             }
         ]
     }
 
-    def __init__(self, method: str = 'toolformer', fewshot: int = None):
+    summary_instruction: Dict[str, Any] = {
+        'task': '2. You should generate a short paragraph of summary for an entity. For example:',
+        'ensemble': '3. Now, you should combine the aforementioned two abilities. You should generate a short paragraph of summary for an entity and utilize the Search API "[Search(term)]" whenever possible.',
+    }
+
+    def __init__(self, method: str = 'cot', fewshot: int = None):
         self.instruction = getattr(self, f'{method}_instruction')
+        for k, v in self.cot_instruction.items():
+            if k not in self.instruction:
+                self.instruction[k] = v
         self.fewshot = len(self.instruction['examplars']) if fewshot is None else self.fewshot
 
-    def format(self) -> Tuple[str, str]:
+    def format(self, use_ctx: bool = False) -> Tuple[str, str]:
         demos: List[str] = []
         for i in range(self.fewshot):
             q = self.instruction['examplars'][i]['question']
             a = self.instruction['examplars'][i]['answer']
-            demos.append(f'Question: {q}\nAnswer (with Search): {a}')
+            if use_ctx:
+                ctxs = self.instruction['examplars'][i]['ctxs']
+                assert CtxPrompt.ctx_position == 'before_case'
+                ref = CtxPrompt.format_reference(' '.join(map(itemgetter(1), ctxs)))
+                demo = f'{ref}\nQuestion: {q}\nAnswer (with Search): {a}'
+            else:
+                demo = f'Question: {q}\nAnswer (with Search): {a}'
+            demos.append(demo)
         task = self.instruction['task']
         ret = self.instruction['retrieval'] + '\n\n' + '\n\n'.join(demos)
         ensemble = self.instruction['ensemble']
