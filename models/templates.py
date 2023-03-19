@@ -121,6 +121,11 @@ class CtxPrompt:
         elif prefix_method == 'all':
             prefix, self.gold_used_len = self.gold_output, len(self.gold_output)
             return prefix, 0
+        elif prefix_method.startswith('sentence_first:'):
+            firstk = int(prefix_method[len('sentence_first:'):])
+            prefix, self.gold_used_len = ApiReturn.get_sent(self.gold_output, position='begin')
+            prefix = qagent.get_tokens(prefix, topk=firstk)[0]
+            return prefix, None
         else:
             raise NotImplementedError
 
@@ -218,8 +223,10 @@ class ApiReturn:
         if position == 'begin':
             break_at = len(text)
             for sent in doc.sents:
-                if sent.end_char >= cls.min_sent_len:
-                    break_at = sent.end_char
+                # remove trailing spaces which is usually tokenized into the next token of the next sentence by GPT tokeniers
+                num_trail_spaces = len(sent.text) - len(sent.text.rstrip())
+                if sent.end_char - num_trail_spaces >= cls.min_sent_len:
+                    break_at = sent.end_char - num_trail_spaces
                     break
             return text[:break_at], break_at
         if position == 'end':
@@ -270,8 +277,10 @@ class ApiReturn:
             doc = self.nlp(self.text)
             break_at = len(self.text)
             for sent in doc.sents:
-                if sent.end_char >= self.min_sent_len:
-                    break_at = sent.end_char
+                # remove trailing spaces which is usually tokenized into the next token of the next sentence by GPT tokeniers
+                num_trail_spaces = len(sent.text) - len(sent.text.rstrip())
+                if sent.end_char - num_trail_spaces >= self.min_sent_len:
+                    break_at = sent.end_char - num_trail_spaces
                     break
 
             if break_at > 0 and break_at < len(self.text):  # truncation

@@ -80,7 +80,7 @@ if [[ ${debug} == "true" ]]; then
         --output test.jsonl \
         --num_shards 1 \
         --shard_id 0 \
-        --openai_keys "${keys[0]}" \
+        --openai_keys ${keys[0]} \
         --debug
     exit
 fi

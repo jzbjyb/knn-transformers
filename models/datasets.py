@@ -25,7 +25,7 @@ class BaseDataset:
     ):
         if type(ground_truth) is str:
             ground_truth = [ground_truth]
-        p = r = f1 = 0
+        p = r = f1 = num_ent = 0
         for gold in ground_truth:
             pred_ents: List[str] = [cls.normalize_answer(ent.text) for ent in cls.nlp(prediction).ents]
             gold_ents: List[str] = [cls.normalize_answer(ent.text) for ent in cls.nlp(gold).ents]
@@ -35,7 +35,9 @@ class BaseDataset:
             assert _p <= 1 and _r <= 1
             _f1 = (2 * _p * _r) / ((_p + _r) or 1)
             p, r, f1 = max(p, _p), max(r, _r), max(f1, _f1)
-        return {'ent_f1': f1, 'ent_precision': p, 'ent_recall': r}
+            num_ent += len(gold_ents)
+        num_ent /= len(ground_truth)
+        return {'ent_f1': f1, 'ent_precision': p, 'ent_recall': r, 'num_ent': num_ent}
 
     @classmethod
     def exact_match_score(

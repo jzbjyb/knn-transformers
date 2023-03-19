@@ -153,6 +153,14 @@ class QueryAgent:
     def clean_retrieval(texts: List[str]):
         return ' '.join(texts).replace('\n', ' ')
 
+    def get_tokens(self, text: str, topk: int) -> Tuple[str, int]:
+        assert topk >= 1
+        tokenized = self.tokenizer(text, return_offsets_mapping=True)
+        ids, offsets = tokenized['input_ids'][:topk], tokenized['offset_mapping'][:topk]
+        prefix = self.tokenizer.decode(ids)
+        last_position = offsets[-1][1]
+        return prefix, last_position
+
     def retrieve(self, queries: List[str], is_question: bool = False):
         mql = None if (self.use_full_input_as_query and is_question) else self.max_query_length
         ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
@@ -203,7 +211,11 @@ class QueryAgent:
         if self.prefix_method:
             echo = True
             prefixes: List[Tuple[str, int]] = [q.get_prefix(qagent=self, prefix_method=self.prefix_method) for q in queries]
-            params['max_tokens'] = max(map(itemgetter(1), prefixes))
+            to_gen_len = set(map(itemgetter(1), prefixes))
+            if None in to_gen_len:  # generate follow original settings
+                pass
+            else:  # generate `to_gen_len` tokens
+                params['max_tokens'] = max(to_gen_len)
             assert len(prompts_to_issue) == len(prefixes)
             for i in range(len(prompts_to_issue)):
                 prompts_to_issue[i] += prefixes[i][0]
@@ -252,7 +264,7 @@ class QueryAgent:
                     tokens=r['logprobs']['tokens'],
                     probs=[np.exp(lp) if lp is not None else lp for lp in r['logprobs']['token_logprobs']],
                     offsets=r['logprobs']['text_offset'],
-                    finish_reason=r['finish_reason'],
+                    finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
                     skip_len=len(q) if echo else 0) for r, (q, _) in zip(responses['choices'], prompts)]
 
                 logging.info(f'finish query with key {api_key[-5:]}')
@@ -260,11 +272,11 @@ class QueryAgent:
                     print('Params ->', params)
                     print('Prompt ->', generations[0].prompt)
                     print('Output ->', generations[0].text)
-                    print('Output ->', generations[0].tokens)
-                    print('Output ->', generations[0].probs)
-                    print('q', f'|{queries[0].case}')
-                    print('p', f'|{queries[0].gold_output}')
-                    input('-' * 50)
+                    print('Stop ->', generations[0].finish_reason)
+                    print('Tokens ->', generations[0].tokens)
+                    print('Probs ->', generations[0].probs)
+                    print('Gold ->', queries[0].gold_output)
+                    input('-' * 50 + '\n')
             except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:  # limit-related errors
                 if retry >= max_retry:
                     if return_key_func:  # return key
@@ -320,19 +332,7 @@ class QueryAgent:
         api_key: str = None,
     ):
         if self.use_retrieval:
-            if self.use_gold:  # directly generate all with gold context
-                for query in queries:
-                    query.ctx = ' '.join(query.ctxs)
-                ars = self.complete(
-                    queries,
-                    params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym},
-                    api_key=api_key)
-                outputs = [ar.text for ar in ars]
-                probs = [ar.probs for ar in ars]
-                traces = [[(ar.prompt, ar.text)] for ar in ars]
-                return outputs, probs, None, traces
-            else:
-                return self.ret_prompt(queries, api_key=api_key)
+            return self.ret_prompt(queries, api_key=api_key)
         else:  # directly generate all without gold context
             ars = self.complete(
                 queries,
@@ -391,36 +391,40 @@ class QueryAgent:
             assert len(look_aheads) == len(queries)
 
             # send queries to index
-            if generate_queries:  # some queries might be None which means no queries are generated
-                assert len(generate_queries) == len(queries)
-                queries_to_issue = [lh if self.only_use_look_ahead else (gq + lh) for gq, lh in zip(generate_queries, look_aheads)]
+            if self.use_gold:
+                for i, q in queries:
+                    q.update_retrieval(' '.join(q.ctxs), method='replace')  # use all gold ctx
             else:
-                # TODO: only use question
-                #queries_to_issue = [lh if self.only_use_look_ahead else (q.case.split('\n')[0].split(':', 1)[1].strip() + lh)
-                #    for (i, q), lh in zip(queries, look_aheads)]
-                queries_to_issue = [lh if self.only_use_look_ahead else (q.case + lh) for (i, q), lh in zip(queries, look_aheads)]
-            if self.debug:
-                print('Query ->', queries_to_issue[0])
-            nonemp_queries_to_issue = [q for q in queries_to_issue if q]
-            if nonemp_queries_to_issue and (not self.retrieval_at_beginning or first_ret):
-                # (bs, ret_topk) * 2
-                ctx_ids, ctx_texts = self.retrieve(nonemp_queries_to_issue, is_question=first_ret)
-                first_ret = False
-                idx = -1
-                for _i, (i, q) in enumerate(queries):
-                    if queries_to_issue[_i]:
-                        idx += 1
-                        if self.use_gold_iterative:
-                            ret_id, ret_text = q.change_ctx()
-                            ret_id = [ret_id]
-                        else:
-                            ret_id, ret_text = ctx_ids[idx].tolist(), self.clean_retrieval(ctx_texts[idx])
-                        final_retrievals[i].append(ret_id)
-                        if self.append_retrieval:
-                            q.ctx = None
-                            q.append_retrieval(ret_text, add_index=False)
-                        else:
-                            q.update_retrieval(ret_text, method=self.ctx_increase)
+                if generate_queries:  # some queries might be None which means no queries are generated
+                    assert len(generate_queries) == len(queries)
+                    queries_to_issue = [lh if self.only_use_look_ahead else (gq + lh) for gq, lh in zip(generate_queries, look_aheads)]
+                else:
+                    # TODO: only use question
+                    #queries_to_issue = [lh if self.only_use_look_ahead else (q.case.split('\n')[0].split(':', 1)[1].strip() + lh)
+                    #    for (i, q), lh in zip(queries, look_aheads)]
+                    queries_to_issue = [lh if self.only_use_look_ahead else (q.case + lh) for (i, q), lh in zip(queries, look_aheads)]
+                if self.debug:
+                    print(f'Query -> !{queries_to_issue[0]}!')
+                nonemp_queries_to_issue = [q for q in queries_to_issue if q]
+                if nonemp_queries_to_issue and (not self.retrieval_at_beginning or first_ret):
+                    # (bs, ret_topk) * 2
+                    ctx_ids, ctx_texts = self.retrieve(nonemp_queries_to_issue, is_question=first_ret)
+                    first_ret = False
+                    idx = -1
+                    for _i, (i, q) in enumerate(queries):
+                        if queries_to_issue[_i]:
+                            idx += 1
+                            if self.use_gold_iterative:
+                                ret_id, ret_text = q.change_ctx()
+                                ret_id = [ret_id]
+                            else:
+                                ret_id, ret_text = ctx_ids[idx].tolist(), self.clean_retrieval(ctx_texts[idx])
+                            final_retrievals[i].append(ret_id)
+                            if self.append_retrieval:
+                                q.ctx = None
+                                q.append_retrieval(ret_text, add_index=False)
+                            else:
+                                q.update_retrieval(ret_text, method=self.ctx_increase)
             generate_queries = []
 
             # complete
@@ -635,9 +639,9 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'prefix_method': 'sentence',
-        'topk': 1,
-        'use_ctx': False,
+        'prefix_method': 'sentence_first:1000',
+        'topk': 3,
+        'use_ctx': True,
         'frequency': 64,
         'boundary': [],
         #'boundary': ['Intermediate answer:'],
@@ -647,7 +651,7 @@ if __name__ == '__main__':
         'use_gold_iterative': False,
         'max_query_length': 64,
         'use_full_input_as_query': True,
-        'retrieval_at_beginning': False,
+        'retrieval_at_beginning': True,
         'look_ahead_steps': 0,
         'look_ahead_truncate_at_boundary': None,
         'look_ahead_filter_prob': 0.0,
