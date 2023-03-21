@@ -8,10 +8,10 @@ curl https://api.openai.com/v1/completions \
   -H 'Authorization: Bearer '${key} \
   -d '{
   "model": "code-davinci-002",
-  "prompt": "What is water? What is water? What is water?",
+  "prompt": "I like to bike.",
   "max_tokens": 0,
   "temperature": 0,
   "logprobs": 0,
   "echo": true,
-  "frequency_penalty": 1.0
+  "frequency_penalty": 0.0
 }'

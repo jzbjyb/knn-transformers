@@ -1116,7 +1116,7 @@ def eval(
     final_metrics = {k: 0 for k in [
         'correct', 'incorrect', 'wrongformat',
         'f1', 'precision', 'recall',
-        'ent_f1', 'ent_precision', 'ent_recall',
+        'ent_f1', 'ent_precision', 'ent_recall', 'num_ent',
         'avg_nll', 'ppl', 'tokens']}
     ret_accs: List[List[float]] = []
     ret_covers: List[List[float]] = []
@@ -1202,6 +1202,7 @@ def eval(
             search_per_example.append(len(re.findall('\[Search\(', pred)))
 
         if debug:
+            print('ID->', qid)
             print('Q->', question)
             print()
             print('T->')
