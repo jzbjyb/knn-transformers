@@ -7,8 +7,8 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=wow_train_1k
-batch_size=8
+dataset=asqa
+batch_size=1
 model=code-davinci-002
 index_name=wikipedia_dpr  # wikipedia_dpr, wikisum_all_beir
 consistency=1
@@ -30,6 +30,11 @@ elif [[ ${dataset} == '2wikihop' ]]; then
     max_generation_len=256
 elif [[ ${dataset} == 'eli5' ]]; then
     input=""  # "--input data/eli5/val_astarget_selfprov_evidence.json.beir_dedup"
+    fewshot=8
+    max_num_examples=1000000
+    max_generation_len=256
+elif [[ ${dataset} == 'asqa' ]]; then
+    input="--input data/asqa/ASQA.json"
     fewshot=8
     max_num_examples=1000000
     max_generation_len=256

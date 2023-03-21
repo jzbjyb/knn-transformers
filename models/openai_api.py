@@ -20,7 +20,7 @@ from beir.retrieval.search.lexical import BM25Search
 import openai
 from .retriever import BM25
 from .templates import CtxPrompt, ApiReturn, RetrievalInstruction
-from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, WoWLong
+from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, WoWLong, ASQA
 
 logging.basicConfig(level=logging.INFO)
 
@@ -144,14 +144,14 @@ class QueryAgent:
         self.frequency_penalty_in_prompt = retrieval_kwargs.get('frequency_penalty_in_prompt', 0.0)
 
         self.prefix_method = retrieval_kwargs.get('prefix_method', None)
+        if self.prefix_method in {'sentence', 'all'}:  # no truncation when computing PPL
+            self.truncate_at_prob = 0
+            self.truncate_at_boundary = None
+            self.max_generation_len = 100000  # no limit
 
     @property
     def use_retrieval(self):
         return self.ret_frequency > 0 or self.ret_boundary or self.use_gold
-
-    @staticmethod
-    def clean_retrieval(texts: List[str]):
-        return ' '.join(texts).replace('\n', ' ')
 
     def get_tokens(self, text: str, topk: int) -> Tuple[str, int]:
         assert topk >= 1
@@ -180,6 +180,7 @@ class QueryAgent:
         force_generate: int = None,
         forbid_generate: int = None,
         api_key: str = None,
+        is_lookahead: bool = False,
     ) -> List[ApiReturn]:
         # check num of keys tried
         if key_tried >= max_keys:
@@ -208,7 +209,7 @@ class QueryAgent:
 
         # get prefix
         echo = False
-        if self.prefix_method:
+        if self.prefix_method and not is_lookahead:  # prefix is not allowed to use in look ahead
             echo = True
             prefixes: List[Tuple[str, int]] = [q.get_prefix(qagent=self, prefix_method=self.prefix_method) for q in queries]
             to_gen_len = set(map(itemgetter(1), prefixes))
@@ -331,6 +332,10 @@ class QueryAgent:
         queries: List[CtxPrompt],
         api_key: str = None,
     ):
+        # update retrieval for ctx
+        for q in queries:
+            for d in q.demo:
+                d.update_retrieval(d.get_all_ctxs(), method=self.ctx_increase)
         if self.use_retrieval:
             return self.ret_prompt(queries, api_key=api_key)
         else:  # directly generate all without gold context
@@ -366,9 +371,9 @@ class QueryAgent:
             look_aheads: List[str] = [''] * len(queries)
             if self.look_ahead_steps:  # generate a fixed number tokens for retrieval
                 if (self.look_ahead_pre_retrieval == 'first' and step_ind == 0) or self.look_ahead_pre_retrieval == 'all':  # pre-retrieval for look ahead
-                    ctx_ids, ctx_texts = self.retrieve([q.case for i, q in queries], is_question=first_ret)
+                    ctx_ids, ctx_texts = self.retrieve([q.get_query_for_retrieval() for i, q in queries], is_question=first_ret)
                     for _i, (i, q) in enumerate(queries):
-                        ret_id, ret_text = ctx_ids[_i].tolist(), self.clean_retrieval(ctx_texts[_i])
+                        ret_id, ret_text = ctx_ids[_i].tolist(), ctx_texts[_i].tolist()
                         final_retrievals[i].append(ret_id)
                         if self.append_retrieval:
                             q.ctx = None
@@ -378,7 +383,8 @@ class QueryAgent:
                 apireturns = self.complete(
                     list(map(itemgetter(1), queries)),
                     params={'max_tokens': self.look_ahead_steps, 'stop': self.final_stop_sym},
-                    api_key=api_key)
+                    api_key=api_key,
+                    is_lookahead=True)
                 if self.look_ahead_truncate_at_boundary:
                     apireturns = [ar.truncate_at_boundary(self.look_ahead_truncate_at_boundary) for ar in apireturns]
                 look_aheads = [ar.use_as_query(low=self.look_ahead_filter_prob, mask=self.look_ahead_mask_prob) for ar in apireturns]
@@ -386,14 +392,15 @@ class QueryAgent:
                 apireturns = self.complete(
                     list(map(itemgetter(1), queries)),
                     params={'max_tokens': self.max_generation_len, 'stop': self.look_ahead_boundary},
-                    api_key=api_key)
+                    api_key=api_key,
+                    is_lookahead=True)
                 look_aheads = [ar.text for ar in apireturns]
             assert len(look_aheads) == len(queries)
 
             # send queries to index
             if self.use_gold:
                 for i, q in queries:
-                    q.update_retrieval(' '.join(q.ctxs), method='replace')  # use all gold ctx
+                    q.update_retrieval(q.get_all_ctxs(), method='replace')  # use all gold ctx
             else:
                 if generate_queries:  # some queries might be None which means no queries are generated
                     assert len(generate_queries) == len(queries)
@@ -402,7 +409,7 @@ class QueryAgent:
                     # TODO: only use question
                     #queries_to_issue = [lh if self.only_use_look_ahead else (q.case.split('\n')[0].split(':', 1)[1].strip() + lh)
                     #    for (i, q), lh in zip(queries, look_aheads)]
-                    queries_to_issue = [lh if self.only_use_look_ahead else (q.case + lh) for (i, q), lh in zip(queries, look_aheads)]
+                    queries_to_issue = [lh if self.only_use_look_ahead else (q.get_query_for_retrieval() + lh) for (i, q), lh in zip(queries, look_aheads)]
                 if self.debug:
                     print(f'Query -> !{queries_to_issue[0]}!')
                 nonemp_queries_to_issue = [q for q in queries_to_issue if q]
@@ -418,7 +425,7 @@ class QueryAgent:
                                 ret_id, ret_text = q.change_ctx()
                                 ret_id = [ret_id]
                             else:
-                                ret_id, ret_text = ctx_ids[idx].tolist(), self.clean_retrieval(ctx_texts[idx])
+                                ret_id, ret_text = ctx_ids[idx].tolist(), ctx_texts[idx].tolist()
                             final_retrievals[i].append(ret_id)
                             if self.append_retrieval:
                                 q.ctx = None
@@ -593,7 +600,7 @@ def write_worker(output_file: str, output_queue: Queue, size: int = None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow', 'wow_train_1k'])
+    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow', 'wow_train_1k', 'asqa'])
     parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003'])
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
@@ -639,7 +646,6 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'prefix_method': 'sentence_first:1000',
         'topk': 3,
         'use_ctx': True,
         'frequency': 64,
@@ -651,13 +657,13 @@ if __name__ == '__main__':
         'use_gold_iterative': False,
         'max_query_length': 64,
         'use_full_input_as_query': True,
-        'retrieval_at_beginning': True,
-        'look_ahead_steps': 0,
-        'look_ahead_truncate_at_boundary': None,
+        'retrieval_at_beginning': False,
+        'look_ahead_steps': 64,
+        'look_ahead_truncate_at_boundary': 'sentence',
         'look_ahead_filter_prob': 0.0,
-        'look_ahead_mask_prob': 0.0,
+        'look_ahead_mask_prob': 0.2,
         'look_ahead_boundary': [],
-        'only_use_look_ahead': False,
+        'only_use_look_ahead': True,
         'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         #'retrieval_trigers': [('\[Search\("', '")]')],
@@ -669,7 +675,7 @@ if __name__ == '__main__':
         'append_retrieval': False,
         'use_ctx_for_examplars': 'ret',
         'use_retrieval_instruction': False,
-        'format_reference_method': 'default',
+        'format_reference_method': 'searchresults',
         'ctx_position': 'before_case',
         'prompt_type': 'cot',
         'ctx_increase': 'replace',
@@ -721,6 +727,9 @@ if __name__ == '__main__':
     elif args.dataset == 'eli5':
         data = ELI5(prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = ELI5.get_gold_ctxs
+    elif args.dataset == 'asqa':
+        data = ASQA(json_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = ASQA.get_gold_ctxs
     elif args.dataset == 'wow':
         data = WoW(prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WoW.get_gold_ctxs

@@ -8,7 +8,7 @@ curl https://api.openai.com/v1/completions \
   -H 'Authorization: Bearer '${key} \
   -d '{
   "model": "code-davinci-002",
-  "prompt": "I like to bike.",
+  "prompt": [0,1,2,3],
   "max_tokens": 0,
   "temperature": 0,
   "logprobs": 0,
