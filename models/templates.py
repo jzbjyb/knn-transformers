@@ -152,6 +152,10 @@ class CtxPrompt:
             prefix, self.gold_used_len = ApiReturn.get_sent(self.gold_output, position='begin')
             prefix = qagent.get_tokens(prefix, topk=firstk)[0]
             return prefix, None
+        elif prefix_method.startswith('freq:'):
+            firstk = int(prefix_method[len('freq:'):])
+            prefix, self.gold_used_len = qagent.get_tokens(self.gold_output, topk=firstk)
+            return prefix, 0
         else:
             raise NotImplementedError
 

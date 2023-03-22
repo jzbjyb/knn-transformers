@@ -20,7 +20,7 @@ from beir.retrieval.search.lexical import BM25Search
 import openai
 from .retriever import BM25
 from .templates import CtxPrompt, ApiReturn, RetrievalInstruction
-from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, WoWLong, ASQA
+from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, WoWLong, ASQA, LMData
 
 logging.basicConfig(level=logging.INFO)
 
@@ -95,7 +95,7 @@ class QueryAgent:
         self.tokenizer = tokenizer
 
         # generation args
-        self.final_stop_sym = '\n\n'
+        self.final_stop_sym = retrieval_kwargs.get('final_stop_sym', '\n\n')
         self.max_generation_len = max_generation_len
         self.temperature = temperature
         self.top_p = 1.0
@@ -144,7 +144,7 @@ class QueryAgent:
         self.frequency_penalty_in_prompt = retrieval_kwargs.get('frequency_penalty_in_prompt', 0.0)
 
         self.prefix_method = retrieval_kwargs.get('prefix_method', None)
-        if self.prefix_method in {'sentence', 'all'}:  # no truncation when computing PPL
+        if self.prefix_method in {'sentence', 'all'} or self.prefix_method.startswith('freq:'):  # no truncation when computing PPL
             self.truncate_at_prob = 0
             self.truncate_at_boundary = None
             self.max_generation_len = 100000  # no limit
@@ -157,8 +157,9 @@ class QueryAgent:
         assert topk >= 1
         tokenized = self.tokenizer(text, return_offsets_mapping=True)
         ids, offsets = tokenized['input_ids'][:topk], tokenized['offset_mapping'][:topk]
-        prefix = self.tokenizer.decode(ids)
+        #prefix = self.tokenizer.decode(ids)  # not revertable
         last_position = offsets[-1][1]
+        prefix = text[:last_position]
         return prefix, last_position
 
     def retrieve(self, queries: List[str], is_question: bool = False):
@@ -182,6 +183,8 @@ class QueryAgent:
         api_key: str = None,
         is_lookahead: bool = False,
     ) -> List[ApiReturn]:
+        is_chat_model = 'turbo' in self.model
+
         # check num of keys tried
         if key_tried >= max_keys:
             logging.error(f'skip {len(queries)} examples because of key broken')
@@ -247,24 +250,38 @@ class QueryAgent:
         while True:
             try:
                 logging.info(f'start query with key {api_key[-5:]}')
-                responses = openai.Completion.create(
-                    api_key=api_key,
-                    model=self.model,
-                    prompt=prompts_to_issue,
-                    temperature=self.temperature,
-                    top_p=self.top_p,
-                    logprobs=0,
-                    logit_bias=logit_bias,
-                    frequency_penalty=self.frequency_penalty,
-                    echo=echo,
-                    **params)
+                if is_chat_model:
+                    assert len(queries) == 1, ''
+                    responses = openai.Completion.create(
+                        api_key=api_key,
+                        model=self.model,
+                        messages=[{'role': 'user', 'content': prompts_to_issue[0]}],
+                        temperature=self.temperature,
+                        top_p=self.top_p,
+                        logprobs=0,
+                        logit_bias=logit_bias,
+                        frequency_penalty=self.frequency_penalty,
+                        echo=echo,
+                        **params)
+                else:
+                    responses = openai.Completion.create(
+                        api_key=api_key,
+                        model=self.model,
+                        prompt=prompts_to_issue,
+                        temperature=self.temperature,
+                        top_p=self.top_p,
+                        logprobs=0,
+                        logit_bias=logit_bias,
+                        frequency_penalty=self.frequency_penalty,
+                        echo=echo,
+                        **params)
 
                 generations = [ApiReturn(
                     prompt=q,
-                    text=r['text'],
-                    tokens=r['logprobs']['tokens'],
-                    probs=[np.exp(lp) if lp is not None else lp for lp in r['logprobs']['token_logprobs']],
-                    offsets=r['logprobs']['text_offset'],
+                    text=r['message']['content'] if is_chat_model else r['text'],
+                    tokens=[] if is_chat_model else r['logprobs']['tokens'],
+                    probs=[] if is_chat_model else [np.exp(lp) if lp is not None else lp for lp in r['logprobs']['token_logprobs']],
+                    offsets=[] if is_chat_model else r['logprobs']['text_offset'],
                     finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
                     skip_len=len(q) if echo else 0) for r, (q, _) in zip(responses['choices'], prompts)]
 
@@ -352,7 +369,7 @@ class QueryAgent:
         self,
         queries: List[CtxPrompt],
         api_key: str = None,
-        max_iteration: int = 12,
+        max_iteration: int = 10000,  # TODO: too high?
     ):
         batch_size = len(queries)
         final_retrievals: List[List[List[str]]] = [[] for _ in range(len(queries))]  # (bs, n_ret_steps, ret_topk)
@@ -443,12 +460,11 @@ class QueryAgent:
                 if self.truncate_at_prob > 0:
                     apireturns = [ar.truncate_at_prob(self.truncate_at_prob) for ar in apireturns]
                     max_gen_len += int(np.min([ar.num_tokens for ar in apireturns]))
-                    #generate_queries = [ApiReturn.get_sent(ar.text, position='end')[0] for ar in apireturns]
-                    generate_queries = [ar.text for ar in apireturns]
+                    generate_queries = [ar.text for ar in apireturns]  # always use newly generated as query
                 elif self.truncate_at_boundary:
                     apireturns = [ar.truncate_at_boundary(self.truncate_at_boundary) for ar in apireturns]
                     max_gen_len += int(np.min([ar.num_tokens for ar in apireturns]))
-                    generate_queries = [ar.text for ar in apireturns]
+                    generate_queries = [ar.text for ar in apireturns]  # always use newly generated as query
                 else:
                     max_gen_len += self.ret_frequency
                 for ar in apireturns:  # check final sym
@@ -600,7 +616,8 @@ def write_worker(output_file: str, output_queue: Queue, size: int = None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dataset', type=str, default='strategyqa', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow', 'wow_train_1k', 'asqa'])
+    parser.add_argument('--dataset', type=str, default='strategyqa', choices=
+                        ['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow', 'wow_train_1k', 'asqa', 'lmdata'])
     parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003'])
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
@@ -646,7 +663,8 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 3,
+        'prefix_method': 'freq:32',
+        'topk': 10,
         'use_ctx': True,
         'frequency': 64,
         'boundary': [],
@@ -655,15 +673,16 @@ if __name__ == '__main__':
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 64,
-        'use_full_input_as_query': True,
+        'max_query_length': 32,
+        'use_full_input_as_query': False,
         'retrieval_at_beginning': False,
-        'look_ahead_steps': 64,
-        'look_ahead_truncate_at_boundary': 'sentence',
-        'look_ahead_filter_prob': 0.0,
-        'look_ahead_mask_prob': 0.2,
+        'look_ahead_steps': 16,
+        'look_ahead_pre_retrieval': False,
+        'look_ahead_truncate_at_boundary': None,
+        'look_ahead_filter_prob': None,
+        'look_ahead_mask_prob': None,
         'look_ahead_boundary': [],
-        'only_use_look_ahead': True,
+        'only_use_look_ahead': False,
         'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         #'retrieval_trigers': [('\[Search\("', '")]')],
@@ -671,18 +690,19 @@ if __name__ == '__main__':
         'force_generate': None,
         'forbid_generate_step': None,
         'truncate_at_prob': 0.0,
-        'truncate_at_boundary': 'sentence',
+        'truncate_at_boundary': None,
         'append_retrieval': False,
-        'use_ctx_for_examplars': 'ret',
+        'use_ctx_for_examplars': 'gold',
         'use_retrieval_instruction': False,
-        'format_reference_method': 'searchresults',
+        'format_reference_method': 'default',
         'ctx_position': 'before_case',
-        'prompt_type': 'cot',
+        'prompt_type': 'none',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,
         'debug': args.debug,
     }
+    retrieval_kwargs['final_stop_sym'] = '!@#$%^&*()\n\n)(*&^%$#@!' if args.dataset == 'lmdata' else '\n\n'
     qagent = QueryAgent(
         model=args.model,
         tokenizer=prompt_tokenizer,
@@ -739,6 +759,9 @@ if __name__ == '__main__':
     elif args.dataset == 'wikisum_all_beir':
         data = WikiSum(args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WikiSum.get_gold_ctxs
+    elif args.dataset == 'lmdata':
+        data = LMData(args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = LMData.get_gold_ctxs
     else:
         raise NotImplementedError
     if qagent.use_ctx_for_examplars == 'gold':

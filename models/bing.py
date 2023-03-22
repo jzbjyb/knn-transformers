@@ -1,6 +1,7 @@
 from typing import List, Dict
 import time
 import os
+import json
 import requests
 
 '''
@@ -14,6 +15,7 @@ Documentation: https://docs.microsoft.com/en-us/bing/search-apis/bing-web-search
 
 subscription_key = os.environ['BING_SEARCH_V7_SUBSCRIPTION_KEY']
 endpoint = "https://api.bing.microsoft.com/" + "v7.0/search"
+api_url = "http://metis.lti.cs.cmu.edu:8989/bing_search"
 
 def search_bing(query: str, count: int = 10, max_query_per_sec: int = 100, debug: bool = False):
     params = {
@@ -51,10 +53,29 @@ def search_bing(query: str, count: int = 10, max_query_per_sec: int = 100, debug
     except Exception as ex:
         raise ex
 
+def search_bing_api(query: str, **kwargs):
+    payload = json.dumps({'query': query})
+    headers = {'X-Api-Key': 'jzbjybnb', 'Content-Type': 'application/json'}
+    try:
+        response = requests.request('POST', api_url, headers=headers, data=payload)
+        response = response.json()
+        results: List[Dict] = []
+        for page in response['webPages']['value']:
+            result = {
+                'url': page['url'],
+                'title': page['name'],
+                'snippet': page['snippet']
+            }
+            results.append(result)
+        return results
+    except Exception as ex:
+        raise ex
+
+
 def search_bing_batch(queries: List[str], count: int = 10):
     results: List[List[Dict]] = []
     for query in queries:
-        results.append(search_bing(query, count=count))
+        results.append(search_bing_api(query, count=count))
     return results
 
 

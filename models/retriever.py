@@ -156,6 +156,7 @@ class BM25:
                 self.tokenizer.padding_side = ori_ps
                 self.tokenizer.truncation_side = ori_ts
                 queries = self.tokenizer.batch_decode(tokenized, skip_special_tokens=True)
+                print('Query ------> ', queries[0], max_query_length)
 
             # retrieve
             results: Dict[str, Dict[str, Tuple[float, str]]] = self.retriever.retrieve(self.corpus, dict(zip(range(len(queries)), queries)), disable_tqdm=True)
@@ -279,7 +280,7 @@ def elasticsearch_lexical_multisearch(self, texts: List[str], top_hits: int, ski
 
         result = []
         for resp in res["responses"]:
-            responses = resp["hits"]["hits"][skip:]
+            responses = resp["hits"]["hits"][skip:] if 'hits' in resp else []
 
             hits = []
             for hit in responses:
@@ -288,4 +289,25 @@ def elasticsearch_lexical_multisearch(self, texts: List[str], top_hits: int, ski
             result.append(self.hit_template(es_res=resp, hits=hits))
         return result
 
+def elasticsearch_hit_template(self, es_res: Dict[str, object], hits: List[Tuple[str, float]]) -> Dict[str, object]:
+        """Hit output results template
+
+        Args:
+            es_res (Dict[str, object]): Elasticsearch response
+            hits (List[Tuple[str, float]]): Hits from Elasticsearch
+
+        Returns:
+            Dict[str, object]: Hit results
+        """
+        result = {
+            'meta': {
+                'total': es_res['hits']['total']['value'] if 'hits' in es_res else None,
+                'took': es_res['took'] if 'took' in es_res else None,
+                'num_hits': len(hits)
+            },
+            'hits': hits,
+        }
+        return result
+
 ElasticSearch.lexical_multisearch = elasticsearch_lexical_multisearch
+ElasticSearch.hit_template = elasticsearch_hit_template

@@ -1472,3 +1472,36 @@ class ASQA(BaseDataset):
                 })
         logging.info(f'{num_hasctx} / {len(dataset)} have gold ctxs')
         return Dataset.from_list(dataset)
+
+
+class LMData(BaseDataset):
+    none_examplars = []
+    none_demo_input_template = none_test_input_template = lambda self, ques: f'\nGenerate follow up of the documets: {ques}'
+    none_output_template = lambda self, cot, ans: ans
+
+    def __init__(self, jsonl_file: str = None, prompt_type: str = 'none'):
+        assert prompt_type in {'none'}
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplars = getattr(self, f'{prompt_type}_examplars')
+        self.dataset = self.load_data(jsonl_file)
+
+    def load_data(self, jsonl_file: str = None):
+        dataset = []
+        with open(jsonl_file, 'r') as fin:
+            for i, l in enumerate(fin):
+                example = json.loads(l)
+                qid = example['metadata']['line'] + '_' + str(i)
+                question = example['source']
+                if len(question.strip()) <= 0:  # skip empty source
+                    continue
+                answer = example['target']
+                output = self.output_template(cot=None, ans=answer)
+                dataset.append({
+                    'qid': qid,
+                    'question': question,
+                    'answer': answer,
+                    'gold_output': output,
+                })
+        return Dataset.from_list(dataset)
