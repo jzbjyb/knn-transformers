@@ -16,6 +16,7 @@ class CtxPrompt:
         ctx: str = None,
         ctxs: List[Tuple[str, str]] = [],
         case: str = None,
+        question: str = None,
         qid: str = None,
         gold_output: str = None,
     ):
@@ -26,9 +27,10 @@ class CtxPrompt:
         self.ctxs = ctxs
         self.ctxs_idx = 0
         self.case = case
+        self.question = question or case
         self.qid = qid
         self.gold_output = gold_output
-        self.ind = 0
+        self.ind = 1  # ctx index
         self.gen_len = 0
         self.gold_used_len = 0
 
@@ -43,7 +45,20 @@ class CtxPrompt:
         adict = dict(adict)
         if 'demo' in adict:
             adict['demo'] = [cls.from_dict(d) for d in adict['demo']]
-        return cls(**{k: adict[k] for k in ['demo', 'ctx', 'ctxs', 'case', 'qid', 'gold_output'] if k in adict})
+        return cls(**{k: adict[k] for k in ['demo', 'ctx', 'ctxs', 'case', 'question', 'qid', 'gold_output'] if k in adict})
+
+    @classmethod
+    def clean_rets(cls, rets: List[str]) -> List[str]:
+        return [ret.replace('\n', ' ').strip() for ret in rets if ret.replace('\n', ' ').strip()]
+
+    def get_query_for_retrieval(self):
+        if self.gen_len == 0:
+            return self.question
+        else:
+            return self.case
+
+    def get_all_ctxs(self) -> List[str]:
+        return list(map(itemgetter(1), self.ctxs))
 
     def add_generation(self, cont: str):
         self.case += cont
@@ -66,23 +81,32 @@ class CtxPrompt:
         self.ctxs_idx += 1
         return self.did, self.ctx
 
-    def append_retrieval(self, ret_to_append: str, add_index: bool = False):
-        self.case += self.get_append_retrieval(ret_to_append, index=self.ind if add_index else None)
+    def append_retrieval(self, rets: List[str], add_index: bool = False):
+        rets = self.clean_rets(rets)
+        self.case += self.get_append_retrieval(rets, index=self.ind if add_index else None)  # TODO: fix list bug
         self.ind = (self.ind + 1) if add_index else self.ind
 
-    def update_retrieval(self, ret: str, method: str = 'replace', dedup: bool = True):
+    def update_retrieval(self, rets: List[str], method: str = 'replace', dedup: bool = True, add_index: bool = True):
+        rets = self.clean_rets(rets)
+        def merge_rets():
+            if add_index:
+                return '\n'.join(f'[{self.ind + i}]: {ret}' for i, ret in enumerate(rets))
+            return '\n'.join(rets)
         assert method in {'replace', 'append'}
+        merge_ret = merge_rets()
         if self.ctx is None:
-            self.ctx = ret
+            self.ctx = merge_ret
         else:
             if method == 'replace':
-                self.ctx = ret
+                self.ctx = merge_ret
             elif method == 'append':
                 if dedup:
-                    if ret.lower() not in self.ctx.lower():
-                        self.ctx += ' ' + ret
+                    if merge_ret.lower() not in self.ctx.lower():
+                        self.ctx += '\n' + merge_ret
+                        self.ind += len(rets)
                 else:
-                    self.ctx += ' ' + ret
+                    self.ctx += '\n' + merge_ret
+                    self.ind += len(rets)
             else:
                 raise NotImplementedError
 
@@ -93,9 +117,11 @@ class CtxPrompt:
         if cls.add_ref_prefix and not ref.startswith(cls.add_ref_prefix):
             ref = cls.add_ref_prefix + ref
         method = cls.format_reference_method
-        assert method in {'default', 'ignore', 'ignore_for_retrieval_instruct', 'short_ignore'}
+        assert method in {'default', 'searchresults', 'ignore', 'ignore_for_retrieval_instruct', 'short_ignore'}
         if method == 'default':
             return 'Reference: ' + ref
+        if method == 'searchresults':
+            return 'Search results:\n' + ref
         if method == 'ignore':
             formatted = [
                 '1. The reference below might be helpful when answering questions but it is noisy. Free free to ignore irrelevant information in it.', ref.strip(),
@@ -126,6 +152,10 @@ class CtxPrompt:
             prefix, self.gold_used_len = ApiReturn.get_sent(self.gold_output, position='begin')
             prefix = qagent.get_tokens(prefix, topk=firstk)[0]
             return prefix, None
+        elif prefix_method.startswith('freq:'):
+            firstk = int(prefix_method[len('freq:'):])
+            prefix, self.gold_used_len = qagent.get_tokens(self.gold_output, topk=firstk)
+            return prefix, 0
         else:
             raise NotImplementedError
 
@@ -137,7 +167,7 @@ class CtxPrompt:
         # run on demo
         demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=False)[0] for d in self.demo])  # TODO: no retrieval for demo
 
-        use_ctx = use_ctx and self.ctx is not None
+        use_ctx = use_ctx and bool(self.ctx)  # do not use ctx when it's None or empty string
         use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
         ref = self.format_reference(self.ctx) if use_ctx else None
         task, ret, ensemble = self.ret_instruction.format(use_ctx=use_ctx) if use_ret_instruction else (None, None, None)

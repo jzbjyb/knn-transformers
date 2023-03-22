@@ -2,6 +2,7 @@ from typing import Dict, List, Set, Callable, Tuple, Union, Callable
 import os
 import json
 import random
+import logging
 from operator import itemgetter
 from collections import Counter, defaultdict
 import re
@@ -11,6 +12,7 @@ import spacy
 from datasets import Dataset, load_dataset
 from beir.datasets.data_loader import GenericDataLoader
 from .templates import CtxPrompt
+logging.basicConfig(level=logging.INFO)
 
 
 class BaseDataset:
@@ -145,9 +147,9 @@ class BaseDataset:
 
         # demo
         demo = [{
+            'question': self.examplars[i]['question'],
             'case': _format(self.examplars[i], use_answer=True, input_template_func=self.demo_input_template),
-            'ctxs': self.examplars[i]['ctxs'] if 'ctxs' in self.examplars[i] else [],
-            'ctx': ' '.join(map(itemgetter(1), self.examplars[i]['ctxs'])) if 'ctxs' in self.examplars[i] and self.examplars[i]['ctxs'] else None,
+            'ctxs': self.examplars[i]['ctxs'] if 'ctxs' in self.examplars[i] else []
         } for i in range(fewshot)] if fewshot else []
 
         def _format_for_dataset(example):
@@ -1374,3 +1376,132 @@ class WoWLong(WoW):
             "answer": "Nope.  My immune system just doesnt cope with cats.  It works well detecting a wide variety of agents known as pathogens that it does not like, then it reacts! its ok though I just have dogs instead.  They are lovely pets to have too."
         }
     ]  # shuffled
+
+
+class ASQA(BaseDataset):
+    cot_examplars: List[Dict] = [
+        {
+            "id": "-6497998034447212269",
+            "question": "When did bat out of hell come out?",
+            "answer": "Bat Out of Hell is a debut album, that came out on October 21, 1977, by American rock singer Meat Loaf and composer Jim Steinman. It was developed from a musical, Neverland, a futuristic rock version of Peter Pan, which Steinman wrote for a workshop in 1974. The British television show with the same name, released on 26 November 1966, a thriller that followed two lovers, Diana Stewart, and Mark Paxton, who are haunted by the voice of Diana's husband over the telephone after he is murdered by the couple."
+        },
+        {
+            "id": "4504214239697119124",
+            "question": "Who is the chairman of the federal reserve?",
+            "answer": "The current and 16th Chair of the Federal Reserve is Jerome Powell, who has held the position since 2018 after a nomination from President Trump. Powell replaced Janet Yellen, who was appointed by President Obama in 2014. Previously, the office was held by Ben Bernanke, who was first appointed by President Bush in 2006 and Alan Greenspan, who was first appointed by President Reagan in 1987."
+        },
+        {
+            "id": "-6171603303439929107",
+            "question": "What kind of car is in national lampoon's vacation?",
+            "answer": "National Lampoon's Vacation, sometimes referred to as Vacation, is a 1983 American road comedy film directed by Harold Ramis, starring Chevy Chase, Beverly D'Angelo, Imogene Coca, Randy Quaid, John Candy, and Christie Brinkley in her acting debut. The Wagon Queen Family Truckster station wagon was created specifically for the film. It is based on a 1979 Ford LTD Country Squire station wagon."
+        },
+        {
+            "id": "7189427191376660295",
+            "question": "Who sang the song god's not dead?",
+            "answer": "Like a Lion is song written by Daniel Bashta that was originally performed by Passion with David Crowder on the 2010 album Passion: Awakening. In 2011, this song was covered by Newsboys as God's Not Dead (Like a Lion) and released as a single from their album God's Not Dead. In the Newsboys' version, the lead vocals are performed by Michael Tait and Kevin Max is featured. The Newsboys' version charted in 2014 after the release of the film God's Not Dead. The band performs the song in a concert sequence at the end of the film."
+        },
+        {
+            "id": "-5409444124551037323",
+            "question": "Who won last triple crown of horse racing?",
+            "answer": "In horse racing, a horse is said to have won the Triple Crown if they win the Kentucky Derby, Preakness Stakes, and Belmont Stakes all in the same year. The last triple crown of horse racing occurred in 2018 with the horse Justify. Justify's jockey was Mike Smith, his trainer was Bob Baffert, and his breeder was John D Gunther."
+        },
+        {
+            "id": "-2639660647813019469",
+            "question": "When did the broncos last win the superbowl?",
+            "answer": "The Super Bowl is the annual American football game that determines the champion of the National Football League (NFL). Since January 1971, the winner of the American Football Conference (AFC) Championship Game has faced the winner of the National Football Conference (NFC) Championship Game in the culmination of the NFL playoffs. The Denver Broncos of the AFC have won the Super Bowl on January 25,1998; January 31, 1999; and February 7, 2016."
+        },
+        {
+            "id": "-717926424137536243",
+            "question": "How many cvs stores are there in the usa?",
+            "answer": "CVS Pharmacy, Inc., previously CVS/pharmacy, is an American retail corporation headquartered in Woonsocket, Rhode Island and was owned by its original holding company Melville Corporation from its inception until its current parent company was spun off into its own company in 1996. In 1997, CVS nearly tripled its 1,400 stores after purchasing the 2,500-store Revco chain. After January 2006, CVS operated over 6,200 stores in 43 states and the District of Columbia and in some locations, CVS has two stores less than two blocks apart. CVS Pharmacy is currently the largest pharmacy chain in the United States by number of locations, with over 9,600 as of 2016, and total prescription revenue and its parent company ranks as the fifth largest U.S. corporation by FY2020 revenues in the Fortune 500."
+        },
+        {
+            "id": "-6525373399334681447",
+            "question": "Who plays max branning's wife in eastenders?",
+            "answer": "Max Branning had 4 wives in EastEnders. The first wife was Sukie Smith, followed by Jo Joyner, then Kierston Wareing, and finally, Tanya Franks, as fourth."
+        }
+    ]  # shuffled
+    #cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a long descriptive answer to the following ambiguous question: {ques}\nAnswer: '
+    cot_output_template = lambda self, cot, ans: ans
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a comprehensive and informative answer for a given question based on the provided search results above. You must only use information from the provided search results. Combine search results together into a coherent answer. Do not repeat text.\nQuestion: {ques}\nAnswer: '
+
+    def __init__(self, json_file: str = None, split: str = 'dev', prompt_type: str = 'cot'):
+        assert prompt_type in {'cot', 'cot_ret'}
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplars = getattr(self, f'{prompt_type}_examplars')
+        if len(self.examplars) == len(self.cot_examplars):
+            for e, ref_e in zip(self.examplars, self.cot_examplars):  # copy missing keys from cot_examplars
+                for k in ref_e:
+                    if k not in e:
+                        e[k] = ref_e[k]
+        self.dataset = self.load_data(json_file, split)
+
+    def load_data(self, json_file: str = None, split: str = 'dev'):
+        dataset = []
+        num_hasctx = 0
+        with open(json_file, 'r') as fin:
+            data = json.load(fin)[split]
+            for key, example in data.items():
+                qid = key
+                question = example['ambiguous_question']
+                answers: List[str] = []
+                title2content: Dict[str, str] = {}
+                for ann in example['annotations']:
+                    ans = ann['long_answer'].strip()
+                    answers.append(ans)
+                    for know in ann['knowledge']:
+                        title2content[know['wikipage']] = know['content']
+                for qa in example['qa_pairs']:
+                    if qa['wikipage'] is None:
+                        continue
+                    title2content[qa['wikipage']] = qa['context']
+                assert len(answers) >= 1
+                answers = sorted(answers, key=lambda x: -len(x))  # sort based on length
+                output = self.output_template(cot=None, ans=answers[0])
+                ctxs: List[Tuple[str, str]] = list(title2content.items())  # could be empty
+                num_hasctx += int(len(ctxs) > 0)
+                dataset.append({
+                    'qid': qid,
+                    'question': question,
+                    'answer': answers[0],
+                    'answers': answers,
+                    'gold_output': output,
+                    'ctxs': ctxs,
+                })
+        logging.info(f'{num_hasctx} / {len(dataset)} have gold ctxs')
+        return Dataset.from_list(dataset)
+
+
+class LMData(BaseDataset):
+    none_examplars = []
+    none_demo_input_template = none_test_input_template = lambda self, ques: f'\nGenerate follow up of the documets: {ques}'
+    none_output_template = lambda self, cot, ans: ans
+
+    def __init__(self, jsonl_file: str = None, prompt_type: str = 'none'):
+        assert prompt_type in {'none'}
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplars = getattr(self, f'{prompt_type}_examplars')
+        self.dataset = self.load_data(jsonl_file)
+
+    def load_data(self, jsonl_file: str = None):
+        dataset = []
+        with open(jsonl_file, 'r') as fin:
+            for i, l in enumerate(fin):
+                example = json.loads(l)
+                qid = example['metadata']['line'] + '_' + str(i)
+                question = example['source']
+                if len(question.strip()) <= 0:  # skip empty source
+                    continue
+                answer = example['target']
+                output = self.output_template(cot=None, ans=answer)
+                dataset.append({
+                    'qid': qid,
+                    'question': question,
+                    'answer': answer,
+                    'gold_output': output,
+                })
+        return Dataset.from_list(dataset)

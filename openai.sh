@@ -7,47 +7,66 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=wow_train_1k
+dataset=arxiv
 batch_size=8
 model=code-davinci-002
-index_name=wikipedia_dpr  # wikipedia_dpr, wikisum_all_beir
 consistency=1
 
 if [[ ${dataset} == 'hotpotqa' ]]; then
     input=""
+    index_name=wikipedia_dpr
     fewshot=12
     max_num_examples=1000
     max_generation_len=256
 elif [[ ${dataset} == 'strategyqa_dev' ]]; then
     input="--input data/strategyqa/dev_beir"
+    index_name=wikipedia_dpr
     fewshot=6
     max_num_examples=229
     max_generation_len=256
 elif [[ ${dataset} == '2wikihop' ]]; then
     input="--input data/2wikimultihopqa/dev_beir"
+    index_name=wikipedia_dpr
     fewshot=15
     max_num_examples=1000
     max_generation_len=256
 elif [[ ${dataset} == 'eli5' ]]; then
     input=""  # "--input data/eli5/val_astarget_selfprov_evidence.json.beir_dedup"
+    index_name=wikipedia_dpr
+    fewshot=8
+    max_num_examples=1000000
+    max_generation_len=256
+elif [[ ${dataset} == 'asqa' ]]; then
+    input="--input data/asqa/ASQA.json"
+    index_name=wikipedia_dpr
     fewshot=8
     max_num_examples=1000000
     max_generation_len=256
 elif [[ ${dataset} == 'wow' ]]; then
     input=""  # "--input data/wow/val_astarget_selfprov_evidence.json.beir_dedup"
+    index_name=wikipedia_dpr
     fewshot=8
     max_num_examples=1000
     max_generation_len=256
 elif [[ ${dataset} == 'wow_train_1k' ]]; then
     input="--input data/wow/train_with_ref.1008.jsonl"
+    index_name=wikipedia_dpr
     fewshot=8
     max_num_examples=1000
     max_generation_len=256
 elif [[ ${dataset} == 'wikisum_all_beir' ]]; then
     input="--input data/wikisum/wikisum_all_beir"
+    index_name=wikisum_all_beir
     fewshot=8
     max_num_examples=1000
     max_generation_len=256
+elif [[ ${dataset} == 'arxiv' ]]; then
+    input="--input data/pile/sliding_window_512/ArXiv_test.window.jsonl"
+    index_name=arxiv00
+    fewshot=0
+    max_num_examples=1000
+    max_generation_len=512
+    dataset=lmdata
 else
     exit
 fi
@@ -102,7 +121,7 @@ for (( run=0; run<${consistency}; run++ )); do
         temperature=0.7
         oneoutput=${output}.run${run}
     fi
-    file_lock=$(mktemp)
+    #file_lock=$(mktemp)
     #for (( i=0; i<${num_shards}; i++ )); do
     #okey="${keys[$i]}"
     BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
@@ -118,10 +137,10 @@ for (( run=0; run<${consistency}; run++ )); do
         --num_shards 1 \
         --shard_id 0 \
         --openai_keys ${joined_keys} \
-        --file_lock ${file_lock}
+        #--file_lock ${file_lock}
     #done
     #wait
-    rm ${file_lock}
+    #rm ${file_lock}
     #cat ${oneoutput}.* > ${oneoutput}
     #rm ${oneoutput}.*
 done
@@ -496,6 +515,49 @@ retrieval_kwargs = {
     'format_reference_method': 'default',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave_ret',
+    'ctx_increase': 'replace',
+    'add_ref_suffix': None,
+    'add_ref_prefix': None,
+    'debug': args.debug,
+}
+
+# LM ppl
+retrieval_kwargs = {
+    'retriever': retriever,
+    'prefix_method': 'freq:32',
+    'topk': 10,
+    'use_ctx': True,
+    'frequency': 64,
+    'boundary': [],
+    #'boundary': ['Intermediate answer:'],
+    #'boundary': ['")]'],
+    #'boundary': ['. '],
+    'use_gold': False,
+    'use_gold_iterative': False,
+    'max_query_length': 32,
+    'use_full_input_as_query': False,
+    'retrieval_at_beginning': False,
+    'look_ahead_steps': 16,
+    'look_ahead_pre_retrieval': False,
+    'look_ahead_truncate_at_boundary': None,
+    'look_ahead_filter_prob': None,
+    'look_ahead_mask_prob': None,
+    'look_ahead_boundary': [],
+    'only_use_look_ahead': False,
+    'retrieval_trigers': [],
+    #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
+    #'retrieval_trigers': [('\[Search\("', '")]')],
+    #'retrieval_trigers': [(None, '. ')],
+    'force_generate': None,
+    'forbid_generate_step': None,
+    'truncate_at_prob': 0.0,
+    'truncate_at_boundary': None,
+    'append_retrieval': False,
+    'use_ctx_for_examplars': 'gold',
+    'use_retrieval_instruction': False,
+    'format_reference_method': 'default',
+    'ctx_position': 'before_case',
+    'prompt_type': 'none',
     'ctx_increase': 'replace',
     'add_ref_suffix': None,
     'add_ref_prefix': None,

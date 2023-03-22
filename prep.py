@@ -18,7 +18,7 @@ from datasets import load_dataset
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.lexical import BM25Search
-from models.datasets import HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW
+from models.datasets import HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, ASQA, LMData
 
 class Wikipedia(object):
     def __init__(self):
@@ -775,7 +775,14 @@ def summary_to_beir_all(
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
-def compare(file1: str, file2: str, only_show_diff: bool = False, only_first_right: bool = False, show_final: bool = False):
+def compare(
+        file1: str,
+        file2: str,
+        only_show_diff: bool = False,
+        only_first_right: bool = False,
+        show_final: bool = False,
+        only_last_trace: bool = False,
+    ):
     get_ans = lambda x: x.strip().rsplit(' ', 1)[-1][:-1].lower()
     with open(file1) as fin1, open(file2) as fin2:
         id2examples1 = [json.loads(l) for l in fin1]
@@ -803,8 +810,8 @@ def compare(file1: str, file2: str, only_show_diff: bool = False, only_first_rig
             if show_final:
                 #r1 = r1[-1:] if r1 else r1
                 #r2 = r2[-1:] if r2 else r2
-                ts1 = ts1[-1:] if ts1 else ts1
-                ts2 = ts2[-1:] if ts2 else ts2
+                ts1 = (ts1[-1:] if only_last_trace else ts1) if ts1 else ts1
+                ts2 = (ts2[-1:] if only_last_trace else ts2) if ts2 else ts2
 
             o1a = get_ans(o1)
             o2a = get_ans(o2)
@@ -1191,8 +1198,12 @@ def eval(
                 add_metric_kvs(WikiSum.entity_f1_score(pred_ans, final_ans))
             elif dataset in {'eli5'}:
                 add_metric_kvs(ELI5.entity_f1_score(pred_ans, final_ans))
+            elif dataset in {'asqa'}:
+                add_metric_kvs(ASQA.entity_f1_score(pred_ans, final_ans))
             elif dataset in {'wow'}:
                 add_metric_kvs(WoW.entity_f1_score(pred_ans, final_ans))
+            elif dataset in {'lmdata'}:
+                pass
             else:
                 raise NotImplementedError
 
@@ -1243,7 +1254,10 @@ def eval(
                 fout.write(json.dumps(e) + '\n')
 
     # rouge
-    metrics = metric_func.compute(predictions=predictions, references=references)
+    if dataset == 'lmdata':
+        metrics = {}
+    else:
+        metrics = metric_func.compute(predictions=predictions, references=references)
     if remove_followup:
         metrics_followup = metric_func.compute(predictions=followups, references=references)
 
@@ -1273,9 +1287,12 @@ def eval(
 
 
 def build_elasticsearch(
-    beir_corpus_file: str,
+    beir_corpus_file_pattern: str,
     index_name: str,
+    get_id: Callable = None,
 ):
+    beir_corpus_files = glob.glob(beir_corpus_file_pattern)
+    print(f'#files {len(beir_corpus_files)}')
     from beir.retrieval.search.lexical.elastic_search import ElasticSearch
     config = {
         "hostname": 'localhost',
@@ -1295,19 +1312,21 @@ def build_elasticsearch(
     time.sleep(5)
     es.create_index()
 
+    get_id = get_id or (lambda x: str(x['_id']))
     # generator
     def generate_actions():
-        with open(beir_corpus_file, 'r') as fin:
-            for l in fin:
-                doc = json.loads(l)
-                es_doc = {
-                    "_id": str(doc['_id']),
-                    "_op_type": "index",
-                    "refresh": "wait_for",
-                    config['keys']['body']: doc['text'],
-                    config['keys']['title']: doc['title'],
-                }
-                yield es_doc
+        for beir_corpus_file in beir_corpus_files:
+            with open(beir_corpus_file, 'r') as fin:
+                for l in fin:
+                    doc = json.loads(l)
+                    es_doc = {
+                        "_id": get_id(doc),
+                        "_op_type": "index",
+                        "refresh": "wait_for",
+                        config['keys']['body']: doc['text'],
+                        config['keys']['title']: doc['title'],
+                    }
+                    yield es_doc
 
     # index
     progress = tqdm(unit='docs')
@@ -1405,6 +1424,15 @@ def kilt_dataset_to_beir(
     return Dataset.from_list(dataset)
 
 
+def jsonl_to_keyvalue(jsonl_file: str, keyvalue_file: str):
+    with open(jsonl_file, 'r') as fin, open(keyvalue_file, 'w') as fout:
+        key2output: Dict[str, str] = {}
+        for l in fin:
+            l = json.loads(l)
+            key2output[l['qid']] = l['output']
+        json.dump(key2output, fout)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
@@ -1413,9 +1441,11 @@ if __name__ == '__main__':
         'dedup_translation', 'layerhead', 'split_ctxs', 'convert_beir_corpus_to_translation',
         'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'summary_to_beir_all', 'compare',
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
-        'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir', 'add_ref_to_kilt'])
+        'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir',
+        'add_ref_to_kilt', 'jsonl_to_keyvalue'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='wow', help='input dataset', choices=['strategyqa', 'hotpotqa', '2wikihop', 'wikisum', 'eli5', 'wow'])
+    parser.add_argument('--dataset', type=str, default='lmdata', help='input dataset', choices=[
+        'strategyqa', 'hotpotqa', '2wikihop', 'wikisum', 'eli5', 'wow', 'asqa', 'lmdata'])
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
 
@@ -1564,7 +1594,7 @@ if __name__ == '__main__':
                 jsonl_files=jsonl_files,
                 anchor_text='',
                 beir_dir=None)  # 'data/wikisum/wikisum_all_beir'
-        elif dataset in {'eli5', 'wow'}:
+        elif dataset in {'eli5', 'wow', 'asqa', 'lmdata'}:
             eval(dataset=dataset,
                 jsonl_files=jsonl_files,
                 anchor_text='',
@@ -1581,8 +1611,9 @@ if __name__ == '__main__':
         dpr_to_beir(dpr_file, beir_dir)
 
     elif args.task == 'build_elasticsearch':
-        beir_corpus_file, index_name = args.inp  # 'wikipedia_dpr'
-        build_elasticsearch(beir_corpus_file, index_name)
+        beir_corpus_file_pattern, index_name = args.inp  # 'wikipedia_dpr'
+        get_id = lambda doc: doc['metadata']['line'] + '.' + str(doc['_id'])
+        build_elasticsearch(beir_corpus_file_pattern, index_name, get_id=get_id)
 
     elif args.task == 'mmlu_ret':
         mmlu_ret(output=args.out)
@@ -1601,3 +1632,8 @@ if __name__ == '__main__':
         dataset, split = args.inp
         out_file = args.out
         add_ref_to_kilt(dataset, split, out_file, skip_empty_ctx=True)
+
+    elif args.task == 'jsonl_to_keyvalue':
+        jsonl_file = args.inp[0]
+        keyvalue_file = args.out
+        jsonl_to_keyvalue(jsonl_file, keyvalue_file)
