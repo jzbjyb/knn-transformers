@@ -180,3 +180,5 @@ slurm
 .vscode
 openai_keys.sh
 *.jsonl
+bing_api_key.txt
+bing_search_cache
