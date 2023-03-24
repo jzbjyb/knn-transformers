@@ -10,6 +10,7 @@ import csv
 import copy
 import evaluate
 import re
+import logging
 from tqdm import tqdm
 import numpy as np
 import torch
@@ -1082,6 +1083,7 @@ def eval(
     dataset: str,
     jsonl_files: List[str],
     anchor_text: str = 'So the answer is',
+    prefix_to_remove: str = None,
     retrieval_percentiles: List[Union[int, float]] = [1, 0.25, 0.5, 0.75, 1.0],
     remove_followup: Tuple[str, str] = ('Follow up[^:]*:', '?'),
     beir_dir: str = None,
@@ -1109,12 +1111,26 @@ def eval(
         else:
             answers = [example['answer']]
         for i, answer in enumerate(answers):
-            if anchor_text and anchor_text in answer:
-                answer = answer[answer.find(anchor_text) + len(anchor_text):].strip()[:-1].strip().lower()
-                answers[i] = answer
-                if dataset == 'strategyqa':
-                    assert answer in {'yes', 'no'}
+            for find_to_rm in [prefix_to_remove, anchor_text]:
+                if find_to_rm and find_to_rm in answer:
+                    answer = answer[answer.find(find_to_rm) + len(find_to_rm):].strip()
+                    answers[i] = answer
+                    if dataset == 'strategyqa':
+                        answer = answer[:-1].strip().lower()
+                        assert answer in {'yes', 'no'}
+                    elif dataset == 'mmlu':
+                        answer = answer[:-1].strip().lower()
+                        assert answer in {'(a)', '(b)', '(c)', '(d)', '(e)'}
         return answers if len(answers) > 1 else answers[0]
+
+    def choose_full_prediction(example):
+        pred = example['output'].split('\n\n', 1)[0].strip()
+        if prefix_to_remove:
+            if prefix_to_remove in pred:
+                pred = pred[pred.find(prefix_to_remove) + len(prefix_to_remove):].strip()
+            else:
+                logging.warning('format error')
+        return pred
 
     metric_func = evaluate.load('rouge')
 
@@ -1156,7 +1172,7 @@ def eval(
         ref = choose_reference(example)
         final_ans = choose_final_answer(example)
         ans_id = example['answer_id'] if 'answer_id' in example else None
-        pred = example['output'].split('\n\n', 1)[0].strip()
+        pred = choose_full_prediction(example)
         # pred = example['output'][len(example['prompt']):].split('\n\n', 1)[0].strip()
         if remove_followup:
             raw_pred = pred
@@ -1184,7 +1200,7 @@ def eval(
             final_metrics['wrongformat'] += 1
         else:
             pred_ans = pred[position + len(anchor_text):].strip()
-            if dataset == 'strategyqa':
+            if dataset in {'strategyqa', 'mmlu'}:
                 correct = int(final_ans.lower() in pred_ans.lower())
                 final_metrics['correct'] += correct
                 final_metrics['incorrect'] += 1 - correct
@@ -1212,7 +1228,7 @@ def eval(
         if has_search:
             search_per_example.append(len(re.findall('\[Search\(', pred)))
 
-        if debug:
+        if debug and wrongformat:
             print('ID->', qid)
             print('Q->', question)
             print()
@@ -1444,8 +1460,8 @@ if __name__ == '__main__':
         'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir',
         'add_ref_to_kilt', 'jsonl_to_keyvalue'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='lmdata', help='input dataset', choices=[
-        'strategyqa', 'hotpotqa', '2wikihop', 'wikisum', 'eli5', 'wow', 'asqa', 'lmdata'])
+    parser.add_argument('--dataset', type=str, default='asqa', help='input dataset', choices=[
+        'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'eli5', 'wow', 'asqa', 'lmdata'])
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
 
@@ -1584,6 +1600,11 @@ if __name__ == '__main__':
                 jsonl_files=jsonl_files,
                 anchor_text='answer is',
                 beir_dir='data/strategyqa/train_cot_beir')
+        elif dataset == 'mmlu':
+            eval(dataset=dataset,
+                jsonl_files=jsonl_files,
+                anchor_text='answer is',
+                beir_dir=None)
         elif dataset == '2wikihop':
             eval(dataset=dataset,
                 jsonl_files=jsonl_files,
@@ -1594,10 +1615,16 @@ if __name__ == '__main__':
                 jsonl_files=jsonl_files,
                 anchor_text='',
                 beir_dir=None)  # 'data/wikisum/wikisum_all_beir'
-        elif dataset in {'eli5', 'wow', 'asqa', 'lmdata'}:
+        elif dataset in {'eli5', 'wow', 'lmdata'}:
             eval(dataset=dataset,
                 jsonl_files=jsonl_files,
                 anchor_text='',
+                beir_dir=None)
+        elif dataset in {'asqa'}:
+            eval(dataset=dataset,
+                jsonl_files=jsonl_files,
+                anchor_text='',
+                prefix_to_remove=None,  # 'Given all interpretations, the comprehensive answer is as follow.',
                 beir_dir=None)
 
     elif args.task == 'kilt_to_beir':

@@ -1,6 +1,7 @@
 from typing import List, Dict, Any, Tuple
 from operator import itemgetter
 import spacy
+import tiktoken
 
 
 class CtxPrompt:
@@ -209,39 +210,59 @@ class ApiReturn:
         self,
         prompt: str,
         text: str,
-        tokens: List[str] = [],
-        probs: List[float] = [],
-        offsets: List[int] = [],
+        tokens: List[str] = None,
+        probs: List[float] = None,
+        offsets: List[int] = None,
         finish_reason: str = 'stop',
+        model: str = None,
         skip_len: int = 0,
     ):
+        self.model = model
         self.prompt = prompt
         self.text = text
-        assert len(tokens) == len(probs) == len(offsets)
+
         self.tokens = tokens
         self.probs = probs
         self.offsets = offsets
+        if self.has_tokens:
+            assert len(tokens) == len(probs) == len(offsets)
+
         self.finish_reason = finish_reason
         if self.finish_reason is None:
             self.finish_reason = 'stop'  # TODO: a bug from openai?
 
         if skip_len:  # skip `skip_len` chars at the beginning
             self.text = self.text[skip_len:]
-            i = 0
-            for i, off in enumerate(self.offsets):
-                if off == skip_len:
-                    break
-                elif off > skip_len:  # the previous token span across the boundary
-                    i = i - 1
-                    assert i >= 0
-                    break
-            self.tokens = self.tokens[i:]
-            self.probs = self.probs[i:]
-            self.offsets = self.offsets[i:]
+            if self.has_tokens:
+                i = 0
+                for i, off in enumerate(self.offsets):
+                    if off == skip_len:
+                        break
+                    elif off > skip_len:  # the previous token span across the boundary
+                        i = i - 1
+                        assert i >= 0
+                        break
+                self.tokens = self.tokens[i:]
+                self.probs = self.probs[i:]
+                self.offsets = self.offsets[i:]
+
+    @property
+    def has_tokens(self):
+        return self.tokens is not None
+
+    @property
+    def token_probs(self):
+        if self.has_tokens:
+            return self.probs
+        else:
+            return []
 
     @property
     def num_tokens(self):
-        return len(self.tokens)
+        if self.has_tokens:
+            return len(self.tokens)
+        else:
+            return len(tiktoken.encoding_for_model(self.model).encode(self.text))
 
     @property
     def has_endoftext(self):
@@ -271,6 +292,8 @@ class ApiReturn:
         raise NotImplementedError
 
     def truncate_at_prob(self, low: float):
+        assert self.has_tokens, 'not supported'
+
         if self.num_tokens <= 1:
             return self
 
@@ -314,16 +337,18 @@ class ApiReturn:
                     break
 
             if break_at > 0 and break_at < len(self.text):  # truncation
-                i = 0
-                for i in range(self.num_tokens):
-                    if self.offsets[i] - len(self.prompt) >= break_at:
-                        break_at = self.offsets[i] - len(self.prompt)
-                        break
-                assert i > 0 and break_at > 0
+                if self.has_tokens:
+                    i = 0
+                    for i in range(self.num_tokens):
+                        if self.offsets[i] - len(self.prompt) >= break_at:
+                            break_at = self.offsets[i] - len(self.prompt)
+                            break
+                    assert i > 0
+                    self.tokens = self.tokens[:i]
+                    self.probs = self.probs[:i]
+                    self.offsets = self.offsets[:i]
+                assert break_at > 0
                 self.text = self.text[:break_at]
-                self.tokens = self.tokens[:i]
-                self.probs = self.probs[:i]
-                self.offsets = self.offsets[:i]
                 self.finish_reason = 'boundary'
         else:
             raise NotImplementedError
@@ -334,17 +359,18 @@ class ApiReturn:
         if position == -1:
             return
         self.text = self.text[:position]
-        i = 0
-        for i, off in enumerate(self.offsets):
-            if off - len(self.prompt) == position:
-                break
-            elif off - len(self.prompt) > position:  # the previous token span across the boundary
-                i = i - 1
-                assert i >= 0
-                break
-        self.tokens = self.tokens[:i]
-        self.probs = self.probs[:i]
-        self.offsets = self.offsets[:i]
+        if self.has_tokens:
+            i = 0
+            for i, off in enumerate(self.offsets):
+                if off - len(self.prompt) == position:
+                    break
+                elif off - len(self.prompt) > position:  # the previous token span across the boundary
+                    i = i - 1
+                    assert i >= 0
+                    break
+            self.tokens = self.tokens[:i]
+            self.probs = self.probs[:i]
+            self.offsets = self.offsets[:i]
 
     def use_as_query(
         self,
@@ -353,6 +379,7 @@ class ApiReturn:
     ):
         if low is None and mask is None:
             return self.text
+        assert self.has_tokens, 'not supported'
         if low:
             ok = False
             for p in self.probs:

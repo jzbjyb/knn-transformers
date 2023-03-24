@@ -156,7 +156,6 @@ class BM25:
                 self.tokenizer.padding_side = ori_ps
                 self.tokenizer.truncation_side = ori_ts
                 queries = self.tokenizer.batch_decode(tokenized, skip_special_tokens=True)
-                print('Query ------> ', queries[0], max_query_length)
 
             # retrieve
             results: Dict[str, Dict[str, Tuple[float, str]]] = self.retriever.retrieve(self.corpus, dict(zip(range(len(queries)), queries)), disable_tqdm=True)

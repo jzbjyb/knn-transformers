@@ -23,7 +23,7 @@ elif [[ $model == 'turbo' ]]; then
     -H "Authorization: Bearer $key" \
     -d '{
       "model": "gpt-3.5-turbo",
-      "messages": [{"role": "user", "content": "Hello!"}],
+      "messages": [{"role": "user", "content": "Hello! What is"}],
       "temperature": 0,
       "frequency_penalty": 0.0
     }'

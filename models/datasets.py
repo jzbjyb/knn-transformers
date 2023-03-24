@@ -7,9 +7,10 @@ from operator import itemgetter
 from collections import Counter, defaultdict
 import re
 import string
+from tqdm import tqdm
 import numpy as np
 import spacy
-from datasets import Dataset, load_dataset
+from datasets import Dataset, load_dataset, concatenate_datasets
 from beir.datasets.data_loader import GenericDataLoader
 from .templates import CtxPrompt
 logging.basicConfig(level=logging.INFO)
@@ -1425,8 +1426,37 @@ class ASQA(BaseDataset):
     cot_output_template = lambda self, cot, ans: ans
     cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a comprehensive and informative answer for a given question based on the provided search results above. You must only use information from the provided search results. Combine search results together into a coherent answer. Do not repeat text.\nQuestion: {ques}\nAnswer: '
 
+    cot_subq_examplars: List[Dict] = [
+        {
+            "answer": "This question is ambiguous and it has two interpretations: (1) When did the album bat out of hell come out? (2) When did the TV series bat out of hell come out? Given all interpretations, the comprehensive answer is as follows. Bat Out of Hell is a debut album, that came out on October 21, 1977, by American rock singer Meat Loaf and composer Jim Steinman. It was developed from a musical, Neverland, a futuristic rock version of Peter Pan, which Steinman wrote for a workshop in 1974. The British television show with the same name, released on 26 November 1966, a thriller that followed two lovers, Diana Stewart, and Mark Paxton, who are haunted by the voice of Diana's husband over the telephone after he is murdered by the couple."
+        },
+        {
+            "answer": "This question is ambiguous and it has four interpretations: (1) Who was the 16th chairperson of the Federal Reserve? (2) Who was the 15th chairperson of the Federal Reserve? (3) Who was the 14th chairperson of the Federal Reserve? (4) Who was the 13th chairperson of the Federal Reserve? Given all interpretations, the comprehensive answer is as follow. The current and 16th Chair of the Federal Reserve is Jerome Powell, who has held the position since 2018 after a nomination from President Trump. Powell replaced Janet Yellen, who was appointed by President Obama in 2014. Previously, the office was held by Ben Bernanke, who was first appointed by President Bush in 2006 and Alan Greenspan, who was first appointed by President Reagan in 1987."
+        },
+        {
+            "answer": "This question is ambiguous and it has two interpretations: (1) What is the car called in the movie, National Lampoon's Vacation? (2) What is the actual car in the movie, National lampoon's Vacation? Given all interpretations, the comprehensive answer is as follow. National Lampoon's Vacation, sometimes referred to as Vacation, is a 1983 American road comedy film directed by Harold Ramis, starring Chevy Chase, Beverly D'Angelo, Imogene Coca, Randy Quaid, John Candy, and Christie Brinkley in her acting debut. The Wagon Queen Family Truckster station wagon was created specifically for the film. It is based on a 1979 Ford LTD Country Squire station wagon."
+        },
+        {
+            "answer": "This question is ambiguous and it has two interpretations: (1) Who sang the original version of God's Not Dead? (2) Who sang God's Not Dead as a cover? Given all interpretations, the comprehensive answer is as follow. Like a Lion is song written by Daniel Bashta that was originally performed by Passion with David Crowder on the 2010 album Passion: Awakening. In 2011, this song was covered by Newsboys as God's Not Dead (Like a Lion) and released as a single from their album God's Not Dead. In the Newsboys' version, the lead vocals are performed by Michael Tait and Kevin Max is featured. The Newsboys' version charted in 2014 after the release of the film God's Not Dead. The band performs the song in a concert sequence at the end of the film."
+        },
+        {
+            "answer": "This question is ambiguous and it has four interpretations: (1) Which horse won the last triple crown of horse racing? (2) Which jockey won the last triple crown of horse racing? (3) Which trainer won the last triple crown of horse racing? (4) Which breeder won the last triple crown of horse racing? Given all interpretations, the comprehensive answer is as follow. In horse racing, a horse is said to have won the Triple Crown if they win the Kentucky Derby, Preakness Stakes, and Belmont Stakes all in the same year. The last triple crown of horse racing occurred in 2018 with the horse Justify. Justify's jockey was Mike Smith, his trainer was Bob Baffert, and his breeder was John D Gunther."
+        },
+        {
+            "answer": "This question is ambiguous and it has three interpretations: (1) When did the broncos last win the superbowl in 1998? (2) When did the broncos last win the superbowl in 1999? (3) When did the broncos last win the superbowl in 2016? Given all interpretations, the comprehensive answer is as follow. The Super Bowl is the annual American football game that determines the champion of the National Football League (NFL). Since January 1971, the winner of the American Football Conference (AFC) Championship Game has faced the winner of the National Football Conference (NFC) Championship Game in the culmination of the NFL playoffs. The Denver Broncos of the AFC have won the Super Bowl on January 25,1998; January 31, 1999; and February 7, 2016."
+        },
+        {
+            "answer": "This question is ambiguous and it has three interpretations: (1) How many cvs stores are there in the usa before 1997? (2) How many cvs stores are there in the usa as of 2006? (3) How many cvs stores are there in the usa as of 2016? Given all interpretations, the comprehensive answer is as follow. CVS Pharmacy, Inc., previously CVS/pharmacy, is an American retail corporation headquartered in Woonsocket, Rhode Island and was owned by its original holding company Melville Corporation from its inception until its current parent company was spun off into its own company in 1996. In 1997, CVS nearly tripled its 1,400 stores after purchasing the 2,500-store Revco chain. After January 2006, CVS operated over 6,200 stores in 43 states and the District of Columbia and in some locations, CVS has two stores less than two blocks apart. CVS Pharmacy is currently the largest pharmacy chain in the United States by number of locations, with over 9,600 as of 2016, and total prescription revenue and its parent company ranks as the fifth largest U.S. corporation by FY2020 revenues in the Fortune 500."
+        },
+        {
+            "answer": "This question is ambiguous and it has four interpretations: (1) Who pays Max Branning's first wife in EastEnders? (2) Who plays Max Branning's second wife in EastEnders? (3) Who plays Max Branning's third wife in EastEnders? (4) Who plays Max Branning's fourth wife in EastEnders? Given all interpretations, the comprehensive answer is as follow. Max Branning had 4 wives in EastEnders. The first wife was Sukie Smith, followed by Jo Joyner, then Kierston Wareing, and finally, Tanya Franks, as fourth."
+        }
+    ]
+    cot_subq_output_template = cot_output_template
+    cot_subq_demo_input_template = cot_subq_test_input_template = cot_test_input_template
+
     def __init__(self, json_file: str = None, split: str = 'dev', prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'cot_ret'}
+        assert prompt_type in {'cot', 'cot_subq'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
@@ -1505,3 +1535,85 @@ class LMData(BaseDataset):
                     'gold_output': output,
                 })
         return Dataset.from_list(dataset)
+
+
+def parse_mmlu_prompt(json_file: str) -> Dict[str, List[Dict]]:
+    cot_start_anchor = "A: Let's think step by step."
+    final_ans_start_anchor = 'The answer is'
+    task2examplars: Dict[str, List[Dict]] = {}
+    if not os.path.exists(json_file):
+        return {}
+    for task, prompt in json.load(open(json_file)).items():
+        examplars = prompt.split('\n\n')[1:]  # the first line is a general description
+        assert len(examplars) >= 4, task
+        formated_examplars: List[Dict] = []
+        for examplar in examplars:
+            cot_start = examplar.find(cot_start_anchor)
+            question = examplar[:cot_start].strip()
+            assert question.startswith('Q:')
+            question = question[2:].strip()
+            cot = examplar[cot_start + len(cot_start_anchor):]
+            final_ans_start = cot.find(final_ans_start_anchor)
+            final_ans = cot[final_ans_start + len(final_ans_start_anchor):].strip().rstrip('.').lstrip('(').rstrip(')')
+            assert final_ans in {'A', 'B', 'C', 'D', 'E'}, f'{final_ans}, {task}'
+            cot = cot[:final_ans_start].strip()
+            formated_examplars.append({
+                'question': question,
+                'cot': cot,
+                'answer': final_ans
+            })
+        task2examplars[task] = formated_examplars
+    return task2examplars
+
+
+class MMLUSingle(BaseDataset):
+    mmlu_prompt = parse_mmlu_prompt('data/mmlu/mmlu-cot.json')
+
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f"Q: {ques}\nA: Let's think step by step. "
+    cot_output_template = lambda self, cot, ans: f'{cot} The answer is ({ans}).'
+
+    def __init__(self, tasks: List[str] = [], prompt_type: str = 'cot'):
+        assert len(tasks) == 1
+        assert prompt_type in {'cot'}
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplars = [e for task in tasks for e in self.mmlu_prompt[task]]
+        self.dataset = self.load_data(tasks)
+
+    def load_data(self, tasks: List[str]):
+        dataset = []
+        for task in tasks:
+            task_data = load_dataset('lukaemon/mmlu', task)
+            for _id, example in enumerate(task_data['test']):
+                q = example['input'].strip() + '\n'
+                assert 'E' not in example
+                for letter in ['A', 'B', 'C', 'D']:
+                    q += '(' + letter + ') ' + example[letter].strip() + ' '
+                a = example['target']
+                output = self.output_template('', a)
+                dataset.append({
+                    'qid': f'{task}_{_id}',
+                    'question': q,
+                    'answer': a,
+                    'gold_output': output,
+                })
+        return Dataset.from_list(dataset)
+
+class MMLU(BaseDataset):
+    def __init__(self, tasks: List[str] = [], prompt_type: str = 'cot'):
+        self.data_list: List[MMLUSingle] = []
+        for task in tqdm(tasks):
+            self.data_list.append(MMLUSingle([task], prompt_type=prompt_type))
+
+    def format(self, *args, **kwargs):
+        for data in self.data_list:
+            data.format(*args, **kwargs)
+
+    def retrieval_augment_examplars(self, *args, **kwargs):
+        for data in tqdm(self.data_list, desc='retrieve for all tasks'):
+            data.retrieval_augment_examplars(*args, **kwargs)
+
+    @property
+    def dataset(self):
+        return concatenate_datasets([data.dataset for data in self.data_list])

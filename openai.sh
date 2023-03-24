@@ -7,9 +7,9 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=arxiv
-batch_size=8
-model=code-davinci-002
+dataset=asqa
+batch_size=1
+model=gpt-3.5-turbo-0301  # code-davinci-002, gpt-3.5-turbo-0301
 consistency=1
 
 if [[ ${dataset} == 'hotpotqa' ]]; then
@@ -40,6 +40,9 @@ elif [[ ${dataset} == 'asqa' ]]; then
     input="--input data/asqa/ASQA.json"
     index_name=wikipedia_dpr
     fewshot=8
+    if [[ ${model} == *turbo* ]]; then
+        fewshot=4
+    fi
     max_num_examples=1000000
     max_generation_len=256
 elif [[ ${dataset} == 'wow' ]]; then
@@ -67,13 +70,20 @@ elif [[ ${dataset} == 'arxiv' ]]; then
     max_num_examples=1000
     max_generation_len=512
     dataset=lmdata
+elif [[ ${dataset} == 'mmlu' ]]; then
+    input=""
+    index_name=wikipedia_dpr
+    fewshot=4
+    max_num_examples=1000
+    max_generation_len=256
 else
     exit
 fi
 
-if [[ ${model} != code-* ]]; then
-    num_keys=1
-fi
+
+#if [[ ${model} != code-* ]]; then
+#    num_keys=1
+#fi
 
 if [[ ${index_name} == "test" && ${input} != "none" ]]; then  # build index
     BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
@@ -81,7 +91,7 @@ if [[ ${index_name} == "test" && ${input} != "none" ]]; then  # build index
         --dataset ${dataset} ${input} \
         --fewshot ${fewshot} \
         --index_name ${index_name} \
-        --openai_keys ${keys[0]} \
+        --openai_keys ${test_key} \
         --build_index
     echo '========= index built ========='
 fi
@@ -99,7 +109,7 @@ if [[ ${debug} == "true" ]]; then
         --output test.jsonl \
         --num_shards 1 \
         --shard_id 0 \
-        --openai_keys ${keys[0]} \
+        --openai_keys ${test_key} \
         --debug
     exit
 fi

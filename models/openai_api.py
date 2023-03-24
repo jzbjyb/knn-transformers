@@ -20,7 +20,7 @@ from beir.retrieval.search.lexical import BM25Search
 import openai
 from .retriever import BM25
 from .templates import CtxPrompt, ApiReturn, RetrievalInstruction
-from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, WoWLong, ASQA, LMData
+from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, WoWLong, ASQA, MMLU, LMData
 
 logging.basicConfig(level=logging.INFO)
 
@@ -144,7 +144,7 @@ class QueryAgent:
         self.frequency_penalty_in_prompt = retrieval_kwargs.get('frequency_penalty_in_prompt', 0.0)
 
         self.prefix_method = retrieval_kwargs.get('prefix_method', None)
-        if self.prefix_method in {'sentence', 'all'} or self.prefix_method.startswith('freq:'):  # no truncation when computing PPL
+        if self.prefix_method in {'sentence', 'all'} or (self.prefix_method and self.prefix_method.startswith('freq:')):  # no truncation when computing PPL
             self.truncate_at_prob = 0
             self.truncate_at_boundary = None
             self.max_generation_len = 100000  # no limit
@@ -157,7 +157,6 @@ class QueryAgent:
         assert topk >= 1
         tokenized = self.tokenizer(text, return_offsets_mapping=True)
         ids, offsets = tokenized['input_ids'][:topk], tokenized['offset_mapping'][:topk]
-        #prefix = self.tokenizer.decode(ids)  # not revertable
         last_position = offsets[-1][1]
         prefix = text[:last_position]
         return prefix, last_position
@@ -191,6 +190,7 @@ class QueryAgent:
             raise KeyBrokenException()
 
         # init tracking variables
+        max_num_req_per_min = 1000 if is_chat_model else 10
         min_sleep = 60 / max_num_req_per_min
         add_sleep = 3
         expbf = 2
@@ -212,7 +212,8 @@ class QueryAgent:
 
         # get prefix
         echo = False
-        if self.prefix_method and not is_lookahead:  # prefix is not allowed to use in look ahead
+        use_prefix = (self.prefix_method and self.prefix_method.startswith('sentence_first:')) or (self.prefix_method and not is_lookahead)
+        if use_prefix:  # prefix is not allowed to use in look ahead
             echo = True
             prefixes: List[Tuple[str, int]] = [q.get_prefix(qagent=self, prefix_method=self.prefix_method) for q in queries]
             to_gen_len = set(map(itemgetter(1), prefixes))
@@ -252,17 +253,24 @@ class QueryAgent:
                 logging.info(f'start query with key {api_key[-5:]}')
                 if is_chat_model:
                     assert len(queries) == 1, ''
-                    responses = openai.Completion.create(
+                    if 'max_tokens' in params:
+                        params['max_tokens'] = max(1, params['max_tokens'])  # 0 is not allowed for chatgpt
+                    responses = openai.ChatCompletion.create(
                         api_key=api_key,
                         model=self.model,
                         messages=[{'role': 'user', 'content': prompts_to_issue[0]}],
                         temperature=self.temperature,
                         top_p=self.top_p,
-                        logprobs=0,
                         logit_bias=logit_bias,
                         frequency_penalty=self.frequency_penalty,
-                        echo=echo,
                         **params)
+
+                    generations = [ApiReturn(
+                        prompt=q,
+                        text=(prefixes[0][0] + ' ' + r['message']['content']) if echo else r['message']['content'],  # TODO: corner case where space does not work?
+                        finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
+                        model=responses['model'],
+                        skip_len=0) for r, (q, _) in zip(responses['choices'], prompts)]
                 else:
                     responses = openai.Completion.create(
                         api_key=api_key,
@@ -276,14 +284,15 @@ class QueryAgent:
                         echo=echo,
                         **params)
 
-                generations = [ApiReturn(
-                    prompt=q,
-                    text=r['message']['content'] if is_chat_model else r['text'],
-                    tokens=[] if is_chat_model else r['logprobs']['tokens'],
-                    probs=[] if is_chat_model else [np.exp(lp) if lp is not None else lp for lp in r['logprobs']['token_logprobs']],
-                    offsets=[] if is_chat_model else r['logprobs']['text_offset'],
-                    finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
-                    skip_len=len(q) if echo else 0) for r, (q, _) in zip(responses['choices'], prompts)]
+                    generations = [ApiReturn(
+                        prompt=q,
+                        text=r['text'],
+                        tokens=r['logprobs']['tokens'],
+                        probs=[np.exp(lp) if lp is not None else lp for lp in r['logprobs']['token_logprobs']],
+                        offsets=r['logprobs']['text_offset'],
+                        finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
+                        model=responses['model'],
+                        skip_len=len(q) if echo else 0) for r, (q, _) in zip(responses['choices'], prompts)]
 
                 logging.info(f'finish query with key {api_key[-5:]}')
                 if self.debug:
@@ -292,7 +301,7 @@ class QueryAgent:
                     print('Output ->', generations[0].text)
                     print('Stop ->', generations[0].finish_reason)
                     print('Tokens ->', generations[0].tokens)
-                    print('Probs ->', generations[0].probs)
+                    print('Probs ->', generations[0].token_probs)
                     print('Gold ->', queries[0].gold_output)
                     input('-' * 50 + '\n')
             except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:  # limit-related errors
@@ -333,6 +342,7 @@ class QueryAgent:
                         api_key=ori_api_key)
                 retry += 1
                 logging.info(f'sleep for error {min_sleep} with key {api_key[-5:]}')
+                logging.info(e)
                 time.sleep(min_sleep)
             else:
                 break
@@ -361,7 +371,7 @@ class QueryAgent:
                 params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym},
                 api_key=api_key)
             outputs = [ar.text for ar in ars]
-            probs = [ar.probs for ar in ars]
+            probs = [ar.token_probs for ar in ars]
             traces = [[(ar.prompt, ar.text)] for ar in ars]
             return outputs, probs, None, traces
 
@@ -481,7 +491,7 @@ class QueryAgent:
                     for (i, query), ar in zip(queries, apireturns):
                         cont = ar.text
                         final_outputs[i] += cont
-                        final_probs[i].extend(ar.probs)
+                        final_probs[i].extend(ar.token_probs or [])
                         final_queries[i] = query
                         traces[i].append((ar.prompt, cont))
                         query.add_generation(cont)
@@ -541,7 +551,7 @@ class QueryAgent:
             for _i, ((i, query), ar) in enumerate(zip(queries, apireturns)):
                 cont, reason = ar.text, ar.finish_reason
                 final_outputs[i] += cont
-                final_probs[i].extend(ar.probs)
+                final_probs[i].extend(ar.token_probs)
                 final_queries[i] = query
                 traces[i].append((ar.prompt, cont))
                 if reason == 'stop':
@@ -567,7 +577,7 @@ class QueryAgent:
             for i, (query, ar) in enumerate(zip(final_queries, apireturns)):
                 cont, reason = ar.text, ar.finish_reason
                 final_outputs[i] = cont
-                final_probs[i] = ar.probs
+                final_probs[i] = ar.token_probs
                 traces[i].append((ar.prompt, cont))
 
         return final_outputs, final_probs, final_retrievals, traces
@@ -617,8 +627,8 @@ def write_worker(output_file: str, output_queue: Queue, size: int = None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='strategyqa', choices=
-                        ['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow', 'wow_train_1k', 'asqa', 'lmdata'])
-    parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003'])
+                        ['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow', 'wow_train_1k', 'asqa', 'mmlu', 'lmdata'])
+    parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003', 'gpt-3.5-turbo-0301'])
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
     parser.add_argument('--index_name', type=str, default='test')
@@ -663,8 +673,7 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'prefix_method': 'freq:32',
-        'topk': 10,
+        'topk': 3,
         'use_ctx': True,
         'frequency': 64,
         'boundary': [],
@@ -673,16 +682,15 @@ if __name__ == '__main__':
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 32,
-        'use_full_input_as_query': False,
+        'max_query_length': 64,
+        'use_full_input_as_query': True,
         'retrieval_at_beginning': False,
-        'look_ahead_steps': 16,
-        'look_ahead_pre_retrieval': False,
-        'look_ahead_truncate_at_boundary': None,
+        'look_ahead_steps': 64,
+        'look_ahead_truncate_at_boundary': 'sentence',
         'look_ahead_filter_prob': None,
         'look_ahead_mask_prob': None,
         'look_ahead_boundary': [],
-        'only_use_look_ahead': False,
+        'only_use_look_ahead': True,
         'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         #'retrieval_trigers': [('\[Search\("', '")]')],
@@ -690,13 +698,13 @@ if __name__ == '__main__':
         'force_generate': None,
         'forbid_generate_step': None,
         'truncate_at_prob': 0.0,
-        'truncate_at_boundary': None,
+        'truncate_at_boundary': 'sentence',
         'append_retrieval': False,
-        'use_ctx_for_examplars': 'gold',
+        'use_ctx_for_examplars': 'ret',
         'use_retrieval_instruction': False,
-        'format_reference_method': 'default',
+        'format_reference_method': 'searchresults',
         'ctx_position': 'before_case',
-        'prompt_type': 'none',
+        'prompt_type': 'cot',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,
@@ -759,6 +767,23 @@ if __name__ == '__main__':
     elif args.dataset == 'wikisum_all_beir':
         data = WikiSum(args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WikiSum.get_gold_ctxs
+    elif args.dataset == 'mmlu':
+        tasks = ['abstract_algebra', 'anatomy', 'astronomy', 'business_ethics',
+        'clinical_knowledge', 'college_biology', 'college_chemistry', 'college_computer_science',
+        'college_mathematics', 'college_medicine', 'college_physics', 'computer_security',
+        'conceptual_physics', 'econometrics', 'electrical_engineering', 'elementary_mathematics',
+        'formal_logic', 'global_facts', 'high_school_biology', 'high_school_chemistry',
+        'high_school_computer_science', 'high_school_european_history', 'high_school_geography',
+        'high_school_government_and_politics', 'high_school_macroeconomics', 'high_school_mathematics',
+        'high_school_microeconomics', 'high_school_physics', 'high_school_psychology', 'high_school_statistics',
+        'high_school_us_history', 'high_school_world_history', 'human_aging', 'human_sexuality',
+        'international_law', 'jurisprudence', 'logical_fallacies', 'machine_learning', 'management',
+        'marketing', 'medical_genetics', 'miscellaneous', 'moral_disputes', 'moral_scenarios',
+        'nutrition', 'philosophy', 'prehistory', 'professional_accounting', 'professional_law',
+        'professional_medicine', 'professional_psychology', 'public_relations', 'security_studies',
+        'sociology', 'us_foreign_policy', 'virology', 'world_religions']
+        data = MMLU(tasks=tasks, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = MMLU.get_gold_ctxs
     elif args.dataset == 'lmdata':
         data = LMData(args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = LMData.get_gold_ctxs
