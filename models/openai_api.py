@@ -25,6 +25,10 @@ from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, 
 logging.basicConfig(level=logging.INFO)
 
 
+class NoKeyAvailable(Exception):
+    pass
+
+
 class KeyBrokenException(Exception):
     pass
 
@@ -41,12 +45,15 @@ class KeyManager:
         self.keys = keys
         self.next_available_key_ind = 0
         self.key2times: Dict[str, List[float]] = defaultdict(list)
+        self.forbid_keys: Set[str] = set()
 
     def __len__(self):
         return len(self.keys)
 
     def get_key(self):
         logging.info(f'get key {self.next_available_key_ind}')
+        if self.next_available_key_ind is None:
+            raise NoKeyAvailable()
         # get key not in use
         to_return = self.keys[self.next_available_key_ind]
         assert not self.key2inuse[to_return]
@@ -63,22 +70,25 @@ class KeyManager:
         logging.info(f'get key {to_return[-5:]} next avai {self.next_available_key_ind}')
         return to_return
 
-    def return_key(self, key, time_spent: float = None):
+    def return_key(self, key, time_spent: float = None, forbid: bool = False):
         logging.info('return key')
-        # return key
+        # check
         assert self.key2inuse[key]
-        self.key2inuse[key] = False
         if time_spent:
             self.key2times[key].append(time_spent)
-        # set index
-        if self.next_available_key_ind is None:
-            self.next_available_key_ind = self.key2ind[key]
+        # return key
+        if not forbid:
+            self.key2inuse[key] = False
+            if self.next_available_key_ind is None:
+                self.next_available_key_ind = self.key2ind[key]
+        else:
+            self.forbid_keys.add(key)
         logging.info('return key done')
 
     def get_report(self):
         report: List[str] = []
         for key in self.keys:
-            report.append(f'{key}\t{len(self.key2times[key])}\t{np.mean(self.key2times[key])}')
+            report.append(f'{key}\t{len(self.key2times[key])}\t{np.mean(self.key2times[key])}\t{key in self.forbid_keys}')
         return '\n'.join(report)
 
 
@@ -245,7 +255,22 @@ class QueryAgent:
             api_key = ori_api_key or os.getenv('OPENAI_API_KEY')
         if get_key_func:  # get key
             start_t = time.time()
-            api_key = get_key_func()
+            try:
+                api_key = get_key_func()
+            except NoKeyAvailable as e:
+                logging.info(f'sleep for nokey 30')
+                time.sleep(30)
+                return self.complete(
+                    queries,
+                    params,
+                    max_num_req_per_min=max_num_req_per_min,
+                    max_retry=max_retry,
+                    max_keys=max_keys,
+                    key_tried=key_tried + 1,
+                    force_generate=force_generate,
+                    forbid_generate=forbid_generate,
+                    api_key=ori_api_key,
+                    is_lookahead=is_lookahead)
 
         # error-tolerant querying
         while True:
@@ -305,10 +330,14 @@ class QueryAgent:
                     print('Gold ->', queries[0].gold_output)
                     input('-' * 50 + '\n')
             except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:  # limit-related errors
+                forbid = False
+                if 'error' in e.json_body and 'type' in e.json_body['error'] and e.json_body['error']['type'] == 'insufficient_quota':
+                    retry = max_retry
+                    forbid = True
                 if retry >= max_retry:
                     if return_key_func:  # return key
                         end_t = time.time()
-                        return_key_func(api_key, time_spent=end_t - start_t)
+                        return_key_func(api_key, time_spent=end_t - start_t, forbid=forbid)
                     return self.complete(
                         queries,
                         params,
@@ -318,9 +347,10 @@ class QueryAgent:
                         key_tried=key_tried + 1,
                         force_generate=force_generate,
                         forbid_generate=forbid_generate,
-                        api_key=ori_api_key)
+                        api_key=ori_api_key,
+                        is_lookahead=is_lookahead)
                 retry += 1
-                logging.info(f'sleep for rate {add_sleep + min_sleep} with key {api_key[-5:]}')
+                logging.info(f'sleep for rate {add_sleep + min_sleep} with key {api_key[-5:]} with type {type(e)}')
                 time.sleep(add_sleep + min_sleep)
                 add_sleep = add_sleep * expbf
             except KeyboardInterrupt as e:
@@ -339,7 +369,8 @@ class QueryAgent:
                         key_tried=key_tried + 1,
                         force_generate=force_generate,
                         forbid_generate=forbid_generate,
-                        api_key=ori_api_key)
+                        api_key=ori_api_key,
+                        is_lookahead=is_lookahead)
                 retry += 1
                 logging.info(f'sleep for error {min_sleep} with key {api_key[-5:]}')
                 logging.info(e)
@@ -673,6 +704,7 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
+        'prefix_method': 'sentence_first:3',
         'topk': 3,
         'use_ctx': True,
         'frequency': 64,

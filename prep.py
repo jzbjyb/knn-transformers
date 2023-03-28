@@ -1357,6 +1357,7 @@ def mmlu_ret(
         topk: int = 1000,
         output: str = None):
     from models.retriever import BM25
+    letters = ['A', 'B', 'C', 'D']
     retriever = BM25(
         tokenizer=None,
         dataset=(None, None, None),
@@ -1377,20 +1378,27 @@ def mmlu_ret(
         'machine_learning', 'management', 'marketing', 'medical_genetics', 'miscellaneous', 'moral_disputes',
         'moral_scenarios', 'nutrition', 'philosophy', 'prehistory', 'professional_accounting', 'professional_law',
         'professional_medicine', 'professional_psychology', 'public_relations', 'security_studies', 'sociology',
-        'us_foreign_policy', 'virology', 'world_religions', 'add_ref_to_kilt']
+        'us_foreign_policy', 'virology', 'world_religions']
     with open(output, 'w') as fout:
         for topic in topics:
-            dataset = load_dataset('hendrycks_test', topic)[split]
+            dataset = load_dataset('lukaemon/mmlu', topic)[split]
             for i in tqdm(range(len(dataset)), desc=topic):
-                q = dataset[i]['question']
+                q = dataset[i]['input'].strip()
+                answer = dataset[i]['target'].strip()
+                options = ''
+                for letter in letters:
+                    options += '(' + letter + ') ' + dataset[i][letter].strip() + ' '
                 ctx_ids, ctx_texts = retriever.retrieve_and_prepare(
-                    decoder_texts=[q],
+                    decoder_texts=[q + '\n' + options],
                     topk=topk,
                     max_query_length=None)
                 result = {
                     'topic': topic,
                     'split': split,
                     'index': i,
+                    'question': q,
+                    'options': {letter: dataset[i][letter].strip() for letter in letters},
+                    'answer': answer,
                     'docs': [(idx, text) for idx, text in zip(ctx_ids[0].tolist(), ctx_texts[0].tolist())]
                 }
                 fout.write(json.dumps(result) + '\n')
@@ -1460,7 +1468,7 @@ if __name__ == '__main__':
         'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir',
         'add_ref_to_kilt', 'jsonl_to_keyvalue'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='asqa', help='input dataset', choices=[
+    parser.add_argument('--dataset', type=str, default='eli5', help='input dataset', choices=[
         'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'eli5', 'wow', 'asqa', 'lmdata'])
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()

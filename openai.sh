@@ -7,7 +7,7 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=asqa
+dataset=eli5
 batch_size=1
 model=gpt-3.5-turbo-0301  # code-davinci-002, gpt-3.5-turbo-0301
 consistency=1
@@ -34,6 +34,9 @@ elif [[ ${dataset} == 'eli5' ]]; then
     input=""  # "--input data/eli5/val_astarget_selfprov_evidence.json.beir_dedup"
     index_name=wikipedia_dpr
     fewshot=8
+    if [[ ${model} == *turbo* ]]; then
+        fewshot=4
+    fi
     max_num_examples=1000000
     max_generation_len=256
 elif [[ ${dataset} == 'asqa' ]]; then
