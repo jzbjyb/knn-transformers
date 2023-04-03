@@ -7,10 +7,19 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=eli5
-batch_size=1
-model=gpt-3.5-turbo-0301  # code-davinci-002, gpt-3.5-turbo-0301
+dataset=mmlu
+batch_size=8
+model=text-davinci-003  # code-davinci-002, gpt-3.5-turbo-0301, text-davinci-003, text-curie-001
 consistency=1
+
+function is_expensive() {
+    if [[ ${model} == *turbo* || ${model} == *003 || ${model} == *001  ]]; then
+        echo true
+    else
+        echo false
+    fi
+}
+expensive=$(is_expensive)
 
 if [[ ${dataset} == 'hotpotqa' ]]; then
     input=""
@@ -28,13 +37,16 @@ elif [[ ${dataset} == '2wikihop' ]]; then
     input="--input data/2wikimultihopqa/dev_beir"
     index_name=wikipedia_dpr
     fewshot=15
+    if [[ ${expensive} == true ]]; then
+        fewshot=4
+    fi
     max_num_examples=1000
     max_generation_len=256
 elif [[ ${dataset} == 'eli5' ]]; then
     input=""  # "--input data/eli5/val_astarget_selfprov_evidence.json.beir_dedup"
     index_name=wikipedia_dpr
     fewshot=8
-    if [[ ${model} == *turbo* ]]; then
+    if [[ ${expensive} == true ]]; then
         fewshot=4
     fi
     max_num_examples=1000000
@@ -43,7 +55,7 @@ elif [[ ${dataset} == 'asqa' ]]; then
     input="--input data/asqa/ASQA.json"
     index_name=wikipedia_dpr
     fewshot=8
-    if [[ ${model} == *turbo* ]]; then
+    if [[ ${expensive} == true ]]; then
         fewshot=4
     fi
     max_num_examples=1000000
@@ -79,14 +91,17 @@ elif [[ ${dataset} == 'mmlu' ]]; then
     fewshot=4
     max_num_examples=1000
     max_generation_len=256
+    if [[ ${expensive} == true ]]; then
+        fewshot=2
+        max_generation_len=512
+    fi
 else
     exit
 fi
 
-
-#if [[ ${model} != code-* ]]; then
-#    num_keys=1
-#fi
+if [[ ${expensive} == true ]]; then  # use 100 examples as most
+    max_num_examples=$(( max_num_examples < 100 ? max_num_examples : 100 ))
+fi
 
 if [[ ${index_name} == "test" && ${input} != "none" ]]; then  # build index
     BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
@@ -135,8 +150,6 @@ for (( run=0; run<${consistency}; run++ )); do
         oneoutput=${output}.run${run}
     fi
     #file_lock=$(mktemp)
-    #for (( i=0; i<${num_shards}; i++ )); do
-    #okey="${keys[$i]}"
     BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
         --model ${model} \
         --dataset ${dataset} ${input} \
@@ -151,11 +164,7 @@ for (( run=0; run<${consistency}; run++ )); do
         --shard_id 0 \
         --openai_keys ${joined_keys} \
         #--file_lock ${file_lock}
-    #done
-    #wait
     #rm ${file_lock}
-    #cat ${oneoutput}.* > ${oneoutput}
-    #rm ${oneoutput}.*
 done
 
 exit
@@ -191,7 +200,8 @@ retrieval_kwargs = {
     'append_retrieval': False,
     'use_ctx_for_examplars': False,
     'use_retrieval_instruction': False,
-    'format_reference_method': 'default',
+    'use_instruction': False,
+    'format_reference_method': 'searchresults',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -232,7 +242,8 @@ retrieval_kwargs = {
     'append_retrieval': False,
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
-    'format_reference_method': 'default',
+    'use_instruction': False,
+    'format_reference_method': 'searchresults',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -273,7 +284,8 @@ retrieval_kwargs = {
     'append_retrieval': False,
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
-    'format_reference_method': 'default',
+    'use_instruction': False,
+    'format_reference_method': 'searchresults',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -314,7 +326,8 @@ retrieval_kwargs = {
     'append_retrieval': False,
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
-    'format_reference_method': 'default',
+    'use_instruction': False,
+    'format_reference_method': 'searchresults',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -355,7 +368,8 @@ retrieval_kwargs = {
     'append_retrieval': False,
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
-    'format_reference_method': 'default',
+    'use_instruction': False,
+    'format_reference_method': 'searchresults',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -396,7 +410,8 @@ retrieval_kwargs = {
     'append_retrieval': False,
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
-    'format_reference_method': 'default',
+    'use_instruction': False,
+    'format_reference_method': 'searchresults',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -443,7 +458,8 @@ retrieval_kwargs = {
     'append_retrieval': False,
     'use_ctx_for_examplars': False,
     'use_retrieval_instruction': 'cot',
-    'format_reference_method': 'default',
+    'use_instruction': False,
+    'format_reference_method': 'searchresults',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave_ret',
     'ctx_increase': 'replace',
@@ -484,7 +500,8 @@ retrieval_kwargs = {
     'append_retrieval': False,
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': 'cot',
-    'format_reference_method': 'default',
+    'use_instruction': False,
+    'format_reference_method': 'searchresults',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave_ret',
     'ctx_increase': 'replace',
@@ -525,7 +542,8 @@ retrieval_kwargs = {
     'append_retrieval': False,
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': 'cot',
-    'format_reference_method': 'default',
+    'use_instruction': False,
+    'format_reference_method': 'searchresults',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave_ret',
     'ctx_increase': 'replace',
@@ -568,7 +586,8 @@ retrieval_kwargs = {
     'append_retrieval': False,
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
-    'format_reference_method': 'default',
+    'use_instruction': False,
+    'format_reference_method': 'searchresults',
     'ctx_position': 'before_case',
     'prompt_type': 'none',
     'ctx_increase': 'replace',

@@ -231,7 +231,6 @@ def bm25search_search(self, corpus: Dict[str, Dict[str, str]], queries: Dict[str
         results = self.es.lexical_multisearch(
             texts=queries[start_idx:start_idx+self.batch_size],
             top_hits=top_k)
-
         for (query_id, hit) in zip(query_ids_batch, results):
             scores = {}
             for corpus_id, score, text in hit['hits']:
@@ -272,7 +271,6 @@ def elasticsearch_lexical_multisearch(self, texts: List[str], top_hits: int, ski
                     },
                 "size": skip + top_hits, # The same paragraph will occur in results
                 }
-
             request.extend([req_head, req_body])
 
         res = self.es.msearch(body = request)

@@ -53,20 +53,21 @@ def search_bing(query: str, count: int = 10, max_query_per_sec: int = 100, debug
     except Exception as ex:
         raise ex
 
-def search_bing_api(query: str, **kwargs):
+def search_bing_api(query: str, count: int):
     payload = json.dumps({'query': query})
     headers = {'X-Api-Key': 'jzbjybnb', 'Content-Type': 'application/json'}
     try:
         response = requests.request('POST', api_url, headers=headers, data=payload)
         response = response.json()
         results: List[Dict] = []
-        for page in response['webPages']['value']:
-            result = {
-                'url': page['url'],
-                'title': page['name'],
-                'snippet': page['snippet']
-            }
-            results.append(result)
+        if 'webPages' in response and 'value' in response['webPages']:
+            for page in response['webPages']['value']:
+                result = {
+                    'url': page['url'],
+                    'title': page['name'],
+                    'snippet': page['snippet']
+                }
+                results.append(result)
         return results
     except Exception as ex:
         raise ex

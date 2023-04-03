@@ -7,6 +7,7 @@ import tiktoken
 class CtxPrompt:
     ctx_position: str = 'begin'
     ret_instruction: "RetrievalInstruction" = None
+    instruction: str = None
     format_reference_method: str = 'default'
     add_ref_suffix: str = None
     add_ref_prefix: str = None
@@ -55,6 +56,8 @@ class CtxPrompt:
     def get_query_for_retrieval(self):
         if self.gen_len == 0:
             return self.question
+            #question = self.question[:self.question.find('(A)')].strip()  # TODO: debug
+            #return question
         else:
             return self.case
 
@@ -163,10 +166,11 @@ class CtxPrompt:
     def format(
         self,
         use_ctx: bool = False,
-        use_ret_instruction: bool = True
+        use_ret_instruction: bool = True,
+        use_instruction: bool = True,
     ):
         # run on demo
-        demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=False)[0] for d in self.demo])  # TODO: no retrieval for demo
+        demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=False, use_instruction=False)[0] for d in self.demo])
 
         use_ctx = use_ctx and bool(self.ctx)  # do not use ctx when it's None or empty string
         use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
@@ -184,6 +188,10 @@ class CtxPrompt:
         # append task instruction
         if use_ret_instruction:
             elements.append(task)
+
+        # append additional instruction
+        if use_instruction and self.instruction is not None:
+            elements.append(self.instruction)
 
         # append demo
         if len(demo_formatted):
@@ -267,6 +275,18 @@ class ApiReturn:
     @property
     def has_endoftext(self):
         return self.EOS in self.tokens
+
+    @classmethod
+    def is_chat(cls, model: str):
+        return 'turbo' in model
+
+    @classmethod
+    def is_code(cls, model: str):
+        return 'code' in model
+
+    @classmethod
+    def no_stop(cls, model: str, dataset: str):
+        return 'turbo' in model or dataset in {'lmdata', 'mmlu'}
 
     @classmethod
     def get_sent(cls, text: str, position: str = 'begin'):
@@ -377,7 +397,7 @@ class ApiReturn:
         low: float = None,
         mask: float = None
     ):
-        if low is None and mask is None:
+        if not low and not mask:
             return self.text
         assert self.has_tokens, 'not supported'
         if low:

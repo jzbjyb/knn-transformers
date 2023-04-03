@@ -192,7 +192,12 @@ class QueryAgent:
         api_key: str = None,
         is_lookahead: bool = False,
     ) -> List[ApiReturn]:
-        is_chat_model = 'turbo' in self.model
+        is_chat_model = ApiReturn.is_chat(self.model)
+        is_code_model = ApiReturn.is_code(self.model)
+        def process_chatgpt(message: str):
+            if message:
+                return ' ' + message
+            return message
 
         # check num of keys tried
         if key_tried >= max_keys:
@@ -200,7 +205,7 @@ class QueryAgent:
             raise KeyBrokenException()
 
         # init tracking variables
-        max_num_req_per_min = 1000 if is_chat_model else 10
+        max_num_req_per_min = 10 if is_code_model else 1000
         min_sleep = 60 / max_num_req_per_min
         add_sleep = 3
         expbf = 2
@@ -283,7 +288,10 @@ class QueryAgent:
                     responses = openai.ChatCompletion.create(
                         api_key=api_key,
                         model=self.model,
-                        messages=[{'role': 'user', 'content': prompts_to_issue[0]}],
+                        messages=[
+                            {'role': 'system', 'content': 'Follow the given examples and answer the question.'},
+                            {'role': 'user', 'content': prompts_to_issue[0]},
+                        ],
                         temperature=self.temperature,
                         top_p=self.top_p,
                         logit_bias=logit_bias,
@@ -292,7 +300,7 @@ class QueryAgent:
 
                     generations = [ApiReturn(
                         prompt=q,
-                        text=(prefixes[0][0] + ' ' + r['message']['content']) if echo else r['message']['content'],  # TODO: corner case where space does not work?
+                        text=(prefixes[0][0] + process_chatgpt(r['message']['content'])) if echo else process_chatgpt(r['message']['content']),  # TODO: corner case where space does not work?
                         finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
                         model=responses['model'],
                         skip_len=0) for r, (q, _) in zip(responses['choices'], prompts)]
@@ -331,7 +339,10 @@ class QueryAgent:
                     input('-' * 50 + '\n')
             except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:  # limit-related errors
                 forbid = False
-                if 'error' in e.json_body and 'type' in e.json_body['error'] and e.json_body['error']['type'] == 'insufficient_quota':
+                if e.json_body is not None and 'error' in e.json_body and 'type' in e.json_body['error'] and e.json_body['error']['type'] == 'insufficient_quota':  # quota error
+                    retry = max_retry
+                    forbid = True
+                if e.json_body is not None and 'error' in e.json_body and 'type' in e.json_body['error'] and e.json_body['error']['code'] == 'account_deactivated':  # ban error
                     retry = max_retry
                     forbid = True
                 if retry >= max_retry:
@@ -355,7 +366,7 @@ class QueryAgent:
                 add_sleep = add_sleep * expbf
             except KeyboardInterrupt as e:
                 raise e
-            except Exception as e:  # other errors
+            except Exception as e:  # other errors TODO: exclude length limitation
                 if retry >= max_retry:
                     if return_key_func:  # return key
                         end_t = time.time()
@@ -659,7 +670,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='strategyqa', choices=
                         ['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow', 'wow_train_1k', 'asqa', 'mmlu', 'lmdata'])
-    parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003', 'gpt-3.5-turbo-0301'])
+    parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003', 'gpt-3.5-turbo-0301', 'text-curie-001'])
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
     parser.add_argument('--index_name', type=str, default='test')
@@ -673,6 +684,7 @@ if __name__ == '__main__':
     parser.add_argument('--fewshot', type=int, default=0)
     parser.add_argument('--max_generation_len', type=int, default=128)
     parser.add_argument('--temperature', type=float, default=0.0)
+    parser.add_argument('--final_stop_sym', type=str, default=None, help='stop symbol')
 
     parser.add_argument('--build_index', action='store_true')
     parser.add_argument('--seed', type=int, default=2022)
@@ -704,36 +716,36 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'prefix_method': 'sentence_first:3',
-        'topk': 3,
-        'use_ctx': True,
-        'frequency': 64,
+        'topk': 1,
+        'use_ctx': False,
+        'frequency': 0,
         'boundary': [],
         #'boundary': ['Intermediate answer:'],
         #'boundary': ['")]'],
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 64,
-        'use_full_input_as_query': True,
+        'max_query_length': 16,
+        'use_full_input_as_query': False,
         'retrieval_at_beginning': False,
-        'look_ahead_steps': 64,
-        'look_ahead_truncate_at_boundary': 'sentence',
-        'look_ahead_filter_prob': None,
-        'look_ahead_mask_prob': None,
+        'look_ahead_steps': 0,
+        'look_ahead_truncate_at_boundary': None,
+        'look_ahead_filter_prob': 0.0,
+        'look_ahead_mask_prob': 0.0,
         'look_ahead_boundary': [],
-        'only_use_look_ahead': True,
+        'only_use_look_ahead': False,
         'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         #'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
         'force_generate': None,
-        'forbid_generate_step': None,
+        'forbid_generate_step': 0,
         'truncate_at_prob': 0.0,
-        'truncate_at_boundary': 'sentence',
+        'truncate_at_boundary': None,
         'append_retrieval': False,
-        'use_ctx_for_examplars': 'ret',
+        'use_ctx_for_examplars': False,
         'use_retrieval_instruction': False,
+        'use_instruction': False,
         'format_reference_method': 'searchresults',
         'ctx_position': 'before_case',
         'prompt_type': 'cot',
@@ -742,38 +754,16 @@ if __name__ == '__main__':
         'add_ref_prefix': None,
         'debug': args.debug,
     }
-    retrieval_kwargs['final_stop_sym'] = '!@#$%^&*()\n\n)(*&^%$#@!' if args.dataset == 'lmdata' else '\n\n'
+    if args.final_stop_sym:
+        retrieval_kwargs['final_stop_sym'] = args.final_stop_sym
+    else:
+        retrieval_kwargs['final_stop_sym'] = '!@#$%^&*()\n\n)(*&^%$#@!' if ApiReturn.no_stop(model=args.model, dataset=args.dataset) else '\n\n'
     qagent = QueryAgent(
         model=args.model,
         tokenizer=prompt_tokenizer,
         max_generation_len=args.max_generation_len,
         retrieval_kwargs=retrieval_kwargs,
         temperature=args.temperature)
-    if retrieval_kwargs['use_retrieval_instruction']:
-        CtxPrompt.ret_instruction = RetrievalInstruction(method=retrieval_kwargs['use_retrieval_instruction'])
-    CtxPrompt.retrieval_kwargs = retrieval_kwargs
-    CtxPrompt.format_reference_method = retrieval_kwargs['format_reference_method']
-    CtxPrompt.ctx_position = retrieval_kwargs['ctx_position']
-    CtxPrompt.add_ref_suffix = retrieval_kwargs['add_ref_suffix']
-    CtxPrompt.add_ref_prefix = retrieval_kwargs['add_ref_prefix']
-
-    if args.multiprocess:  # start query processes
-        lock = Lock()
-        CustomManager.register('KeyManager', KeyManager)
-        manager = CustomManager()
-        manager.start()
-        key_manager = manager.KeyManager(args.openai_keys)
-        logging.info(f'#keys {len(key_manager._getvalue())}')
-        input_queue = Queue()
-        output_queue = Queue()
-        processes = []
-        for _ in range(len(key_manager._getvalue())):
-            p = Process(target=query_agent_worker, args=(qagent, key_manager, lock, input_queue, output_queue))
-            p.daemon = True
-            p.start()
-            processes.append(p)
-    else:
-        key_manager = KeyManager(args.openai_keys)
 
     # load data
     if args.dataset == 'strategyqa':
@@ -800,21 +790,7 @@ if __name__ == '__main__':
         data = WikiSum(args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WikiSum.get_gold_ctxs
     elif args.dataset == 'mmlu':
-        tasks = ['abstract_algebra', 'anatomy', 'astronomy', 'business_ethics',
-        'clinical_knowledge', 'college_biology', 'college_chemistry', 'college_computer_science',
-        'college_mathematics', 'college_medicine', 'college_physics', 'computer_security',
-        'conceptual_physics', 'econometrics', 'electrical_engineering', 'elementary_mathematics',
-        'formal_logic', 'global_facts', 'high_school_biology', 'high_school_chemistry',
-        'high_school_computer_science', 'high_school_european_history', 'high_school_geography',
-        'high_school_government_and_politics', 'high_school_macroeconomics', 'high_school_mathematics',
-        'high_school_microeconomics', 'high_school_physics', 'high_school_psychology', 'high_school_statistics',
-        'high_school_us_history', 'high_school_world_history', 'human_aging', 'human_sexuality',
-        'international_law', 'jurisprudence', 'logical_fallacies', 'machine_learning', 'management',
-        'marketing', 'medical_genetics', 'miscellaneous', 'moral_disputes', 'moral_scenarios',
-        'nutrition', 'philosophy', 'prehistory', 'professional_accounting', 'professional_law',
-        'professional_medicine', 'professional_psychology', 'public_relations', 'security_studies',
-        'sociology', 'us_foreign_policy', 'virology', 'world_religions']
-        data = MMLU(tasks=tasks, prompt_type=retrieval_kwargs['prompt_type'])
+        data = MMLU(categories=['STEM'], prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = MMLU.get_gold_ctxs
     elif args.dataset == 'lmdata':
         data = LMData(args.input, prompt_type=retrieval_kwargs['prompt_type'])
@@ -832,9 +808,39 @@ if __name__ == '__main__':
     else:
         raise NotImplementedError
     data.format(fewshot=args.fewshot)
-    data = data.dataset
+
+    # modify prompt properities
+    if retrieval_kwargs['use_retrieval_instruction']:
+        CtxPrompt.ret_instruction = RetrievalInstruction(method=retrieval_kwargs['use_retrieval_instruction'])
+    if retrieval_kwargs['use_instruction']:
+        CtxPrompt.instruction = data.instruction
+    CtxPrompt.retrieval_kwargs = retrieval_kwargs
+    CtxPrompt.format_reference_method = retrieval_kwargs['format_reference_method']
+    CtxPrompt.ctx_position = retrieval_kwargs['ctx_position']
+    CtxPrompt.add_ref_suffix = retrieval_kwargs['add_ref_suffix']
+    CtxPrompt.add_ref_prefix = retrieval_kwargs['add_ref_prefix']
+
+    # multiprocess
+    if args.multiprocess:  # start query processes
+        lock = Lock()
+        CustomManager.register('KeyManager', KeyManager)
+        manager = CustomManager()
+        manager.start()
+        key_manager = manager.KeyManager(args.openai_keys)
+        logging.info(f'#keys {len(key_manager._getvalue())}')
+        input_queue = Queue()
+        output_queue = Queue()
+        processes = []
+        for _ in range(len(key_manager._getvalue())):
+            p = Process(target=query_agent_worker, args=(qagent, key_manager, lock, input_queue, output_queue))
+            p.daemon = True
+            p.start()
+            processes.append(p)
+    else:
+        key_manager = KeyManager(args.openai_keys)
 
     # downsample
+    data = data.dataset
     if args.max_num_examples and args.max_num_examples < len(data):
         data = data.shuffle()
         data = data.select(range(args.max_num_examples))

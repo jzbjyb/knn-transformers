@@ -143,7 +143,7 @@ class BaseDataset:
 
             query = input_template_func(q)
             if use_answer:
-                query += self.output_template(cot, a)
+                query += ' ' + self.output_template(cot, a)
             return query
 
         # demo
@@ -178,17 +178,16 @@ class BaseDataset:
         add_index: bool = False,
         use_gold: Union[bool, Callable] = False,
     ):
-        for examplar in self.examplars:
-            question = examplar['question']
-
-            if use_gold:
+        if use_gold:
+            for examplar in tqdm(self.examplars, desc='ret aug demo'):
                 _id = examplar['id']
                 ctxs: List[Tuple[str, str]] = use_gold(_id)
                 examplar['ctxs'] = ctxs
-            else:  # search question
-                ctx_ids, ctx_texts = qagent.retrieve([question], is_question=True)
-                ctx_ids, ctx_texts = ctx_ids[0], ctx_texts[0]  # (ret_topk) * 2
-                examplar['ctxs'] = list(zip(ctx_ids, ctx_texts))
+        else:  # search question
+            qs = [examplar['question'] for examplar in self.examplars]
+            ctx_ids, ctx_texts = qagent.retrieve(qs, is_question=True)  # (num_examplars, ret_topk) * 2
+            for i in range(len(self.examplars)):
+                self.examplars[i]['ctxs'] = list(zip(ctx_ids[i], ctx_texts[i]))
 
     def retrieval_augment_examplars_append(
         self,
@@ -313,8 +312,8 @@ class StrategyQA(BaseDataset):
             'answer': 'no',
         }
     ]
-    cot_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step): '
-    cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    cot_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step):'
+    cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search):'
     cot_output_template = lambda self, cot, ans: f'{cot} So the final answer is {ans}.'
 
     sa_ctx_examplars: List[Dict] = [
@@ -409,7 +408,7 @@ class StrategyQA(BaseDataset):
                 "Thus, a pear would float."),
         }
     ]
-    tool_demo_input_template = tool_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    tool_demo_input_template = tool_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search):'
     tool_output_template = lambda self, cot, ans: f'{cot} So the final answer is {ans}.'
 
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
@@ -482,8 +481,8 @@ class HotpotQA(BaseDataset):
             'answer': '2006',
         },
     ]
-    cot_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step): '
-    cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    cot_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step):'
+    cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search):'
     cot_output_template = lambda self, cot, ans: f'{cot} The answer is {ans}.'
 
     tool_examplars: List[Dict] = [
@@ -517,7 +516,7 @@ class HotpotQA(BaseDataset):
             'answer': '2006',
         },
     ]
-    tool_demo_input_template = tool_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    tool_demo_input_template = tool_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search):'
     tool_output_template = lambda self, cot, ans: f'{cot} The answer is {ans}.'
 
     cot_interleave_examplars: List[Dict] = [
@@ -642,12 +641,12 @@ class HotpotQA(BaseDataset):
             "answer": "SMLE"
         }
     ]  # shuffled
-    cot_interleave_demo_input_template = cot_interleave_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer: '
+    cot_interleave_demo_input_template = cot_interleave_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer:'
     cot_interleave_output_template = lambda self, cot, ans: f'{cot} So the answer is {ans}.'
 
     cot_interleave_ret_examplars = cot_interleave_examplars
-    cot_interleave_ret_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step): '
-    cot_interleave_ret_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    cot_interleave_ret_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step):'
+    cot_interleave_ret_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search):'
     cot_interleave_ret_output_template = cot_interleave_output_template
 
     def __init__(self, split: str, prompt_type: str = 'cot'):
@@ -722,12 +721,12 @@ class WikiMultiHopQA(BaseDataset):
             'answer': 'No',
         },
     ]
-    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer: '
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer:'
     cot_output_template = lambda self, cot, ans: f'{cot} So the final answer is {ans}.'
 
     cot_ret_examplars = cot_examplars
-    cot_ret_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step): '
-    cot_ret_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    cot_ret_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step):'
+    cot_ret_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search):'
     cot_ret_output_template = cot_output_template
 
     sa_examplars: List[Dict] = [
@@ -889,12 +888,12 @@ class WikiMultiHopQA(BaseDataset):
             'answer': "no",
         }
     ]
-    cot_interleave_demo_input_template = cot_interleave_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer: '
+    cot_interleave_demo_input_template = cot_interleave_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer:'
     cot_interleave_output_template = lambda self, cot, ans: f'{cot} So the answer is {ans}.'
 
     cot_interleave_ret_examplars = cot_interleave_examplars
     cot_interleave_ret_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step): '
-    cot_interleave_ret_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search): '
+    cot_interleave_ret_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search):'
     cot_interleave_ret_output_template = cot_interleave_output_template
 
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
@@ -1013,12 +1012,12 @@ class WikiSum(BaseDataset):
             "answer": "Kim Bok-joo (born 17 October 1960) is a South Korean former middle distance runner who competed in the 1984 Summer Olympics.",
         }
     ]  # shuffled
-    summary_demo_input_template = summary_test_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary: '
+    summary_demo_input_template = summary_test_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary:'
     summary_output_template = lambda self, cot, ans: ans
 
     summary_ret_examplars = summary_examplars
-    summary_ret_demo_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary: '
-    summary_ret_test_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary (with search): '
+    summary_ret_demo_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary:'
+    summary_ret_test_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary (with search):'
     summary_ret_output_template = summary_output_template
 
     def __init__(self, beir_dir: str, split: str = 'test', prompt_type: str = 'summary'):
@@ -1132,13 +1131,13 @@ class ELI5(BaseDataset):
             "answer": "Here is my very basic explanation: Your hearing sensors are very small hairs that line the inside of your ear canal. Different hairs are calibrated for different frequencies (or 'pitches') High frequencies, like sirens vibrate the hairs very quickly, while lower frequencies vibrate their hairs more slowly. A part of aging is our high-frequency hairs wear out and stop responding. High frequency=more energy so they wear out faster than low-frequency hairs. The result of this is things sound 'muffled'. Eventually the hairs will be stuck 'off' permanently and gradually this takes over your ears. Fun fact: when you come out of a loud concert, the 'cotton in your ears' effect is from your sensors largely being 'stunned' or 'stuck off' and not responding normally when you leave the concert for a while. Also worth mentioning: whenever this happens some of the hairs never un-stun and you have slightly lost some of your hearing. Also: the medical condition tinnitus or \"ringing in your ears\" is from a specific hair for a specific frequency being 'stuck on'. Its caused (at least in the modern world) by listening to music too loud for too long."
         }
     ]  # shuffled
-    #cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a long descriptive answer to the following question: {ques}\nAnswer: '
-    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a comprehensive and informative answer for a given question based on the provided search results above. You must only use information from the provided search results. Combine search results together into a coherent answer. Do not repeat text.\nQuestion: {ques}\nAnswer: '
+    #cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a long descriptive answer to the following question: {ques}\nAnswer:'
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a comprehensive and informative answer for a given question based on the provided search results above. You must only use information from the provided search results. Combine search results together into a coherent answer. Do not repeat text.\nQuestion: {ques}\nAnswer:'
     cot_output_template = lambda self, cot, ans: ans
 
     cot_ret_examplars = cot_examplars
-    cot_ret_demo_input_template = lambda self, ques: f'Generate a long descriptive answer to the following question: {ques}\nAnswer: '
-    cot_ret_test_input_template = lambda self, ques: f'Generate a long descriptive answer to the following question: {ques}\nAnswer (with search): '
+    cot_ret_demo_input_template = lambda self, ques: f'Generate a long descriptive answer to the following question: {ques}\nAnswer:'
+    cot_ret_test_input_template = lambda self, ques: f'Generate a long descriptive answer to the following question: {ques}\nAnswer (with search):'
     cot_ret_output_template = cot_output_template
 
     def __init__(self, prompt_type: str = 'cot'):
@@ -1242,12 +1241,12 @@ class WoW(BaseDataset):
             "answer": "They see more morality to eating eggs than they do eating dairy products.",
         }
     ]  # shuffled
-    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Given the context, generate the next response. Context: {ques}\nResponse: '
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Given the context, generate the next response. Context: {ques}\nResponse:'
     cot_output_template = lambda self, cot, ans: ans
 
     cot_ret_examplars = cot_examplars
-    cot_ret_demo_input_template = lambda self, ques: f'Given the context, generate the next response. Context: {ques}\nResponse: '
-    cot_ret_test_input_template = lambda self, ques: f'Given the context, generate the next response. Context: {ques}\nResponse (with search): '
+    cot_ret_demo_input_template = lambda self, ques: f'Given the context, generate the next response. Context: {ques}\nResponse:'
+    cot_ret_test_input_template = lambda self, ques: f'Given the context, generate the next response. Context: {ques}\nResponse (with search):'
     cot_ret_output_template = cot_output_template
 
     def __init__(self, jsonl_file: str = None, prompt_type: str = 'cot'):
@@ -1423,9 +1422,9 @@ class ASQA(BaseDataset):
             "answer": "Max Branning had 4 wives in EastEnders. The first wife was Sukie Smith, followed by Jo Joyner, then Kierston Wareing, and finally, Tanya Franks, as fourth."
         }
     ]  # shuffled
-    #cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a long descriptive answer to the following ambiguous question: {ques}\nAnswer: '
+    #cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a long descriptive answer to the following ambiguous question: {ques}\nAnswer:'
     cot_output_template = lambda self, cot, ans: ans
-    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a comprehensive and informative answer for a given question based on the provided search results above. You must only use information from the provided search results. Combine search results together into a coherent answer. Do not repeat text.\nQuestion: {ques}\nAnswer: '
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a comprehensive and informative answer for a given question based on the provided search results above. You must only use information from the provided search results. Combine search results together into a coherent answer. Do not repeat text.\nQuestion: {ques}\nAnswer:'
 
     cot_subq_examplars: List[Dict] = [
         {
@@ -1456,8 +1455,37 @@ class ASQA(BaseDataset):
     cot_subq_output_template = cot_output_template
     cot_subq_demo_input_template = cot_subq_test_input_template = cot_test_input_template
 
+    cot_subq_in_input_examplars: List[Dict] = [
+        {
+            "question": "When did bat out of hell come out? It has 2 interpretations: (1) When did the album bat out of hell come out? (2) When did the TV series bat out of hell come out?",
+        },
+        {
+            "question": "Who is the chairman of the federal reserve? It has 4 interpretations: (1) Who was the 16th chairperson of the Federal Reserve? (2) Who was the 15th chairperson of the Federal Reserve? (3) Who was the 14th chairperson of the Federal Reserve? (4) Who was the 13th chairperson of the Federal Reserve?",
+        },
+        {
+            "question": "What kind of car is in national lampoon's vacation? It has 2 interpretations: (1) What is the car called in the movie, National Lampoon's Vacation? (2) What is the actual car in the movie, National lampoon's Vacation?",
+        },
+        {
+            "question": "Who sang the song god's not dead? It has 2 interpretations: (1) Who sang the original version of God's Not Dead? (2) Who sang God's Not Dead as a cover?",
+        },
+        {
+            "question": "Who won last triple crown of horse racing? It has 4 interpretations: (1) Which horse won the last triple crown of horse racing? (2) Which jockey won the last triple crown of horse racing? (3) Which trainer won the last triple crown of horse racing? (4) Which breeder won the last triple crown of horse racing?",
+        },
+        {
+            "question": "When did the broncos last win the superbowl? It has 3 interpretations: (1) When did the broncos last win the superbowl in 1998? (2) When did the broncos last win the superbowl in 1999? (3) When did the broncos last win the superbowl in 2016?",
+        },
+        {
+            "question": "How many cvs stores are there in the usa? It has 3 interpretations: (1) How many cvs stores are there in the usa before 1997? (2) How many cvs stores are there in the usa as of 2006? (3) How many cvs stores are there in the usa as of 2016?",
+        },
+        {
+            "question": "Who plays max branning's wife in eastenders? It has 4 interpretations: (1) Who pays Max Branning's first wife in EastEnders? (2) Who plays Max Branning's second wife in EastEnders? (3) Who plays Max Branning's third wife in EastEnders? (4) Who plays Max Branning's fourth wife in EastEnders?",
+        }
+    ]
+    cot_subq_in_input_output_template = cot_output_template
+    cot_subq_in_input_demo_input_template = cot_subq_in_input_test_input_template = cot_test_input_template
+
     def __init__(self, json_file: str = None, split: str = 'dev', prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'cot_subq'}
+        assert prompt_type in {'cot', 'cot_subq', 'cot_subq_in_input'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
@@ -1467,9 +1495,9 @@ class ASQA(BaseDataset):
                 for k in ref_e:
                     if k not in e:
                         e[k] = ref_e[k]
-        self.dataset = self.load_data(json_file, split)
+        self.dataset = self.load_data(json_file, split, prompt_type=prompt_type)
 
-    def load_data(self, json_file: str = None, split: str = 'dev'):
+    def load_data(self, json_file: str = None, split: str = 'dev', prompt_type: str = None):
         dataset = []
         num_hasctx = 0
         with open(json_file, 'r') as fin:
@@ -1477,6 +1505,7 @@ class ASQA(BaseDataset):
             for key, example in data.items():
                 qid = key
                 question = example['ambiguous_question']
+                sub_questions: List[str] = []
                 answers: List[str] = []
                 title2content: Dict[str, str] = {}
                 for ann in example['annotations']:
@@ -1485,17 +1514,24 @@ class ASQA(BaseDataset):
                     for know in ann['knowledge']:
                         title2content[know['wikipage']] = know['content']
                 for qa in example['qa_pairs']:
+                    sub_questions.append(qa['question'].strip())
                     if qa['wikipage'] is None:
                         continue
                     title2content[qa['wikipage']] = qa['context']
                 assert len(answers) >= 1
+                assert len(sub_questions) >= 1
                 answers = sorted(answers, key=lambda x: -len(x))  # sort based on length
                 output = self.output_template(cot=None, ans=answers[0])
                 ctxs: List[Tuple[str, str]] = list(title2content.items())  # could be empty
                 num_hasctx += int(len(ctxs) > 0)
+
+                if prompt_type == 'cot_subq_in_input':
+                    question = f'{question} It has {len(sub_questions)} interpretations: ' + ' '.join([f'({qi + 1}) {q}' for qi, q in enumerate(sub_questions)])
+
                 dataset.append({
                     'qid': qid,
                     'question': question,
+                    'sub_questions': sub_questions,
                     'answer': answers[0],
                     'answers': answers,
                     'gold_output': output,
@@ -1570,7 +1606,8 @@ def parse_mmlu_prompt(json_file: str) -> Dict[str, List[Dict]]:
 class MMLUSingle(BaseDataset):
     mmlu_prompt = parse_mmlu_prompt('data/mmlu/mmlu-cot.json')
 
-    cot_demo_input_template = cot_test_input_template = lambda self, ques: f"Q: {ques}\nA: Let's think step by step. "
+    #cot_demo_input_template = cot_test_input_template = lambda self, ques: f"Q: {ques}\nGenerate the answer by thinking step by step and concluding with \"The answer is (X)\" where X must be one of the given options, i.e., A, B, C, or D."
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f"Q: {ques}\nA: Let's think step by step."
     cot_output_template = lambda self, cot, ans: f'{cot} The answer is ({ans}).'
 
     def __init__(self, tasks: List[str] = [], prompt_type: str = 'cot'):
@@ -1592,18 +1629,134 @@ class MMLUSingle(BaseDataset):
                 for letter in ['A', 'B', 'C', 'D']:
                     q += '(' + letter + ') ' + example[letter].strip() + ' '
                 a = example['target']
+                a_text = example[example['target']].strip()
                 output = self.output_template('', a)
+                qid = f'{task}_{_id}'
                 dataset.append({
-                    'qid': f'{task}_{_id}',
+                    'qid': qid,
                     'question': q,
                     'answer': a,
+                    'answer_text': a_text,
                     'gold_output': output,
                 })
         return Dataset.from_list(dataset)
 
 class MMLU(BaseDataset):
-    def __init__(self, tasks: List[str] = [], prompt_type: str = 'cot'):
+    instruction = 'Given a multi-choice question, generate answers by thinking step by step and finishing with the final answer using the format "The answer is (X)" where X must be one of the given options, i.e., A, B, C, or D.'
+
+    subcategories = {
+        "abstract_algebra": ["math"],
+        "anatomy": ["health"],
+        "astronomy": ["physics"],
+        "business_ethics": ["business"],
+        "clinical_knowledge": ["health"],
+        "college_biology": ["biology"],
+        "college_chemistry": ["chemistry"],
+        "college_computer_science": ["computer_science"],
+        "college_mathematics": ["math"],
+        "college_medicine": ["health"],
+        "college_physics": ["physics"],
+        "computer_security": ["computer_science"],
+        "conceptual_physics": ["physics"],
+        "econometrics": ["economics"],
+        "electrical_engineering": ["engineering"],
+        "elementary_mathematics": ["math"],
+        "formal_logic": ["philosophy"],
+        "global_facts": ["other"],
+        "high_school_biology": ["biology"],
+        "high_school_chemistry": ["chemistry"],
+        "high_school_computer_science": ["computer_science"],
+        "high_school_european_history": ["history"],
+        "high_school_geography": ["geography"],
+        "high_school_government_and_politics": ["politics"],
+        "high_school_macroeconomics": ["economics"],
+        "high_school_mathematics": ["math"],
+        "high_school_microeconomics": ["economics"],
+        "high_school_physics": ["physics"],
+        "high_school_psychology": ["psychology"],
+        "high_school_statistics": ["math"],
+        "high_school_us_history": ["history"],
+        "high_school_world_history": ["history"],
+        "human_aging": ["health"],
+        "human_sexuality": ["culture"],
+        "international_law": ["law"],
+        "jurisprudence": ["law"],
+        "logical_fallacies": ["philosophy"],
+        "machine_learning": ["computer_science"],
+        "management": ["business"],
+        "marketing": ["business"],
+        "medical_genetics": ["health"],
+        "miscellaneous": ["other"],
+        "moral_disputes": ["philosophy"],
+        "moral_scenarios": ["philosophy"],
+        "nutrition": ["health"],
+        "philosophy": ["philosophy"],
+        "prehistory": ["history"],
+        "professional_accounting": ["other"],
+        "professional_law": ["law"],
+        "professional_medicine": ["health"],
+        "professional_psychology": ["psychology"],
+        "public_relations": ["politics"],
+        "security_studies": ["politics"],
+        "sociology": ["culture"],
+        "us_foreign_policy": ["politics"],
+        "virology": ["health"],
+        "world_religions": ["philosophy"],
+    }
+
+    categories = {
+        "STEM": ["physics", "chemistry", "biology", "computer_science", "math", "engineering"],
+        "humanities": ["history", "philosophy", "law"],
+        "social_sciences": ["politics", "culture", "economics", "geography", "psychology"],
+        "other_all": ["other", "business", "health"],
+    }
+
+    tasks = ['abstract_algebra', 'anatomy', 'astronomy', 'business_ethics',
+        'clinical_knowledge', 'college_biology', 'college_chemistry', 'college_computer_science',
+        'college_mathematics', 'college_medicine', 'college_physics', 'computer_security',
+        'conceptual_physics', 'econometrics', 'electrical_engineering', 'elementary_mathematics',
+        'formal_logic', 'global_facts', 'high_school_biology', 'high_school_chemistry',
+        'high_school_computer_science', 'high_school_european_history', 'high_school_geography',
+        'high_school_government_and_politics', 'high_school_macroeconomics', 'high_school_mathematics',
+        'high_school_microeconomics', 'high_school_physics', 'high_school_psychology', 'high_school_statistics',
+        'high_school_us_history', 'high_school_world_history', 'human_aging', 'human_sexuality',
+        'international_law', 'jurisprudence', 'logical_fallacies', 'machine_learning', 'management',
+        'marketing', 'medical_genetics', 'miscellaneous', 'moral_disputes', 'moral_scenarios',
+        'nutrition', 'philosophy', 'prehistory', 'professional_accounting', 'professional_law',
+        'professional_medicine', 'professional_psychology', 'public_relations', 'security_studies',
+        'sociology', 'us_foreign_policy', 'virology', 'world_religions']
+
+    refer_to_wiki_tasks = ['anatomy', 'business_ethics', 'clinical_knowledge', 'college_medicine',
+        'econometrics', 'formal_logic', 'global_facts', 'high_school_european_history', 'high_school_geography',
+        'high_school_government_and_politics', 'high_school_macroeconomics', 'high_school_microeconomics',
+        'high_school_psychology', 'high_school_us_history', 'high_school_world_history', 'human_aging',
+        'human_sexuality', 'international_law', 'jurisprudence', 'logical_fallacies', 'management',
+        'marketing', 'medical_genetics', 'miscellaneous', 'moral_disputes', 'moral_scenarios',
+        'nutrition', 'philosophy', 'prehistory', 'professional_accounting', 'professional_law',
+        'professional_medicine', 'professional_psychology', 'public_relations',
+        'security_studies', 'sociology', 'us_foreign_policy', 'virology', 'world_religions']
+
+    high_ret_coverage_tasks = ["world_religions", "miscellaneous", "anatomy", "high_school_psychology",
+        "management", "computer_security", "conceptual_physics", "college_biology", "abstract_algebra", "medical_genetics"]
+    low_ret_coverage_tasks = ["high_school_microeconomics", "professional_accounting", "high_school_macroeconomics",
+        "high_school_statistics", "high_school_world_history", "international_law", "professional_law",
+        "high_school_us_history", "moral_scenarios", "security_studies"]
+
+    high_ret_coverage_onlyq_tasks = ["world_religions", "miscellaneous", "anatomy", "abstract_algebra",
+        "nutrition", "medical_genetics", "high_school_mathematics", "college_biology", "conceptual_physics", "electrical_engineering"]
+
+    def __init__(self, tasks: List[str] = [], subcategories: List[str] = [], categories: List[str] = [], prompt_type: str = 'cot'):
         self.data_list: List[MMLUSingle] = []
+        if categories:
+            subcategories: Set[str] = set()
+            for cate in categories:
+                subcategories.update(self.categories[cate])
+        if subcategories:
+            subcategories = set(subcategories)
+            tasks: List[str] = []
+            for task, subs in self.subcategories.items():
+                if len(set(subs) & subcategories):
+                    tasks.append(task)
         for task in tqdm(tasks):
             self.data_list.append(MMLUSingle([task], prompt_type=prompt_type))
 

@@ -19,7 +19,9 @@ from datasets import load_dataset
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.lexical import BM25Search
-from models.datasets import HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, ASQA, LMData
+from models.datasets import HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, ASQA, LMData, MMLU
+from models.templates import ApiReturn
+
 
 class Wikipedia(object):
     def __init__(self):
@@ -1080,6 +1082,7 @@ def self_consistency(examples: List[Dict], anchor_text: str):
         return examples[random.randint(0, len(examples) - 1)]
 
 def eval(
+    model: str,
     dataset: str,
     jsonl_files: List[str],
     anchor_text: str = 'So the answer is',
@@ -1124,7 +1127,10 @@ def eval(
         return answers if len(answers) > 1 else answers[0]
 
     def choose_full_prediction(example):
-        pred = example['output'].split('\n\n', 1)[0].strip()
+        if ApiReturn.no_stop(model=model, dataset=dataset):
+            pred = example['output'].strip()
+        else:
+            pred = example['output'].split('\n\n', 1)[0].strip()
         if prefix_to_remove:
             if prefix_to_remove in pred:
                 pred = pred[pred.find(prefix_to_remove) + len(prefix_to_remove):].strip()
@@ -1173,7 +1179,6 @@ def eval(
         final_ans = choose_final_answer(example)
         ans_id = example['answer_id'] if 'answer_id' in example else None
         pred = choose_full_prediction(example)
-        # pred = example['output'][len(example['prompt']):].split('\n\n', 1)[0].strip()
         if remove_followup:
             raw_pred = pred
             rms, rme = remove_followup
@@ -1269,6 +1274,8 @@ def eval(
             for e in consistency_examples:
                 fout.write(json.dumps(e) + '\n')
 
+    total = len(predictions)  # change total
+
     # rouge
     if dataset == 'lmdata':
         metrics = {}
@@ -1286,8 +1293,8 @@ def eval(
 
     print('\t'.join(metrics.keys()))
     print('\t'.join(map(str, metrics.values())))
-    print('#pred\t#gold')
-    print(f'{np.mean([len(p) for p in predictions])}\t{np.mean([len(r) if type(r) is str else np.mean([len(_r) for _r in r]) for r in references])}')
+    print('#pred\t#gold\t#examples')
+    print(f'{np.mean([len(p) for p in predictions])}\t{np.mean([len(r) if type(r) is str else np.mean([len(_r) for _r in r]) for r in references])}\t{total}')
     print('')
 
     if remove_followup:
@@ -1457,6 +1464,64 @@ def jsonl_to_keyvalue(jsonl_file: str, keyvalue_file: str):
         json.dump(key2output, fout)
 
 
+def mmlu_retrieval_usefulness(
+        max_num_examples: int = 100,
+        batch_size: int = 20,
+        topk: int = 3,
+        only_use_question: bool = True):
+    from models.retriever import BM25
+    retriever = BM25(
+        tokenizer=None,
+        dataset=(None, None, None),
+        index_name='wikipedia_dpr',
+        use_decoder_input_ids=True,
+        engine='elasticsearch',
+        file_lock=None)
+    tasks = ['abstract_algebra', 'anatomy', 'astronomy', 'business_ethics',
+        'clinical_knowledge', 'college_biology', 'college_chemistry', 'college_computer_science',
+        'college_mathematics', 'college_medicine', 'college_physics', 'computer_security',
+        'conceptual_physics', 'econometrics', 'electrical_engineering', 'elementary_mathematics',
+        'formal_logic', 'global_facts', 'high_school_biology', 'high_school_chemistry',
+        'high_school_computer_science', 'high_school_european_history', 'high_school_geography',
+        'high_school_government_and_politics', 'high_school_macroeconomics', 'high_school_mathematics',
+        'high_school_microeconomics', 'high_school_physics', 'high_school_psychology', 'high_school_statistics',
+        'high_school_us_history', 'high_school_world_history', 'human_aging', 'human_sexuality',
+        'international_law', 'jurisprudence', 'logical_fallacies', 'machine_learning', 'management',
+        'marketing', 'medical_genetics', 'miscellaneous', 'moral_disputes', 'moral_scenarios',
+        'nutrition', 'philosophy', 'prehistory', 'professional_accounting', 'professional_law',
+        'professional_medicine', 'professional_psychology', 'public_relations', 'security_studies',
+        'sociology', 'us_foreign_policy', 'virology', 'world_religions']
+    task2contain: Dict[str, float] = {}
+    for task in tqdm(tasks):
+        # load data
+        data = MMLU(tasks=[task], prompt_type='cot')
+        data.format(fewshot=0)
+        data = data.dataset
+        if max_num_examples and max_num_examples < len(data):
+            data = data.shuffle()
+            data = data.select(range(max_num_examples))
+        # retrieve
+        queries = data['question']
+        if only_use_question:
+            queries = [q[:q.find('(A)')].strip() for q in queries]
+        answers = data['answer_text']
+        concat_text = []
+        for b in range(0, len(queries), batch_size):
+            ctx_ids, ctx_texts = retriever.retrieve_and_prepare(
+                decoder_texts=queries[b:b + batch_size], topk=topk, max_query_length=None)
+            concat_text.extend([' '.join(texts) for texts in ctx_texts])
+        assert len(answers) == len(concat_text)
+        # compute contain ratio
+        num_contain = 0
+        for ans, text in zip(answers, concat_text):
+            num_contain += int(ans.lower() in text.lower())
+        task2contain[task] = num_contain / len(answers)
+        print(f'\nResult: {task}\t{task2contain[task]}\t{num_contain}\t{len(answers)}\n')
+    # report
+    for task, contain in sorted(task2contain.items(), key=lambda x: -x[1]):
+        print(f'{task}\t{contain}')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
@@ -1466,10 +1531,12 @@ if __name__ == '__main__':
         'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'summary_to_beir_all', 'compare',
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
         'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir',
-        'add_ref_to_kilt', 'jsonl_to_keyvalue'])
+        'add_ref_to_kilt', 'jsonl_to_keyvalue', 'mmlu_retrieval_usefulness'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='eli5', help='input dataset', choices=[
+    parser.add_argument('--dataset', type=str, default='mmlu', help='input dataset', choices=[
         'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'eli5', 'wow', 'asqa', 'lmdata'])
+    parser.add_argument('--model', type=str, default='gpt-3.5-turbo-0301', help='model name',
+                        choices=['code-davinci-002', 'gpt-3.5-turbo-0301'])
     parser.add_argument('--out', type=str, default=None, help='output file')
     args = parser.parse_args()
 
@@ -1576,7 +1643,7 @@ if __name__ == '__main__':
 
     elif args.task == 'compare':
         file1, file2 = args.inp
-        compare(file1, file2, only_show_diff=True, only_first_right=False, show_final=True)
+        compare(file1, file2, only_show_diff=True, only_first_right=True, show_final=True)
 
     elif args.task == 'strategyqa_to_beir':
         strategyqa_file = args.inp[0]
@@ -1599,37 +1666,44 @@ if __name__ == '__main__':
         dataset = args.dataset
         jsonl_files = glob.glob(args.inp[0])
         if dataset == 'hotpotqa':
-            eval(dataset=dataset,
+            eval(model=args.model,
+                dataset=dataset,
                 jsonl_files=jsonl_files,
                 anchor_text='answer is',
                 beir_dir='data/hotpotqa/dev_beir',)
         elif dataset == 'strategyqa':
-            eval(dataset=dataset,
+            eval(model=args.model,
+                dataset=dataset,
                 jsonl_files=jsonl_files,
                 anchor_text='answer is',
                 beir_dir='data/strategyqa/train_cot_beir')
         elif dataset == 'mmlu':
-            eval(dataset=dataset,
+            eval(model=args.model,
+                dataset=dataset,
                 jsonl_files=jsonl_files,
                 anchor_text='answer is',
                 beir_dir=None)
         elif dataset == '2wikihop':
-            eval(dataset=dataset,
+            eval(model=args.model,
+                dataset=dataset,
                 jsonl_files=jsonl_files,
                 anchor_text='answer is',
                 beir_dir='data/2wikimultihopqa/dev_beir')
         elif dataset == 'wikisum':
-            eval(dataset=dataset,
+            eval(model=args.model,
+                dataset=dataset,
                 jsonl_files=jsonl_files,
                 anchor_text='',
                 beir_dir=None)  # 'data/wikisum/wikisum_all_beir'
         elif dataset in {'eli5', 'wow', 'lmdata'}:
-            eval(dataset=dataset,
+            eval(model=args.model,
+                dataset=dataset,
                 jsonl_files=jsonl_files,
                 anchor_text='',
                 beir_dir=None)
         elif dataset in {'asqa'}:
-            eval(dataset=dataset,
+            eval(model=args.model,
+                dataset=dataset,
                 jsonl_files=jsonl_files,
                 anchor_text='',
                 prefix_to_remove=None,  # 'Given all interpretations, the comprehensive answer is as follow.',
@@ -1672,3 +1746,6 @@ if __name__ == '__main__':
         jsonl_file = args.inp[0]
         keyvalue_file = args.out
         jsonl_to_keyvalue(jsonl_file, keyvalue_file)
+
+    elif args.task == 'mmlu_retrieval_usefulness':
+        mmlu_retrieval_usefulness()
