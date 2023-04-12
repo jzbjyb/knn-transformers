@@ -17,11 +17,15 @@ class SearchEngineConnector:
     def __init__(
         self,
         engine: str,
-        file_lock: FileLock = None
+        only_domain: str = None,
+        exclude_domain: str = None,
+        file_lock: FileLock = None,
     ):
         self.fake_score = 0
         assert engine in {'brave', 'bing'}
         self.engine = engine
+        self.only_domain = only_domain
+        self.exclude_domain = exclude_domain
         self.file_lock = file_lock
 
     def retrieve(
@@ -37,12 +41,13 @@ class SearchEngineConnector:
             if self.engine == 'brave':
                 se_results = get_batch_brave_search_results(qs)
             elif self.engine == 'bing':
-                se_results = search_bing_batch(qs)
+                se_results = search_bing_batch(
+                    qs, only_domain=self.only_domain, exclude_domain=self.exclude_domain)
             else:
                 raise NotImplementedError
             results: Dict[int, Dict[str, Tuple[float, str]]] = {}
             for (qid, query), ser in zip(queries.items(), se_results):
-                results[qid] = {str(did): (self.fake_score, r['snippet']) for did, r in enumerate(ser)}
+                results[qid] = {str(r['url']): (self.fake_score, r['snippet']) for did, r in enumerate(ser)}
             return results
         finally:
             if self.file_lock is not None:
@@ -61,6 +66,7 @@ class BM25:
         use_encoder_input_ids: bool = False,
         use_decoder_input_ids: bool = True,
         file_lock: FileLock = None,
+        **search_engine_kwargs,
     ):
         self.tokenizer = tokenizer
         self.collator = collator
@@ -73,8 +79,8 @@ class BM25:
                 BM25Search(index_name=index_name, hostname='localhost', initialize=False, number_of_shards=1),
                 k_values=[self.max_ret_topk])
         else:
-            self.max_ret_topk = 10
-            self.retriever = SearchEngineConnector(engine, file_lock=file_lock)
+            self.max_ret_topk = 50
+            self.retriever = SearchEngineConnector(engine, file_lock=file_lock, **search_engine_kwargs)
 
         self.encode_retrieval_in = encode_retrieval_in
         assert encode_retrieval_in in {'encoder', 'decoder'}

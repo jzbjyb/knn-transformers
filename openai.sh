@@ -7,7 +7,8 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=mmlu
+dataset=wikiasp
+debug_batch_size=1
 batch_size=8
 model=text-davinci-003  # code-davinci-002, gpt-3.5-turbo-0301, text-davinci-003, text-curie-001
 consistency=1
@@ -27,7 +28,7 @@ if [[ ${dataset} == 'hotpotqa' ]]; then
     fewshot=12
     max_num_examples=1000
     max_generation_len=256
-elif [[ ${dataset} == 'strategyqa_dev' ]]; then
+elif [[ ${dataset} == 'strategyqa' ]]; then
     input="--input data/strategyqa/dev_beir"
     index_name=wikipedia_dpr
     fewshot=6
@@ -60,6 +61,12 @@ elif [[ ${dataset} == 'asqa' ]]; then
     fi
     max_num_examples=1000000
     max_generation_len=256
+elif [[ ${dataset} == 'asqatrans' ]]; then
+    input="--input data/asqa/ASQA.json"
+    index_name=wikipedia_dpr
+    fewshot=8
+    max_num_examples=1000000
+    max_generation_len=256
 elif [[ ${dataset} == 'wow' ]]; then
     input=""  # "--input data/wow/val_astarget_selfprov_evidence.json.beir_dedup"
     index_name=wikipedia_dpr
@@ -78,6 +85,15 @@ elif [[ ${dataset} == 'wikisum_all_beir' ]]; then
     fewshot=8
     max_num_examples=1000
     max_generation_len=256
+elif [[ ${dataset} == 'wikiasp' ]]; then
+    input="--input data/wikiasp/matched_with_bing_test"
+    index_name=wikiasp
+    fewshot=8
+    if [[ ${expensive} == true ]]; then
+        fewshot=4
+    fi
+    max_num_examples=1000
+    max_generation_len=512
 elif [[ ${dataset} == 'arxiv' ]]; then
     input="--input data/pile/sliding_window_512/ArXiv_test.window.jsonl"
     index_name=arxiv00
@@ -92,15 +108,15 @@ elif [[ ${dataset} == 'mmlu' ]]; then
     max_num_examples=1000
     max_generation_len=256
     if [[ ${expensive} == true ]]; then
-        fewshot=2
+        fewshot=4
         max_generation_len=512
     fi
 else
     exit
 fi
 
-if [[ ${expensive} == true ]]; then  # use 100 examples as most
-    max_num_examples=$(( max_num_examples < 100 ? max_num_examples : 100 ))
+if [[ ${expensive} == true ]]; then  # use 200 examples as most
+    max_num_examples=$(( max_num_examples < 300 ? max_num_examples : 300 ))
 fi
 
 if [[ ${index_name} == "test" && ${input} != "none" ]]; then  # build index
@@ -123,7 +139,7 @@ if [[ ${debug} == "true" ]]; then
         --index_name ${index_name} \
         --max_num_examples 100 \
         --max_generation_len ${max_generation_len} \
-        --batch_size ${batch_size} \
+        --batch_size ${debug_batch_size} \
         --output test.jsonl \
         --num_shards 1 \
         --shard_id 0 \
@@ -282,6 +298,7 @@ retrieval_kwargs = {
     'truncate_at_prob': 0.0,
     'truncate_at_boundary': 'sentence',
     'append_retrieval': False,
+    'reinit_ctx': True,
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
     'use_instruction': False,

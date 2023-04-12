@@ -9,13 +9,9 @@ This sample makes a call to the Bing Web Search API with a query and returns rel
 Documentation: https://docs.microsoft.com/en-us/bing/search-apis/bing-web-search/overview
 '''
 
-# Add your Bing Search V7 subscription key and endpoint to your environment variables.
-# subscription_key = os.environ['BING_SEARCH_V7_SUBSCRIPTION_KEY']
-# endpoint = os.environ['BING_SEARCH_V7_ENDPOINT'] + "/bing/v7.0/search"
-
-subscription_key = os.environ['BING_SEARCH_V7_SUBSCRIPTION_KEY']
+subscription_key = os.environ['BING_SEARCH_V7_SUBSCRIPTION_KEY'] if 'BING_SEARCH_V7_SUBSCRIPTION_KEY' in os.environ else None
 endpoint = "https://api.bing.microsoft.com/" + "v7.0/search"
-api_url = "http://metis.lti.cs.cmu.edu:8989/bing_search"
+api_url = "http://127.0.0.1:8989/bing_search"  # "http://metis.lti.cs.cmu.edu:8989/bing_search"
 
 def search_bing(query: str, count: int = 10, max_query_per_sec: int = 100, debug: bool = False):
     params = {
@@ -53,13 +49,26 @@ def search_bing(query: str, count: int = 10, max_query_per_sec: int = 100, debug
     except Exception as ex:
         raise ex
 
-def search_bing_api(query: str, count: int):
-    payload = json.dumps({'query': query})
+def search_bing_api(
+        query: str,
+        only_domain: str = None,
+        exclude_domain: str = None,
+        count: int = 10,
+    ):
+    # prepare request
+    data = {'query': query}
+    if only_domain:
+        data['+domain'] = only_domain
+    elif exclude_domain:
+        data['-domain'] = exclude_domain
+    data = json.dumps(data)
     headers = {'X-Api-Key': 'jzbjybnb', 'Content-Type': 'application/json'}
     try:
-        response = requests.request('POST', api_url, headers=headers, data=payload)
+        # sent request
+        response = requests.request('POST', api_url, headers=headers, data=data)
         response = response.json()
         results: List[Dict] = []
+        # collect results
         if 'webPages' in response and 'value' in response['webPages']:
             for page in response['webPages']['value']:
                 result = {
@@ -73,10 +82,10 @@ def search_bing_api(query: str, count: int):
         raise ex
 
 
-def search_bing_batch(queries: List[str], count: int = 10):
+def search_bing_batch(queries: List[str], **kwargs):
     results: List[List[Dict]] = []
     for query in queries:
-        results.append(search_bing_api(query, count=count))
+        results.append(search_bing_api(query, **kwargs))
     return results
 
 

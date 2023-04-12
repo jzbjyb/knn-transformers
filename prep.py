@@ -2,6 +2,7 @@ from typing import List, Tuple, Any, Union, Dict, Set, Callable
 import argparse
 import random
 import os
+import functools
 import json
 import time
 import glob
@@ -11,15 +12,16 @@ import copy
 import evaluate
 import re
 import logging
+from urllib.parse import unquote
 from tqdm import tqdm
 import numpy as np
 import torch
 from transformers import AutoTokenizer
-from datasets import load_dataset
+from datasets import load_dataset, concatenate_datasets
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.lexical import BM25Search
-from models.datasets import HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, ASQA, LMData, MMLU
+from models.datasets import HotpotQA, WikiMultiHopQA, WikiSum, WikiAsp, ELI5, WoW, ASQA, LMData, MMLU
 from models.templates import ApiReturn
 
 
@@ -1085,7 +1087,7 @@ def eval(
     model: str,
     dataset: str,
     jsonl_files: List[str],
-    anchor_text: str = 'So the answer is',
+    anchor_text: List[str] = ['So the answer is'],
     prefix_to_remove: str = None,
     retrieval_percentiles: List[Union[int, float]] = [1, 0.25, 0.5, 0.75, 1.0],
     remove_followup: Tuple[str, str] = ('Follow up[^:]*:', '?'),
@@ -1094,6 +1096,9 @@ def eval(
     use_multi_ref: bool = False,
     debug: bool = False,
 ):
+    if not anchor_text:
+        anchor_text = []
+    anchor_text = anchor_text if type(anchor_text) is list else [anchor_text]
     if beir_dir is not None:
         corpus, queries, qrels = GenericDataLoader(data_folder=beir_dir).load(split='dev')
     else:
@@ -1114,16 +1119,19 @@ def eval(
         else:
             answers = [example['answer']]
         for i, answer in enumerate(answers):
-            for find_to_rm in [prefix_to_remove, anchor_text]:
-                if find_to_rm and find_to_rm in answer:
-                    answer = answer[answer.find(find_to_rm) + len(find_to_rm):].strip()
+            for pattern in [prefix_to_remove] + anchor_text[:1]:
+                if not pattern:
+                    continue
+                find = re.compile(pattern).search(answer)
+                if find:
+                    answer = find.group(1)
                     answers[i] = answer
                     if dataset == 'strategyqa':
-                        answer = answer[:-1].strip().lower()
+                        answer = answer.lower()
                         assert answer in {'yes', 'no'}
                     elif dataset == 'mmlu':
-                        answer = answer[:-1].strip().lower()
-                        assert answer in {'(a)', '(b)', '(c)', '(d)', '(e)'}
+                        answer = answer.lower()
+                        assert answer in {'a', 'b', 'c', 'd', 'e'}
         return answers if len(answers) > 1 else answers[0]
 
     def choose_full_prediction(example):
@@ -1131,12 +1139,20 @@ def eval(
             pred = example['output'].strip()
         else:
             pred = example['output'].split('\n\n', 1)[0].strip()
-        if prefix_to_remove:
+        if prefix_to_remove:  # TODO: fix this bug
             if prefix_to_remove in pred:
                 pred = pred[pred.find(prefix_to_remove) + len(prefix_to_remove):].strip()
             else:
                 logging.warning('format error')
         return pred
+
+    def get_final_answer_from_pred(pred: str):
+        final_ans = []
+        for at in anchor_text:
+            find = re.compile(at).search(pred)
+            if find:
+                final_ans.append(find.group(1))
+        return ' '.join(final_ans).strip()
 
     metric_func = evaluate.load('rouge')
 
@@ -1198,13 +1214,11 @@ def eval(
         else:
             ret_dids = np.array([['placeholder']], dtype=np.str_)
 
-        wrongformat = 0
-        position = pred.find(anchor_text) if anchor_text else 0
-        if position == -1:
-            wrongformat = 1
+        pred_ans = get_final_answer_from_pred(pred) if anchor_text else pred
+        wrongformat = len(pred_ans) == 0
+        if wrongformat:
             final_metrics['wrongformat'] += 1
         else:
-            pred_ans = pred[position + len(anchor_text):].strip()
             if dataset in {'strategyqa', 'mmlu'}:
                 correct = int(final_ans.lower() in pred_ans.lower())
                 final_metrics['correct'] += correct
@@ -1217,6 +1231,8 @@ def eval(
                 add_metric_kvs(WikiMultiHopQA.f1_score(pred_ans, final_ans, ground_truth_id=ans_id))
             elif dataset in {'wikisum'}:
                 add_metric_kvs(WikiSum.entity_f1_score(pred_ans, final_ans))
+            elif dataset in {'wikiasp'}:
+                add_metric_kvs(WikiAsp.entity_f1_score(pred_ans, final_ans))
             elif dataset in {'eli5'}:
                 add_metric_kvs(ELI5.entity_f1_score(pred_ans, final_ans))
             elif dataset in {'asqa'}:
@@ -1233,7 +1249,7 @@ def eval(
         if has_search:
             search_per_example.append(len(re.findall('\[Search\(', pred)))
 
-        if debug and wrongformat:
+        if debug and (not correct or wrongformat):
             print('ID->', qid)
             print('Q->', question)
             print()
@@ -1522,6 +1538,122 @@ def mmlu_retrieval_usefulness(
         print(f'{task}\t{contain}')
 
 
+def  wikiasp_match_title(
+    output_dir: str,
+    split: str = 'test',
+    count_per_domain: int = 100,
+    max_query_len: int = 20,
+    max_n_toks: int = 400,
+    min_n_toks: int = 50,
+    min_n_toks_per_asp: int = 10,
+    use_site_operator: bool = True,
+    ):
+    domains = ['album', 'animal', 'artist', 'building', 'company', 'educational_institution',
+               'event', 'film', 'group', 'historic_place', 'infrastructure', 'mean_of_transportation',
+               'office_holder', 'plant', 'single', 'soccer_player', 'software', 'television_show',
+               'town', 'written_work']
+
+    from models.retriever import BM25
+    retriever = BM25(
+        tokenizer=None,
+        dataset=(None, None, None),
+        index_name=None,
+        use_decoder_input_ids=True,
+        engine='bing',
+        file_lock=None)
+
+    def get_query(targets: List[Tuple[str, str]]):
+        query: List[str] = []
+        n_toks = 0
+        for asp, text in targets:
+            text = text.strip()
+            toks = text.split()
+            n_toks += len(toks)
+            query.extend(toks)
+            if len(query) >= max_query_len:
+                query = query[:max_query_len]
+                break
+        query = ' '.join(query)
+        if use_site_operator:
+            query += ' site:en.wikipedia.org'
+        return query
+    def get_wiki_url(urls: List[str]):
+        for url in urls:
+            if 'wikipedia.org' in url:
+                return url
+        return None
+    def wiki_url_to_title(url: str):
+        title = ' '.join(unquote(url).rsplit('/wiki/', 1)[-1].split('_')) if url else url
+        return title
+    domain2success: Dict[str, int] = defaultdict(lambda: 0)
+    def map_fn(example, domain: str):
+        query = get_query(example['targets'])
+        urls, snippets = retriever.retrieve_and_prepare(decoder_texts=[query], topk=50)
+        url = get_wiki_url(urls[0])
+        title = wiki_url_to_title(url)
+        example['query'] = query
+        example['url'] = url
+        example['title'] = title
+        example['domain'] = domain
+        domain2success[domain] += int(title is not None)
+        return example
+    def filter_fn(example):
+        targets = [(asp, text) for asp, text in example['targets'] if len(text.strip().split()) >= min_n_toks_per_asp]  # remove empty asp
+        is_multi = len(targets) > 1
+        n_toks = sum([len(t[1].strip().split()) for t in targets])
+        has_len = n_toks <= max_n_toks and n_toks >= min_n_toks
+        return is_multi and has_len
+
+    processed = []
+    for domain in domains:
+        data = load_dataset('wiki_asp', domain)[split]
+        data = data.filter(filter_fn)
+        if len(data) > count_per_domain:  # downsample
+            data = data.shuffle()
+            data = data.select(range(count_per_domain))
+        data = data.map(functools.partial(map_fn, domain=domain))
+        processed.append(data)
+    concat_data = concatenate_datasets(processed)
+    concat_data.save_to_disk(output_dir)
+    print(domain2success)
+
+
+def wikiasp_corpus(beir_dir: str, paragraph_min_len: int = 100):
+    domains = ['album', 'animal', 'artist', 'building', 'company', 'educational_institution',
+               'event', 'film', 'group', 'historic_place', 'infrastructure', 'mean_of_transportation',
+               'office_holder', 'plant', 'single', 'soccer_player', 'software', 'television_show',
+               'town', 'written_work']
+    qid2dict: Dict[str, Dict] = {}
+    did2dict: Dict[str, Dict] = {}
+    split2qiddid: Dict[str, List[Tuple[str, str]]] = defaultdict(list)
+    seen_exids: Set[str] = set()
+    did = None
+    for domain in domains:
+        for split in ['test', 'validation', 'train']:
+            data = load_dataset('wiki_asp', domain)[split]
+            exids = data['exid']
+            li_sents = data['inputs']
+            for exid, sents in tqdm(zip(exids, li_sents), desc=f'{domain} {split}'):
+                assert exid not in seen_exids, f'{exid} already seen'
+                seen_exids.add(exid)
+                prev: List[str] = []
+                n_toks: int = 0
+                start_sent_id: int = 0
+                for i, sent in enumerate(sents):
+                    sent = sent.strip()
+                    n_toks += len(sent.split())
+                    prev.append(sent)
+                    if n_toks >= paragraph_min_len or (len(prev) and i == len(sents) - 1):
+                        did = f'{exid}-{start_sent_id}.{i + 1}'
+                        did2dict[did] = {'_id': did, 'title': '', 'text': ' '.join(prev)}
+                        prev = []
+                        n_toks = 0
+                        start_sent_id = i + 1
+    qid2dict['0'] =  {'_id': '0', 'text': 'dummy'}
+    split2qiddid['dev'].append(('0', did))
+    save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
@@ -1531,10 +1663,11 @@ if __name__ == '__main__':
         'convert_fid_to_beir', 'compare_logprob', 'summary_to_beir', 'summary_to_beir_all', 'compare',
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
         'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir',
-        'add_ref_to_kilt', 'jsonl_to_keyvalue', 'mmlu_retrieval_usefulness'])
+        'add_ref_to_kilt', 'jsonl_to_keyvalue', 'mmlu_retrieval_usefulness',
+        'wikiasp_match_title', 'wikiasp_corpus'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='mmlu', help='input dataset', choices=[
-        'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'eli5', 'wow', 'asqa', 'lmdata'])
+    parser.add_argument('--dataset', type=str, default='asqa', help='input dataset', choices=[
+        'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'wikiasp', 'eli5', 'wow', 'asqa', 'lmdata'])
     parser.add_argument('--model', type=str, default='gpt-3.5-turbo-0301', help='model name',
                         choices=['code-davinci-002', 'gpt-3.5-turbo-0301'])
     parser.add_argument('--out', type=str, default=None, help='output file')
@@ -1643,7 +1776,7 @@ if __name__ == '__main__':
 
     elif args.task == 'compare':
         file1, file2 = args.inp
-        compare(file1, file2, only_show_diff=True, only_first_right=True, show_final=True)
+        compare(file1, file2, only_show_diff=True, only_first_right=False, show_final=True)
 
     elif args.task == 'strategyqa_to_beir':
         strategyqa_file = args.inp[0]
@@ -1675,13 +1808,13 @@ if __name__ == '__main__':
             eval(model=args.model,
                 dataset=dataset,
                 jsonl_files=jsonl_files,
-                anchor_text='answer is',
+                anchor_text=['answer is (.*)'],
                 beir_dir='data/strategyqa/train_cot_beir')
         elif dataset == 'mmlu':
             eval(model=args.model,
                 dataset=dataset,
                 jsonl_files=jsonl_files,
-                anchor_text='answer is',
+                anchor_text=['answer is \(([ABCDE]*)\)', '\(([ABCDE]*)\) is correct', '\(([ABCDE]*)\) is the correct answer'],
                 beir_dir=None)
         elif dataset == '2wikihop':
             eval(model=args.model,
@@ -1689,11 +1822,11 @@ if __name__ == '__main__':
                 jsonl_files=jsonl_files,
                 anchor_text='answer is',
                 beir_dir='data/2wikimultihopqa/dev_beir')
-        elif dataset == 'wikisum':
+        elif dataset in {'wikisum', 'wikiasp'}:
             eval(model=args.model,
                 dataset=dataset,
                 jsonl_files=jsonl_files,
-                anchor_text='',
+                anchor_text=None,
                 beir_dir=None)  # 'data/wikisum/wikisum_all_beir'
         elif dataset in {'eli5', 'wow', 'lmdata'}:
             eval(model=args.model,
@@ -1705,7 +1838,7 @@ if __name__ == '__main__':
             eval(model=args.model,
                 dataset=dataset,
                 jsonl_files=jsonl_files,
-                anchor_text='',
+                anchor_text=None,
                 prefix_to_remove=None,  # 'Given all interpretations, the comprehensive answer is as follow.',
                 beir_dir=None)
 
@@ -1721,8 +1854,9 @@ if __name__ == '__main__':
 
     elif args.task == 'build_elasticsearch':
         beir_corpus_file_pattern, index_name = args.inp  # 'wikipedia_dpr'
-        get_id = lambda doc: doc['metadata']['line'] + '.' + str(doc['_id'])
-        build_elasticsearch(beir_corpus_file_pattern, index_name, get_id=get_id)
+        get_id_default = lambda doc: str(doc['_id'])
+        get_id_lm = lambda doc: doc['metadata']['line'] + '.' + str(doc['_id'])
+        build_elasticsearch(beir_corpus_file_pattern, index_name, get_id=get_id_default)
 
     elif args.task == 'mmlu_ret':
         mmlu_ret(output=args.out)
@@ -1749,3 +1883,11 @@ if __name__ == '__main__':
 
     elif args.task == 'mmlu_retrieval_usefulness':
         mmlu_retrieval_usefulness()
+
+    elif args.task == 'wikiasp_match_title':
+        output_dir = args.out
+        wikiasp_match_title(output_dir, split='test')
+
+    elif args.task == 'wikiasp_corpus':
+        beir_dir = args.out
+        wikiasp_corpus(beir_dir)

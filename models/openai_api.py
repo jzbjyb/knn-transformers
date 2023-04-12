@@ -20,7 +20,7 @@ from beir.retrieval.search.lexical import BM25Search
 import openai
 from .retriever import BM25
 from .templates import CtxPrompt, ApiReturn, RetrievalInstruction
-from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, WoWLong, ASQA, MMLU, LMData
+from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, WikiAsp, ELI5, WoW, WoWLong, ASQA, ASQAtrans, MMLU, LMData
 
 logging.basicConfig(level=logging.INFO)
 
@@ -140,6 +140,7 @@ class QueryAgent:
         self.forbid_generate_step = retrieval_kwargs.get('forbid_generate_step', 0)
         self.use_gold_iterative = retrieval_kwargs.get('use_gold_iterative', False)
         self.append_retrieval = retrieval_kwargs.get('append_retrieval', False)
+        self.reinit_ctx = retrieval_kwargs.get('reinit_ctx', False)
 
         self.ret_topk = retrieval_kwargs.get('topk', 1)
         self.debug = retrieval_kwargs.get('debug', False)
@@ -205,7 +206,7 @@ class QueryAgent:
             raise KeyBrokenException()
 
         # init tracking variables
-        max_num_req_per_min = 10 if is_code_model else 1000
+        max_num_req_per_min = 15 if is_code_model else 1000
         min_sleep = 60 / max_num_req_per_min
         add_sleep = 3
         expbf = 2
@@ -367,6 +368,7 @@ class QueryAgent:
             except KeyboardInterrupt as e:
                 raise e
             except Exception as e:  # other errors TODO: exclude length limitation
+                raise e
                 if retry >= max_retry:
                     if return_key_func:  # return key
                         end_t = time.time()
@@ -402,9 +404,10 @@ class QueryAgent:
         api_key: str = None,
     ):
         # update retrieval for ctx
-        for q in queries:
-            for d in q.demo:
-                d.update_retrieval(d.get_all_ctxs(), method=self.ctx_increase)
+        if self.use_ctx_for_examplars:
+            for q in queries:
+                for d in q.demo:
+                    d.update_retrieval(d.get_all_ctxs(), method=self.ctx_increase)
         if self.use_retrieval:
             return self.ret_prompt(queries, api_key=api_key)
         else:  # directly generate all without gold context
@@ -436,6 +439,11 @@ class QueryAgent:
         first_ret = True
         step_ind = 0
         while len(queries) and max_gen_len < self.max_generation_len and step_ind <= max_iteration:
+            # reinit ctx to empty
+            if self.reinit_ctx:
+                for i, q in queries:
+                    q.reinit_ctx()
+
             # retrieve
             look_aheads: List[str] = [''] * len(queries)
             if self.look_ahead_steps:  # generate a fixed number tokens for retrieval
@@ -475,9 +483,6 @@ class QueryAgent:
                     assert len(generate_queries) == len(queries)
                     queries_to_issue = [lh if self.only_use_look_ahead else (gq + lh) for gq, lh in zip(generate_queries, look_aheads)]
                 else:
-                    # TODO: only use question
-                    #queries_to_issue = [lh if self.only_use_look_ahead else (q.case.split('\n')[0].split(':', 1)[1].strip() + lh)
-                    #    for (i, q), lh in zip(queries, look_aheads)]
                     queries_to_issue = [lh if self.only_use_look_ahead else (q.get_query_for_retrieval() + lh) for (i, q), lh in zip(queries, look_aheads)]
                 if self.debug:
                     print(f'Query -> !{queries_to_issue[0]}!')
@@ -669,7 +674,7 @@ def write_worker(output_file: str, output_queue: Queue, size: int = None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='strategyqa', choices=
-                        ['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow', 'wow_train_1k', 'asqa', 'mmlu', 'lmdata'])
+                        ['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'wikiasp', 'eli5', 'wow', 'wow_train_1k', 'asqa', 'asqatrans', 'mmlu', 'lmdata'])
     parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003', 'gpt-3.5-turbo-0301', 'text-curie-001'])
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
@@ -712,37 +717,39 @@ if __name__ == '__main__':
         dataset=(corpus, queries, qrels),
         index_name=args.index_name,
         use_decoder_input_ids=True,
-        engine='elasticsearch',
+        engine='bing',
+        exclude_domain='wikipedia.org',
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 1,
-        'use_ctx': False,
-        'frequency': 0,
+        'topk': 3,
+        'use_ctx': True,
+        'frequency': 64,
         'boundary': [],
         #'boundary': ['Intermediate answer:'],
         #'boundary': ['")]'],
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 16,
-        'use_full_input_as_query': False,
+        'max_query_length': 64,
+        'use_full_input_as_query': True,
         'retrieval_at_beginning': False,
-        'look_ahead_steps': 0,
-        'look_ahead_truncate_at_boundary': None,
-        'look_ahead_filter_prob': 0.0,
+        'look_ahead_steps': 64,
+        'look_ahead_truncate_at_boundary': 'sentence',
+        'look_ahead_filter_prob': 0.4,
         'look_ahead_mask_prob': 0.0,
         'look_ahead_boundary': [],
-        'only_use_look_ahead': False,
+        'only_use_look_ahead': True,
         'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
         #'retrieval_trigers': [('\[Search\("', '")]')],
         #'retrieval_trigers': [(None, '. ')],
         'force_generate': None,
-        'forbid_generate_step': 0,
+        'forbid_generate_step': None,
         'truncate_at_prob': 0.0,
-        'truncate_at_boundary': None,
+        'truncate_at_boundary': 'sentence',
         'append_retrieval': False,
+        'reinit_ctx': True,
         'use_ctx_for_examplars': False,
         'use_retrieval_instruction': False,
         'use_instruction': False,
@@ -780,6 +787,9 @@ if __name__ == '__main__':
     elif args.dataset == 'asqa':
         data = ASQA(json_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = ASQA.get_gold_ctxs
+    elif args.dataset == 'asqatrans':
+        data = ASQAtrans(json_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = ASQAtrans.get_gold_ctxs
     elif args.dataset == 'wow':
         data = WoW(prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WoW.get_gold_ctxs
@@ -789,8 +799,11 @@ if __name__ == '__main__':
     elif args.dataset == 'wikisum_all_beir':
         data = WikiSum(args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WikiSum.get_gold_ctxs
+    elif args.dataset == 'wikiasp':
+        data = WikiAsp(args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = WikiAsp.get_gold_ctxs
     elif args.dataset == 'mmlu':
-        data = MMLU(categories=['STEM'], prompt_type=retrieval_kwargs['prompt_type'])
+        data = MMLU(tasks=MMLU.hard_tasks, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = MMLU.get_gold_ctxs
     elif args.dataset == 'lmdata':
         data = LMData(args.input, prompt_type=retrieval_kwargs['prompt_type'])

@@ -10,7 +10,7 @@ import string
 from tqdm import tqdm
 import numpy as np
 import spacy
-from datasets import Dataset, load_dataset, concatenate_datasets
+from datasets import Dataset, load_dataset, concatenate_datasets, load_from_disk
 from beir.datasets.data_loader import GenericDataLoader
 from .templates import CtxPrompt
 logging.basicConfig(level=logging.INFO)
@@ -143,7 +143,7 @@ class BaseDataset:
 
             query = input_template_func(q)
             if use_answer:
-                query += ' ' + self.output_template(cot, a)
+                query += ('' if query[-1] in {'\n', ' '} else ' ') + self.output_template(cot, a)
             return query
 
         # demo
@@ -312,8 +312,8 @@ class StrategyQA(BaseDataset):
             'answer': 'no',
         }
     ]
-    cot_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step):'
-    cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search):'
+    cot_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer:'
+    cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer:'
     cot_output_template = lambda self, cot, ans: f'{cot} So the final answer is {ans}.'
 
     sa_ctx_examplars: List[Dict] = [
@@ -432,7 +432,7 @@ class StrategyQA(BaseDataset):
                 example = json.loads(l)
                 qid = example['_id']
                 question = example['text']
-                cot = example['metadata']['cot']
+                cot = example['metadata']['cot'] if 'cot' in example['metadata'] else ''
                 ans = example['metadata']['answer']
                 rel_dids = [did for did, rel in qrels[qid].items() if rel]
                 ctxs = [(did, corpus[did]['text']) for did in rel_dids]
@@ -950,7 +950,7 @@ class WikiMultiHopQA(BaseDataset):
 
 class WikiSum(BaseDataset):
     raw_train_data_file: str = ''
-    summary_examplars: List[Dict] = [
+    cot_examplars: List[Dict] = [
         {
             "id": "24951400",
             "question": "marilyn artus",
@@ -1012,16 +1012,16 @@ class WikiSum(BaseDataset):
             "answer": "Kim Bok-joo (born 17 October 1960) is a South Korean former middle distance runner who competed in the 1984 Summer Olympics.",
         }
     ]  # shuffled
-    summary_demo_input_template = summary_test_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary:'
-    summary_output_template = lambda self, cot, ans: ans
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary:'
+    cot_output_template = lambda self, cot, ans: ans
 
-    summary_ret_examplars = summary_examplars
-    summary_ret_demo_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary:'
-    summary_ret_test_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary (with search):'
-    summary_ret_output_template = summary_output_template
+    cot_ret_examplars = cot_examplars
+    cot_ret_demo_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary:'
+    cot_ret_test_input_template = lambda self, ques: f'Generate a summary about {ques}\nSummary (with search):'
+    cot_ret_output_template = cot_output_template
 
-    def __init__(self, beir_dir: str, split: str = 'test', prompt_type: str = 'summary'):
-        assert prompt_type in {'summary', 'summary_ret'}
+    def __init__(self, beir_dir: str, split: str = 'test', prompt_type: str = 'cot'):
+        assert prompt_type in {'cot', 'cot_ret'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
@@ -1077,6 +1077,104 @@ class WikiSum(BaseDataset):
                     'gold_output': output,
                 })
         return Dataset.from_list(dataset)
+
+
+class WikiAsp(BaseDataset):
+    raw_train_data_file: str = ''
+    cot_examplars: List[Dict] = [
+        {
+            "id": "train-45-14962",
+            "question": "Aslanhane Mosque including the following aspects: location, history",
+            "answer_raw": "# location\nthe mosque is in the old quarter of ankara next to ankara castle . with an altitude of 947 metres ( 3 , 107  ft ) it overlooks ankara at 39 \u00b0 56 \u2032 12 \u2033 n 32 \u00b0 51 \u2032 55 \u2033 e .\n# history\nthe mosque is one of the oldest mosques in turkey still standing . it was built during the reign of mesud ii of the anatolian seljuks in 1290 . its architect was ebubekir mehmet . it was commissioned by two ahi leaders named h\u00fcsamettin and hasaneddin . however , in 1330 , it was repaired by another ahi leader named \u015ferafettin after whom the mosque was named . after several minor repairs the mosque was restored by the directorate general of foundations in 2010 - 2013 term .",
+            "answer": "# Location\nThe mosque is in the old quarter of ankara next to ankara castle. With an altitude of 947 metres (3,107 ft) it overlooks ankara at 39°56′12″N 32°51′55″E.\n# History\nThe mosque is one of the oldest mosques in Turkey still standing. It was built during the reign of Mesud II of the Anatolian Seljuks in 1290. Its architect was Ebubekir Mehmet. It was commissioned by two Ahi leaders named Hüsamettin and Hasaneddin. However, in 1330, it was repaired by another Ahi leader named Şerafettin after whom the mosque was named. After several minor repairs the mosque was restored by the directorate general of foundations in 2010-2013 term.",
+            "domain": "building"
+        },
+        {  # originally wrong title
+            "id": "train-64-5493",
+            "question": "Untold Legends: The Warrior's Code including the following aspects: reception, gameplay, development",
+            "answer_raw": "# reception\nthe game received \" mixed or average reviews \" according to video game review aggregator metacritic .\n# gameplay\nthe warrior ' s code is a hack n ' slash action role - playing game , which concentrates on action - oriented combat .\n# development\nas a pre - order bonus , the game was shipped with a small action figure of the guardian class .",
+            "answer": "# Reception\nThe game received \"mixed or average reviews\" according to video game review aggregator Metacritic.\n# Gameplay\nThe warrior's code is a hack n' slash action role-playing game, which concentrates on action-oriented combat.\n# Development\nAs a pre-order bonus, the game was shipped with a small action figure of the Guardian class.",
+            "domain": "software"
+        },
+        {
+            "id": "train-39-10878",
+            "question": "Raid on St. Augustine including the following aspects: aftermath, background",
+            "answer_raw": "# aftermath\nonce the english had gone men\u00e9ndez and the rest of the spanish settlers returned to find a smoldering ruins and very little left . he soon and begged for help from the viceroy of cuba and the settlement took a while to build itself back up . the destroyed fort was replaced with the present day castillo de san marcos .\n# background\nwar had already been unofficially declared by philip ii of spain after the treaty of nonsuch in which elizabeth i had offered her support to the rebellious protestant dutch rebels . the queen through francis walsingham ordered sir francis drake to lead an expedition to attack the spanish new world in a kind of preemptive strike . sailing from plymouth , england , he struck first at santiago in november 1585 then across the atlantic at the spanish new world city of santo domingo of which was captured and ransomed on 1 january 1586 and following that successfully attacked the important city of cartagena on 19 february . drake wanted to strike at another spanish city on the main before finally visiting and replenishing sir walter raleigh ' s new colony of roanoke colony on the american east coast . then after this he hoped to make the transatlantic crossing back to england . the fleet headed north , and in late april drake put into the spanish cuban mainland and his men dug wells in search of fresh water and gathered supplies to help counter an outbreak of dysentery after which he moved on . the fleet traveled north within sight of land on the florida peninsula sailing past the west coast . on 27 may 1586 as they approached further north a small fort was spotted on the shore , with a small inlet close by . this was the location of st augustine , the most northerly town in spain ' s new world empire , and the oldest permanent colonial settlement in north america . drake knew of the place and was also aware of the fact that the spanish under pedro men\u00e9ndez de avil\u00e9s had ordered all of the french huguenot colonists that had tried to settle in the area executed . drake decided on one final opportunity to raid and plunder , and a chance to avenge his fellow protestants .",
+            "answer": "# Aftermath\nOnce the English had gone Menéndez and the rest of the Spanish settlers returned to find a smoldering ruins and very little left. He soon and begged for help from the viceroy of Cuba and the settlement took a while to build itself back up. The destroyed fort was replaced with the present day Castillo de San Marcos.\n# Background\nWar had already been unofficially declared by Philip II of Spain after the Treaty of Nonsuch in which Elizabeth I had offered her support to the rebellious Protestant Dutch rebels. The Queen through Francis Walsingham ordered Sir Francis Drake to lead an expedition to attack the Spanish New World in a kind of preemptive strike. Sailing from Plymouth, England, he struck first at Santiago in November 1585 then across the Atlantic at the Spanish new world city of Santo Domingo of which was captured and ransomed on 1 January 1586 and following that successfully attacked the important city of Cartagena on 19 February. Drake wanted to strike at another Spanish city on the Main before finally visiting and replenishing Sir Walter Raleigh's new colony of Roanoke Colony on the American East Coast. Then after this he hoped to make the Transatlantic crossing back to England. The fleet headed north, and in late April Drake put into the Spanish Cuban mainland and his men dug wells in search of fresh water and gathered supplies to help counter an outbreak of dysentery after which he moved on. The fleet traveled north within sight of land on the Florida peninsula sailing past the West coast. On 27 May 1586 as they approached further north a small fort was spotted on the shore, with a small inlet close by. This was the location of St Augustine, the most northerly town in Spain's New World Empire, and the oldest permanent colonial settlement in North America. Drake knew of the place and was also aware of the fact that the spanish under Pedro Menéndez de Avilés had ordered all of the French Huguenot colonists that had tried to settle in the area executed. Drake decided on one final opportunity to raid and plunder, and a chance to avenge his fellow Protestants.",
+            "domain": "event"
+        },
+        {
+            "id": "train-53-18686",
+            "question": "Lakewood (Livingston, Alabama) including the following aspects: architecture, history",
+            "answer_raw": "# architecture\nthe house has a plan that is relatively rare in early alabama architecture . the plan features a brick ground floor that is topped by one - and - a - half - stories of wood - frame construction . the ground floor originally contained domestic spaces , with the formal rooms on the principle floor and bedrooms on the upper floor . a central hallway is present on all levels . the facade is five bays wide , with central entrance doors on the ground and principle floors . the bays are divided by two - story doric pilasters , with the middle third of the facade occupied by a two - tiered tetrastyle doric portico . two curved wrought iron staircases ascend from ground level to the front center of the upper portico , leading to the formal entrance .\n# history\nlakewood was built for joseph lake , a native of north carolina , by hiram w . bardwell , a master builder . construction was completed in 1840 . located adjacent to the university of west alabama , julia strudwick tutwiler , a lake relative , periodically resided in the house from 1881 to 1910 while she served as president of the university . it was then known as livingston normal college . the house was extensively photographed by alex bush for the historic american buildings survey in november and december 1936 . lakewood has continued to be owned by descendants of the lake family to the current day . the house and its surviving 10 acres ( 4 . 0  ha ) of grounds were listed on the places in peril in 2012 due to the immediate threat of its acquisition by developers .",
+            "answer": "# Architecture\nThe house has a plan that is relatively rare in early Alabama architecture. The plan features a brick ground floor that is topped by one-and-a-half-stories of wood-frame construction. The ground floor originally contained domestic spaces, with the formal rooms on the principle floor and bedrooms on the upper floor. A central hallway is present on all levels. The facade is five bays wide, with central entrance doors on the ground and principle floors. The bays are divided by two-story Doric pilasters, with the middle third of the facade occupied by a two-tiered tetrastyle Doric portico. Two curved wrought iron staircases ascend from ground level to the front center of the upper portico, leading to the formal entrance.\n# History\nLakewood was built for Joseph lake, a native of North Carolina, by Hiram W. Bardwell, a master builder. Construction was completed in 1840. Located adjacent to the University of West Alabama, Julia Strudwick Tutwiler, a Lake relative, periodically resided in the house from 1881 to 1910 while she served as president of the university. It was then known as Livingston Normal College. The house was extensively photographed by Alex Bush for the Historic American Buildings Survey in November and December 1936. Lakewood has continued to be owned by descendants of the Lake family to the current day. The house and its surviving 10 acres (4.0 ha) of grounds were listed on the Places in Peril in 2012 due to the immediate threat of its acquisition by developers.",
+            "domain": "historic_place"
+        },
+        {
+            "id": "train-50-1349",
+            "question": "Echo School (Oregon) including the following aspects: academics, history",
+            "answer_raw": "# academics\nin 2008 , 91 % of the school ' s seniors received their high school diploma . of 66 students , 60 graduated , 1 dropped out , 3 received a modified diploma , and 2 were still in high school in 2009 .\n# history\nthe class of 2008 was the 100th class in the school ' s history .",
+            "answer": "# Academics\nIn 2008, 91% of the school' s seniors received their high school diploma. Of 66 students, 60 graduated, 1 dropped out, 3 received a modified diploma, and 2 were still in high school in 2009.\n# History\nThe class of 2008 was the 100th class in the school's history.",
+            "domain": "educational_institution"
+        },
+        {
+            "id": "train-73-14144",
+            "question": "Melaleuca serpentina including the following aspects: taxonomy and naming, description, distribution and habitat",
+            "answer_raw": "# taxonomy and naming\nmelaleuca serpentina was first formally described in 2009 by lyndley craven in novon from a specimen collected adjacent to the woodsreef asbestos mine near barraba . in 2012 , udovicic and spencer gave the species the name callistemon serpentinus but in 2013 , craven transferred all species previously known as callistemon to melaleuca . some authorities continue to use callistemon serpentinus . the specific epithet ( serpentina ) refers to this species often occurring on soils derived from serpentinite . callistemon serpentinus is regarded as a synonym of melaleuca serpentina by the royal botanic gardens , kew .\n# description\nmelaleuca serpentina is a shrub growing to 4  m ( 10  ft ) tall with hard , papery bark . its leaves are arranged alternately and are 21 \u2013 53  mm ( 0 . 8 \u2013 2  in ) long , 2 \u2013 5  mm ( 0 . 08 \u2013 0 . 2  in ) wide , more or less flat , narrow elliptical to egg - shaped with the narrow end towards the base and an end tapering to a sharp point . the leaves have a mid - vein but the lateral veins are obscure and there are many distinct oil glands . the flowers are creamy green to yellow and are arranged in spikes on the ends of branches which continue to grow after flowering and also in the leaf axils . the spikes are 30 \u2013 40  mm ( 1 \u2013 2  in ) in diameter with 15 to 35 individual flowers . the petals are 2 . 2 \u2013 4  mm ( 0 . 09 \u2013 0 . 2  in ) long and fall off as the flower ages and there are 37 to 51 stamens in each flower . flowering occurs in april , october and december and is followed by fruit which are woody capsules , 4 . 2 \u2013 4 . 6  mm ( 0 . 17 \u2013 0 . 18  in ) long .\n# distribution and habitat\nmelaleuca serpentina occurs in the barraba district growing in grassy woodland on soils derived from serpentinite .",
+            "answer": "# Taxonomy and naming\nMelaleuca serpentina was first formally described in 2009 by Lyndley Craven in Novon from a specimen collected adjacent to the Woodsreef asbestos mine near Barraba. In 2012 , Udovicic and Spencer gave the species the name Callistemon serpentinus but in 2013, Craven transferred all species previously known as Callistemon to Melaleuca. Some authorities continue to use Callistemon serpentinus. The specific epithet (serpentina) refers to this species often occurring on soils derived from serpentinite. Callistemon serpentinus is regarded as a synonym of Melaleuca serpentina by the Royal Botanic Gardens, Kew.\n# Description\nMelaleuca serpentina is a shrub growing to 4 m (10 ft) tall with hard, papery bark. Its leaves are arranged alternately and are 21–53 mm (0.8–2 in) long, 2–5 mm (0.08–0.2 in) wide, more or less flat, narrow elliptical to egg-shaped with the narrow end towards the base and an end tapering to a sharp point. The leaves have a mid-vein but the lateral veins are obscure and there are many distinct oil glands. The flowers are creamy green to yellow and are arranged in spikes on the ends of branches which continue to grow after flowering and also in the leaf axils. The spikes are 30–40 mm (1–2 in) in diameter with 15 to 35 individual flowers. The petals are 2.2–4 mm (0.09–0.2 in) long and fall off as the flower ages and there are 37 to 51 stamens in each flower. flowering occurs in April, October and December and is followed by fruit which are woody capsules, 4.2–4.6 mm (0.17–0.18 in) long.\n# Distribution and habitat\nMelaleuca serpentina occurs in the Barraba district growing in grassy woodland on soils derived from serpentinite.",
+            "domain": "plant"
+        },
+        {
+            "id": "train-62-1235",
+            "question": "The Making of the Mob including the following aspects: reception, production, overview",
+            "answer_raw": "# reception\nthe first season received mixed responses from television critics and a metacritic score of 59 out of 100 , based on six reviews , indicating \" mixed or average reviews \" . the review aggregator website rotten tomatoes reported a 40 % \" rotten \" critics rating based on five reviews .\n# production\non january 10 , 2015 , amc ordered the series as a \" special event \" miniseries to air in mid - 2015 . on july 31 , 2015 , two weeks after the series premiere , amc renewed it for a second season to air in mid - 2016 .",
+            "answer": "# Reception\nThe first season received mixed responses from television critics and a Metacritic score of 59 out of 100, based on six reviews, indicating \"mixed or average reviews\". The review aggregator website Rotten Tomatoes reported a 40% \"rotten\" critics rating based on five reviews.\n# Production\nOn January 10, 2015, AMC ordered the series as a \"special event\" miniseries to air in mid-2015. On July 31, 2015, two weeks after the series premiere, AMC renewed it for a second season to air in mid-2016.",
+            "domain": "television_show"
+        },
+        {
+            "id": "train-35-4670",
+            "question": "Green Township, Scioto County, Ohio including the following aspects: geography, name and history, government",
+            "answer_raw": "# geography\nlocated in the far south of the county along the ohio river , it borders the following townships : porter township - north vernon township - northeast elizabeth township , lawrence county - east hamilton township , lawrence county - southeast greenup county , kentucky lies across the ohio river to the west . no municipalities are located in green township , although the census - designated place of franklin furnace lies in the northeastern part of the township , and the unincorporated community of haverhill lies in the south of the township . both of these communities are ohio river towns .\n# name and history\nnamed after griffin green , a land agent , it is one of sixteen green townships statewide . origins of green township date to between 1803 and 1811 . the community of haverhill was settled as early as 1797 . the powellsville community dates to july 31 , 1846 .\n# government\nthe township is governed by a three - member board of trustees , who are elected in november of odd - numbered years to a four - year term beginning on the following january 1 . two are elected in the year after the presidential election and one is elected in the year before it . there is also an elected township fiscal officer , who serves a four - year term beginning on april 1 of the year after the election , which is held in november of the year before the presidential election . vacancies in the fiscal officership or on the board of trustees are filled by the remaining trustees .",
+            "answer": "# Geography\nLocated in the far south of the county along the Ohio River, it borders the following townships: Porter Township - north Vernon Township - northeast Elizabeth Township, Lawrence County - east Hamilton Township, Lawrence County - southeast Greenup County, Kentucky lies across the Ohio River to the west. No municipalities are located in Green Township, although the census-designated place of Franklin Furnace lies in the northeastern part of the township, and the unincorporated community of Haverhill lies in the south of the township. Both of these communities are Ohio River towns.\n# Name and history\nNamed after Griffin Green, a land agent, it is one of sixteen Green Townships statewide. Origins of Green Township date to between 1803 and 1811. The community of Haverhill was settled as early as 1797. the Powellsville community dates to July 31, 1846.\n# Government\nThe township is governed by a three-member board of trustees, who are elected in November of odd-numbered years to a four-year term beginning on the following January 1. Two are elected in the year after the presidential election and one is elected in the year before it. There is also an elected township fiscal officer, who serves a four-year term beginning on April 1 of the year after the election, which is held in November of the year before the presidential election. Vacancies in the fiscal officership or on the board of trustees are filled by the remaining trustees.",
+            "domain": "town"
+        }
+    ]  # shuffled
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a summary about {ques} with one aspect per line.\n'
+    cot_output_template = lambda self, cot, ans: ans
+
+    def __init__(self, hf_dataset_dir: str, prompt_type: str = 'cot'):
+        assert prompt_type in {'cot'}
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplars = getattr(self, f'{prompt_type}_examplars')
+        self.dataset = self.load_data(hf_dataset_dir)
+
+    def load_data(self, hf_dataset_dir: str):
+        def map_fn(example):
+            qid = example['exid']
+            title = example['title']
+            aspects: List[str] = []
+            summary: List[str] = []
+            for asp, text in example['targets']:
+                asp, text = asp.strip(), text.strip().replace('\n', ' ')
+                if len(text) <= 0:  # remove empty aspects
+                    continue
+                aspects.append(asp)
+                summary.append(f'# {asp}\n{text}')
+            summary: str = '\n'.join(summary)
+            output = self.output_template(cot=None, ans=summary)
+            question = f'{title} including the following aspects: {", ".join(aspects)}'
+            new_example = {
+                'qid': qid,
+                'question': question,
+                'answer': summary,
+                'gold_output': output,
+            }
+            return new_example
+
+        data = load_from_disk(hf_dataset_dir)
+        return data.map(map_fn)
 
 
 class ELI5(BaseDataset):
@@ -1380,6 +1478,7 @@ class WoWLong(WoW):
 
 
 class ASQA(BaseDataset):
+    hint_jsonl_file = 'data/asqa/ASQA_test_hint.jsonl'
     cot_examplars: List[Dict] = [
         {
             "id": "-6497998034447212269",
@@ -1458,34 +1557,79 @@ class ASQA(BaseDataset):
     cot_subq_in_input_examplars: List[Dict] = [
         {
             "question": "When did bat out of hell come out? It has 2 interpretations: (1) When did the album bat out of hell come out? (2) When did the TV series bat out of hell come out?",
+            "answer": "(1) The album Bat Out of Hell came out on October 21, 1977. (2) The British television show Bat Out of Hell came out on 26 November 1966."
         },
         {
             "question": "Who is the chairman of the federal reserve? It has 4 interpretations: (1) Who was the 16th chairperson of the Federal Reserve? (2) Who was the 15th chairperson of the Federal Reserve? (3) Who was the 14th chairperson of the Federal Reserve? (4) Who was the 13th chairperson of the Federal Reserve?",
+            "answer": "(1) The 16th Chair of the Federal Reserve is Jerome Powell. (2) The 15th Chair of the Federal Reserve is Janet Yellen. (3) The 14th Chair of the Federal Reserve is Ben Bernanke. (4) The 13th Chair of the Federal Reserve is Alan Greenspan."
         },
         {
             "question": "What kind of car is in national lampoon's vacation? It has 2 interpretations: (1) What is the car called in the movie, National Lampoon's Vacation? (2) What is the actual car in the movie, National lampoon's Vacation?",
+            "answer": "(1) The car in the movie National Lampoon's Vacation is called The Wagon Queen Family Truckster. (2) The car is based on a 1979 Ford LTD Country Squire station wagon."
         },
         {
             "question": "Who sang the song god's not dead? It has 2 interpretations: (1) Who sang the original version of God's Not Dead? (2) Who sang God's Not Dead as a cover?",
+            "answer": "(1) The original version of God's Not Dead was originally performed by Passion with David Crowder. (2) Newsboys sang God's Not Dead as a cover."
         },
         {
             "question": "Who won last triple crown of horse racing? It has 4 interpretations: (1) Which horse won the last triple crown of horse racing? (2) Which jockey won the last triple crown of horse racing? (3) Which trainer won the last triple crown of horse racing? (4) Which breeder won the last triple crown of horse racing?",
+            "answer": "(1) The horse that won the last triple crown of horse racing is Justify. (2) Justify's jockey was Mike Smith. (3) Justify's trainer was Bob Baffert. (4) Justify's breeder was John D Gunther."
         },
         {
             "question": "When did the broncos last win the superbowl? It has 3 interpretations: (1) When did the broncos last win the superbowl in 1998? (2) When did the broncos last win the superbowl in 1999? (3) When did the broncos last win the superbowl in 2016?",
+            "answer": "(1) In 1998, the Denver Broncos won the Super Bowl on January 25. (2) In 1999, the Denver Broncos won the Super Bowl on January 31. (3) In 2016, the Denver Broncos won the Super Bowl on February 7."
         },
         {
             "question": "How many cvs stores are there in the usa? It has 3 interpretations: (1) How many cvs stores are there in the usa before 1997? (2) How many cvs stores are there in the usa as of 2006? (3) How many cvs stores are there in the usa as of 2016?",
+            "answer": "(1) Before 1997, CVS has 1,400 stores. (2) As of 2006, CVS operated over 6,200 stores. (3) As of 2016, CVS Pharmacy has over 9,600 stores."
         },
         {
             "question": "Who plays max branning's wife in eastenders? It has 4 interpretations: (1) Who pays Max Branning's first wife in EastEnders? (2) Who plays Max Branning's second wife in EastEnders? (3) Who plays Max Branning's third wife in EastEnders? (4) Who plays Max Branning's fourth wife in EastEnders?",
+            "answer": "(1) The first wife of Max Branning was played by Sukie Smith. (2) The second wife of Max Branning was played by Jo Joyner. (3) The thrid wife of Max Branning was played by Kierston Wareing. (4) The forth wife of Max Branning was played by Tanya Franks."
         }
     ]
     cot_subq_in_input_output_template = cot_output_template
     cot_subq_in_input_demo_input_template = cot_subq_in_input_test_input_template = cot_test_input_template
 
+    cot_hint_in_input_examplars: List[Dict] = [
+        {
+            "question": "When did bat out of hell come out? It has 2 interpretations depending on whether bat out of hell is an album or a TV series.",
+            "answer": "(1) The album Bat Out of Hell came out on October 21, 1977. (2) The British television show Bat Out of Hel came out on 26 November 1966."
+        },
+        {
+            "question": "Who is the chairman of the federal reserve? It has 4 interpretations depending on the order, the 16th, the 15th, the 14th, or the 13th.",
+            "answer": "(1) The 16th Chair of the Federal Reserve is Jerome Powell. (2) The 15th Chair of the Federal Reserve is Janet Yellen. (3) The 14th Chair of the Federal Reserve is Ben Bernanke. (4) The 13th Chair of the Federal Reserve is Alan Greenspan."
+        },
+        {
+            "question": "What kind of car is in national lampoon's vacation? It has 2 interpretations: the name of the car or the car model.",
+            "answer": "(1) The car in the movie National Lampoon's Vacation is called The Wagon Queen Family Truckster. (2) The car is based on a 1979 Ford LTD Country Squire station wagon."
+        },
+        {
+            "question": "Who sang the song god's not dead? It has 2 interpretations: the singer of the original version or the cover version.",
+            "answer": "(1) The original version of God's Not Dead was originally performed by Passion with David Crowder. (2) Newsboys sang God's Not Dead as a cover."
+        },
+        {
+            "question": "Who won last triple crown of horse racing? It has 4 interpretations depending on what \"who\" refers to: horse, jockey, trainer, or breeder.",
+            "answer": "(1) The horse that won the last triple crown of horse racing is Justify. (2) Justify's jockey was Mike Smith. (3) Justify's trainer was Bob Baffert. (4) Justify's breeder was John D Gunther."
+        },
+        {
+            "question": "When did the broncos last win the superbowl? It has 3 interpretations depending on which year the question is asking about: 1998, 1999, or 2016.",
+            "answer": "(1) In 1998, the Denver Broncos won the Super Bowl on January 25. (2) In 1999, the Denver Broncos won the Super Bowl on January 31. (3) In 2016, the Denver Broncos won the Super Bowl on February 7."
+        },
+        {
+            "question": "How many cvs stores are there in the usa? It has 3 interpretations depending on which year the question is asking about: before 1997, as of 2006, or as of 2016.",
+            "answer": "(1) Before 1997, CVS has 1,400 stores. (2) As of 2006, CVS operated over 6,200 stores. (3) As of 2016, CVS Pharmacy has over 9,600 stores."
+        },
+        {
+            "question": "Who plays max branning's wife in eastenders? It has 4 interpretations depending on the order of the wife: the first, the second, the third, or the fourth.",
+            "answer": "(1) The first wife of Max Branning was played by Sukie Smith. (2) The second wife of Max Branning was played by Jo Joyner. (3) The thrid wife of Max Branning was played by Kierston Wareing. (4) The forth wife of Max Branning was played by Tanya Franks."
+        }
+    ]
+    cot_hint_in_input_output_template = cot_output_template
+    cot_hint_in_input_demo_input_template = cot_hint_in_input_test_input_template = cot_test_input_template
+
     def __init__(self, json_file: str = None, split: str = 'dev', prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'cot_subq', 'cot_subq_in_input'}
+        assert prompt_type in {'cot', 'cot_subq', 'cot_subq_in_input', 'cot_hint_in_input'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
@@ -1498,6 +1642,15 @@ class ASQA(BaseDataset):
         self.dataset = self.load_data(json_file, split, prompt_type=prompt_type)
 
     def load_data(self, json_file: str = None, split: str = 'dev', prompt_type: str = None):
+        return self._load_data(json_file=json_file, split=split, prompt_type=prompt_type, output_template=self.output_template)
+
+    @classmethod
+    def _load_data(cls, json_file: str = None, split: str = 'dev', prompt_type: str = None, output_template: Callable = None):
+        qid2hint: Dict[str, str] = {}
+        if cls.hint_jsonl_file:
+            for l in open(cls.hint_jsonl_file):
+                l = json.loads(l)
+                qid2hint[l['qid']] = l['output']
         dataset = []
         num_hasctx = 0
         with open(json_file, 'r') as fin:
@@ -1521,17 +1674,21 @@ class ASQA(BaseDataset):
                 assert len(answers) >= 1
                 assert len(sub_questions) >= 1
                 answers = sorted(answers, key=lambda x: -len(x))  # sort based on length
-                output = self.output_template(cot=None, ans=answers[0])
+                output = output_template(cot=None, ans=answers[0])
                 ctxs: List[Tuple[str, str]] = list(title2content.items())  # could be empty
                 num_hasctx += int(len(ctxs) > 0)
+                hint = qid2hint[qid] if qid in qid2hint else None
 
                 if prompt_type == 'cot_subq_in_input':
                     question = f'{question} It has {len(sub_questions)} interpretations: ' + ' '.join([f'({qi + 1}) {q}' for qi, q in enumerate(sub_questions)])
+                elif prompt_type == 'cot_hint_in_input':
+                    question = f'{question} {hint}'
 
                 dataset.append({
                     'qid': qid,
                     'question': question,
                     'sub_questions': sub_questions,
+                    'hint': hint,
                     'answer': answers[0],
                     'answers': answers,
                     'gold_output': output,
@@ -1539,6 +1696,56 @@ class ASQA(BaseDataset):
                 })
         logging.info(f'{num_hasctx} / {len(dataset)} have gold ctxs')
         return Dataset.from_list(dataset)
+
+
+class ASQAtrans(BaseDataset):
+    subq_examplars: List[Dict] = [
+        {
+            'question': "When did bat out of hell come out? It has 2 interpretations: (1) When did the album bat out of hell come out? (2) When did the TV series bat out of hell come out?",
+            'answer': 'It has 2 interpretations depending on whether bat out of hell is an album or a TV series.',
+        },
+        {
+            'question': "Who is the chairman of the federal reserve? It has 4 interpretations: (1) Who was the 16th chairperson of the Federal Reserve? (2) Who was the 15th chairperson of the Federal Reserve? (3) Who was the 14th chairperson of the Federal Reserve? (4) Who was the 13th chairperson of the Federal Reserve?",
+            'answer': 'It has 4 interpretations depending on the order, the 16th, the 15th, the 14th, or the 13th.',
+        },
+        {
+            'question': "What kind of car is in national lampoon's vacation? It has 2 interpretations: (1) What is the car called in the movie, National Lampoon's Vacation? (2) What is the actual car in the movie, National lampoon's Vacation?",
+            'answer': 'It has 2 interpretations: the name of the car or the car model.',
+        },
+        {
+            'question': "Who sang the song god's not dead? It has 2 interpretations: (1) Who sang the original version of God's Not Dead? (2) Who sang God's Not Dead as a cover?",
+            'answer': 'It has 2 interpretations: the singer of the original version or the cover version.',
+        },
+        {
+            'question': "Who won last triple crown of horse racing? It has 4 interpretations: (1) Which horse won the last triple crown of horse racing? (2) Which jockey won the last triple crown of horse racing? (3) Which trainer won the last triple crown of horse racing? (4) Which breeder won the last triple crown of horse racing?",
+            'answer': 'It has 4 interpretations depending on what \"who\" refers to: horse, jockey, trainer, or breeder.',
+        },
+        {
+            'question': "When did the broncos last win the superbowl? It has 3 interpretations: (1) When did the broncos last win the superbowl in 1998? (2) When did the broncos last win the superbowl in 1999? (3) When did the broncos last win the superbowl in 2016?",
+            'answer': 'It has 3 interpretations depending on which year the question is asking about: 1998, 1999, or 2016.',
+        },
+        {
+            'question': "How many cvs stores are there in the usa? It has 3 interpretations: (1) How many cvs stores are there in the usa before 1997? (2) How many cvs stores are there in the usa as of 2006? (3) How many cvs stores are there in the usa as of 2016?",
+            'answer': 'It has 3 interpretations depending on which year the question is asking about: before 1997, as of 2006, or as of 2016.',
+        },
+        {
+            'question': "Who plays max branning's wife in eastenders? It has 4 interpretations: (1) Who pays Max Branning's first wife in EastEnders? (2) Who plays Max Branning's second wife in EastEnders? (3) Who plays Max Branning's third wife in EastEnders? (4) Who plays Max Branning's fourth wife in EastEnders?",
+            'answer': 'It has 4 interpretations depending on the order of the wife: the first, the second, the third, or the fourth.',
+        }
+    ]
+    subq_output_template = lambda self, cot, ans: ans
+    subq_demo_input_template = subq_test_input_template = lambda self, ques: f'Given an ambiguous question and its several interpretations, merge these interpretations into a single comprehensive sentence.\nInput: {ques}\nOutput:'
+
+    def __init__(self, json_file: str = None, split: str = 'dev', prompt_type: str = 'subq'):
+        assert prompt_type in {'subq'}
+        self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
+        self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
+        self.output_template = getattr(self, f'{prompt_type}_output_template')
+        self.examplars = getattr(self, f'{prompt_type}_examplars')
+        self.dataset = self.load_data(json_file, split, prompt_type=prompt_type)
+
+    def load_data(self, json_file: str = None, split: str = 'dev', prompt_type: str = None):
+        return ASQA._load_data(json_file=json_file, split=split, prompt_type='cot_subq_in_input', output_template=self.output_template)
 
 
 class LMData(BaseDataset):
@@ -1735,6 +1942,8 @@ class MMLU(BaseDataset):
         'nutrition', 'philosophy', 'prehistory', 'professional_accounting', 'professional_law',
         'professional_medicine', 'professional_psychology', 'public_relations',
         'security_studies', 'sociology', 'us_foreign_policy', 'virology', 'world_religions']
+
+    hard_tasks = ['anatomy', 'college_chemistry', 'college_computer_science', 'econometrics', 'high_school_chemistry', 'professional_law', 'virology']
 
     high_ret_coverage_tasks = ["world_religions", "miscellaneous", "anatomy", "high_school_psychology",
         "management", "computer_security", "conceptual_physics", "college_biology", "abstract_algebra", "medical_genetics"]

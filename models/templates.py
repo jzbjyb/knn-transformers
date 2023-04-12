@@ -85,6 +85,10 @@ class CtxPrompt:
         self.ctxs_idx += 1
         return self.did, self.ctx
 
+    def reinit_ctx(self):
+        self.ctx = None
+        self.ind = 1
+
     def append_retrieval(self, rets: List[str], add_index: bool = False):
         rets = self.clean_rets(rets)
         self.case += self.get_append_retrieval(rets, index=self.ind if add_index else None)  # TODO: fix list bug
