@@ -717,8 +717,8 @@ if __name__ == '__main__':
         dataset=(corpus, queries, qrels),
         index_name=args.index_name,
         use_decoder_input_ids=True,
-        engine='bing',
-        exclude_domain='wikipedia.org',
+        engine='elasticsearch',
+        #exclude_domain='wikipedia.org',
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
@@ -755,7 +755,7 @@ if __name__ == '__main__':
         'use_instruction': False,
         'format_reference_method': 'searchresults',
         'ctx_position': 'before_case',
-        'prompt_type': 'cot',
+        'prompt_type': 'cot_subq_cot',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,

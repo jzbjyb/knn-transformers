@@ -1628,8 +1628,38 @@ class ASQA(BaseDataset):
     cot_hint_in_input_output_template = cot_output_template
     cot_hint_in_input_demo_input_template = cot_hint_in_input_test_input_template = cot_test_input_template
 
+    cot_subq_cot_examplars: List[Dict] = [
+        {
+            "id": "-6497998034447212269",
+            "question": "When did bat out of hell come out?",
+            "answer": "Bat Out of Hell has multiple meanings. Bat Out of Hell may refer to an album or a TV series. Therefore, this question has 2 interpretations: (1) When did the album Bat Out of Hell come out? (2) When did the TV series Bat Out of Hell come out? The answers to all interpretations are: (1) The album Bat Out of Hell came out on October 21, 1977. (2) The British television show Bat Out of Hell came out on 26 November 1966."
+        },
+        {
+            "id": "-6171603303439929107",
+            "question": "What kind of car is in national lampoon's vacation?",
+            "answer": "\"what kind of car\" is not clear. It might be asking the name of car or the actual car model. Therefore, this question has 2 interpretations: (1) What is the car called in the movie, National Lampoon's Vacation? (2) What is the actual car in the movie, National lampoon's Vacation? The answers to all interpretations are: (1) The car in the movie National Lampoon's Vacation is called The Wagon Queen Family Truckster. (2) The car is based on a 1979 Ford LTD Country Squire station wagon."
+        },
+        {
+            "id": "7189427191376660295",
+            "question": "Who sang the song god's not dead?",
+            "answer": "the song God's Not Dead has multiple versions. God's Not Dead has an original version and a cover version. Therefore, this question has 2 interpretations: (1) Who sang the original version of God's Not Dead? (2) Who sang God's Not Dead as a cover? The answers to all interpretations are: (1) The original version of God's Not Dead was originally performed by Passion with David Crowder. (2) Newsboys sang God's Not Dead as a cover."
+        },
+        {
+            "id": "-5409444124551037323",
+            "question": "Who won last triple crown of horse racing?",
+            "answer": "\"who\" is not clear. In horse racing, a team consists of a horse, a jockey, a trainer, and a breeder. Therefore, this question has 4 interpretations: (1) Which horse won the last triple crown of horse racing? (2) Which jockey won the last triple crown of horse racing? (3) Which trainer won the last triple crown of horse racing? (4) Which breeder won the last triple crown of horse racing? The answers to all interpretations are: (1) The horse that won the last triple crown of horse racing is Justify. (2) Justify's jockey was Mike Smith. (3) Justify's trainer was Bob Baffert. (4) Justify's breeder was John D Gunther."
+        },
+        {
+            "id": "-6525373399334681447",
+            "question": "Who plays max branning's wife in eastenders?",
+            "answer": "Max Branning in Eastenders has four wives. Therefore, this question has 4 interpretations: (1) Who pays Max Branning's first wife in EastEnders? (2) Who plays Max Branning's second wife in EastEnders? (3) Who plays Max Branning's third wife in EastEnders? (4) Who plays Max Branning's fourth wife in EastEnders? The answers to all interpretations are: (1) The first wife of Max Branning was played by Sukie Smith. (2) The second wife of Max Branning was played by Jo Joyner. (3) The thrid wife of Max Branning was played by Kierston Wareing. (4) The forth wife of Max Branning was played by Tanya Franks."
+        }
+    ]
+    cot_subq_cot_output_template = cot_output_template
+    cot_subq_cot_demo_input_template = cot_subq_cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer: This question is ambiguous because'
+
     def __init__(self, json_file: str = None, split: str = 'dev', prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'cot_subq', 'cot_subq_in_input', 'cot_hint_in_input'}
+        assert prompt_type in {'cot', 'cot_subq', 'cot_subq_in_input', 'cot_hint_in_input', 'cot_subq_cot'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
@@ -1647,7 +1677,7 @@ class ASQA(BaseDataset):
     @classmethod
     def _load_data(cls, json_file: str = None, split: str = 'dev', prompt_type: str = None, output_template: Callable = None):
         qid2hint: Dict[str, str] = {}
-        if cls.hint_jsonl_file:
+        if cls.hint_jsonl_file and os.path.exists(cls.hint_jsonl_file):
             for l in open(cls.hint_jsonl_file):
                 l = json.loads(l)
                 qid2hint[l['qid']] = l['output']

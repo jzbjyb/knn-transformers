@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -e
 
-debug=false
+debug=true
 
 source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=wikiasp
+dataset=asqa
 debug_batch_size=1
 batch_size=8
 model=text-davinci-003  # code-davinci-002, gpt-3.5-turbo-0301, text-davinci-003, text-curie-001

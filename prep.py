@@ -1088,7 +1088,7 @@ def eval(
     dataset: str,
     jsonl_files: List[str],
     anchor_text: List[str] = ['So the answer is'],
-    prefix_to_remove: str = None,
+    prefix_to_remove: List[str] = [],
     retrieval_percentiles: List[Union[int, float]] = [1, 0.25, 0.5, 0.75, 1.0],
     remove_followup: Tuple[str, str] = ('Follow up[^:]*:', '?'),
     beir_dir: str = None,
@@ -1119,7 +1119,7 @@ def eval(
         else:
             answers = [example['answer']]
         for i, answer in enumerate(answers):
-            for pattern in [prefix_to_remove] + anchor_text[:1]:
+            for pattern in prefix_to_remove + anchor_text[:1]:
                 if not pattern:
                     continue
                 find = re.compile(pattern).search(answer)
@@ -1139,11 +1139,15 @@ def eval(
             pred = example['output'].strip()
         else:
             pred = example['output'].split('\n\n', 1)[0].strip()
-        if prefix_to_remove:  # TODO: fix this bug
-            if prefix_to_remove in pred:
-                pred = pred[pred.find(prefix_to_remove) + len(prefix_to_remove):].strip()
-            else:
-                logging.warning('format error')
+        find = None
+        if prefix_to_remove:
+            for pattern in prefix_to_remove:
+                find = re.compile(pattern).search(pred)
+                if find:
+                    pred = find.group(1)
+                    break
+        if find is None:
+            logging.warning(f'format error "{pred}"')
         return pred
 
     def get_final_answer_from_pred(pred: str):
@@ -1839,7 +1843,10 @@ if __name__ == '__main__':
                 dataset=dataset,
                 jsonl_files=jsonl_files,
                 anchor_text=None,
-                prefix_to_remove=None,  # 'Given all interpretations, the comprehensive answer is as follow.',
+                prefix_to_remove=[
+                    'The answers to all interpretations are\: (.*)$',
+                    'The answer to this interpretation is\: (.*)$',
+                    'The answer to this interpretation is (.*)$'],
                 beir_dir=None)
 
     elif args.task == 'kilt_to_beir':
