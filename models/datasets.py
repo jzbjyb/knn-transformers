@@ -1591,6 +1591,35 @@ class ASQA(BaseDataset):
     cot_subq_in_input_output_template = cot_output_template
     cot_subq_in_input_demo_input_template = cot_subq_in_input_test_input_template = cot_test_input_template
 
+    cot_subq_simple_examplars: List[Dict] = [
+        {
+            "answer": "it has 2 interpretations: (1) When did the album bat out of hell come out? (2) When did the TV series bat out of hell come out? The answers to all interpretations are: (1) The album Bat Out of Hell came out on October 21, 1977. (2) The British television show Bat Out of Hell came out on 26 November 1966."
+        },
+        {
+            "answer": "it has 4 interpretations: (1) Who was the 16th chairperson of the Federal Reserve? (2) Who was the 15th chairperson of the Federal Reserve? (3) Who was the 14th chairperson of the Federal Reserve? (4) Who was the 13th chairperson of the Federal Reserve? The answers to all interpretations are: (1) The 16th Chair of the Federal Reserve is Jerome Powell. (2) The 15th Chair of the Federal Reserve is Janet Yellen. (3) The 14th Chair of the Federal Reserve is Ben Bernanke. (4) The 13th Chair of the Federal Reserve is Alan Greenspan."
+        },
+        {
+            "answer": "it has 2 interpretations: (1) What is the car called in the movie, National Lampoon's Vacation? (2) What is the actual car in the movie, National lampoon's Vacation? The answers to all interpretations are: (1) The car in the movie National Lampoon's Vacation is called The Wagon Queen Family Truckster. (2) The car is based on a 1979 Ford LTD Country Squire station wagon."
+        },
+        {
+            "answer": "it has 2 interpretations: (1) Who sang the original version of God's Not Dead? (2) Who sang God's Not Dead as a cover? The answers to all interpretations are: (1) The original version of God's Not Dead was originally performed by Passion with David Crowder. (2) Newsboys sang God's Not Dead as a cover."
+        },
+        {
+            "answer": "it has 4 interpretations: (1) Which horse won the last triple crown of horse racing? (2) Which jockey won the last triple crown of horse racing? (3) Which trainer won the last triple crown of horse racing? (4) Which breeder won the last triple crown of horse racing? The answers to all interpretations are: (1) The horse that won the last triple crown of horse racing is Justify. (2) Justify's jockey was Mike Smith. (3) Justify's trainer was Bob Baffert. (4) Justify's breeder was John D Gunther."
+        },
+        {
+            "answer": "it has 3 interpretations: (1) When did the broncos last win the superbowl in 1998? (2) When did the broncos last win the superbowl in 1999? (3) When did the broncos last win the superbowl in 2016? The answers to all interpretations are: (1) In 1998, the Denver Broncos won the Super Bowl on January 25. (2) In 1999, the Denver Broncos won the Super Bowl on January 31. (3) In 2016, the Denver Broncos won the Super Bowl on February 7."
+        },
+        {
+            "answer": "it has 3 interpretations: (1) How many cvs stores are there in the usa before 1997? (2) How many cvs stores are there in the usa as of 2006? (3) How many cvs stores are there in the usa as of 2016? The answers to all interpretations are: (1) Before 1997, CVS has 1,400 stores. (2) As of 2006, CVS operated over 6,200 stores. (3) As of 2016, CVS Pharmacy has over 9,600 stores."
+        },
+        {
+            "answer": "it has 4 interpretations: (1) Who pays Max Branning's first wife in EastEnders? (2) Who plays Max Branning's second wife in EastEnders? (3) Who plays Max Branning's third wife in EastEnders? (4) Who plays Max Branning's fourth wife in EastEnders? The answers to all interpretations are: (1) The first wife of Max Branning was played by Sukie Smith. (2) The second wife of Max Branning was played by Jo Joyner. (3) The thrid wife of Max Branning was played by Kierston Wareing. (4) The forth wife of Max Branning was played by Tanya Franks."
+        }
+    ]
+    cot_subq_simple_output_template = cot_output_template
+    cot_subq_simple_demo_input_template = cot_subq_simple_test_input_template = lambda self, ques: f'Generate a comprehensive and informative answer for a given question based on the provided search results above. You must only use information from the provided search results. Combine search results together into a coherent answer. Do not repeat text.\nQuestion: {ques}\nAnswer: This question is ambiguous and'
+
     cot_hint_in_input_examplars: List[Dict] = [
         {
             "question": "When did bat out of hell come out? It has 2 interpretations depending on whether bat out of hell is an album or a TV series.",
@@ -1629,7 +1658,7 @@ class ASQA(BaseDataset):
     cot_hint_in_input_demo_input_template = cot_hint_in_input_test_input_template = cot_test_input_template
 
     def __init__(self, json_file: str = None, split: str = 'dev', prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'cot_subq', 'cot_subq_in_input', 'cot_hint_in_input'}
+        assert prompt_type in {'cot', 'cot_subq', 'cot_subq_in_input', 'cot_hint_in_input', 'cot_subq_simple'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
