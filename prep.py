@@ -788,6 +788,7 @@ def compare(
         show_final: bool = False,
         only_last_trace: bool = False,
     ):
+    raw_data = json.load(open('data/asqa/ASQA.json'))
     get_ans = lambda x: x.strip().rsplit(' ', 1)[-1][:-1].lower()
     with open(file1) as fin1, open(file2) as fin2:
         id2examples1 = [json.loads(l) for l in fin1]
@@ -803,7 +804,7 @@ def compare(
             c = example1['ctxs'] if 'ctxs' in example1 else []
             a = example1['gold_output'] if 'gold_output' in example1 else example1['answer']
             a2 = example2['gold_output'] if 'gold_output' in example2 else example2['answer']
-            assert example1['question'] == example2['question'], f"{example1['question']}\n{example2['question']}"
+            #assert example1['question'] == example2['question'], f"{example1['question']}\n{example2['question']}"
             o1 = example1['output']
             o2 = example2['output']
 
@@ -829,7 +830,7 @@ def compare(
             else:
                 show = False
 
-            if show:
+            if show and _id == '-6009084797339061172':
                 print('^' * 100)
                 for i, t1 in enumerate(ts1):
                     if type(t1) is str:
@@ -854,9 +855,11 @@ def compare(
 
                 print('^' * 100)
                 print('ID->', _id)
-                print('Q->', q)
+                print('Q1->', q)
+                print('Q2->', example2['question'])
                 print('C->', c)
                 print('A->', a)
+                print('subQ->', '\n', '\n'.join([qa['question'] + '     ' + ', '.join(qa['short_answers']) for qa in raw_data['dev'][_id]['qa_pairs']]))
                 print('')
 
                 print('-' * 30)
@@ -1475,12 +1478,26 @@ def kilt_dataset_to_beir(
     return Dataset.from_list(dataset)
 
 
-def jsonl_to_keyvalue(jsonl_file: str, keyvalue_file: str):
+def jsonl_to_keyvalue(
+    jsonl_file: str,
+    keyvalue_file: str,
+    prefix_to_remove: List[str],
+):
     with open(jsonl_file, 'r') as fin, open(keyvalue_file, 'w') as fout:
         key2output: Dict[str, str] = {}
         for l in fin:
             l = json.loads(l)
-            key2output[l['qid']] = l['output']
+            pred = l['output'].strip()
+            find = None
+            if prefix_to_remove:
+                for pattern in prefix_to_remove:
+                    find = re.compile(pattern).search(pred)
+                    if find:
+                        pred = find.group(1)
+                        break
+            if find is None:
+                logging.warning(f'format error "{pred}"')
+            key2output[l['qid']] = pred
         json.dump(key2output, fout)
 
 
@@ -1658,6 +1675,55 @@ def wikiasp_corpus(beir_dir: str, paragraph_min_len: int = 100):
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
 
+def annotate_asqa(
+    pred_json_file: str = None,
+    raw_file: str = None,
+    hint_file: str = None,
+    out_file: str = None,
+    split: str = 'dev'):
+    raw_data = json.load(open('data/asqa/ASQA.json'))
+    ids = None
+    if pred_json_file:
+        with open(pred_json_file, 'r') as fin:
+            ids = set([json.loads(l)['qid'] for l in fin])
+    id2hint = {}
+    if hint_file:
+        with open(hint_file, 'r') as fin:
+            id2hint = {json.loads(l)['qid']: json.loads(l)['output'] for l in fin}
+    with open(out_file, 'w') as fout:
+        writer = csv.writer(fout, delimiter='\t')
+        all_ids = list(raw_data[split].keys())
+        random.shuffle(all_ids)
+        for qid in all_ids:
+            if ids is not None and qid not in ids:
+                continue
+            example = raw_data[split][qid]
+            question = example['ambiguous_question']
+            subqs = '\n'.join([qa['question'] + '     ' + ', '.join(qa['short_answers']) for qa in example['qa_pairs']])
+            writer.writerow([qid, question, subqs] + ([id2hint[qid]] if qid in id2hint else []))
+
+
+def annotate_asqa_get_hint(
+    tsv_file: str,
+    hint_file: str,
+    out_file: str,
+):
+    id2hint = {}
+    if hint_file:
+        with open(hint_file, 'r') as fin:
+            id2hint = {json.loads(l)['qid']: json.loads(l)['output'].strip() for l in fin}
+    with open(tsv_file) as fin, open(out_file, 'w') as fout:
+        header: List[str] = fin.readline().strip().split('\t')
+        reader = csv.reader(fin, delimiter='\t')
+        writer = csv.writer(fout, delimiter='\t')
+        writer.writerow(header)
+        for row in reader:
+            assert len(row) == len(header)
+            row = dict(zip(header, [x.strip() for x in row]))
+            row['hint'] = id2hint[row['id']]
+            writer.writerow(row.values())
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
@@ -1668,7 +1734,7 @@ if __name__ == '__main__':
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
         'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir',
         'add_ref_to_kilt', 'jsonl_to_keyvalue', 'mmlu_retrieval_usefulness',
-        'wikiasp_match_title', 'wikiasp_corpus'])
+        'wikiasp_match_title', 'wikiasp_corpus', 'annotate_asqa', 'annotate_asqa_get_hint'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--dataset', type=str, default='asqa', help='input dataset', choices=[
         'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'wikiasp', 'eli5', 'wow', 'asqa', 'lmdata'])
@@ -1898,3 +1964,24 @@ if __name__ == '__main__':
     elif args.task == 'wikiasp_corpus':
         beir_dir = args.out
         wikiasp_corpus(beir_dir)
+
+    elif args.task == 'annotate_asqa':
+        pred_json_file = args.inp[0]
+        out_file = args.out
+        annotate_asqa(
+            pred_json_file=pred_json_file,
+            raw_file='data/asqa/ASQA.json',
+            hint_file='data/asqa/ASQA_test_general_hint.jsonl',
+            out_file=out_file,
+            split='dev')
+        # annotate_asqa(
+        #    raw_file='data/asqa/ASQA.json',
+        #    out_file=out_file,
+        #    split='train')
+
+    elif args.task == 'annotate_asqa_get_hint':
+        annotate_asqa_get_hint(
+            tsv_file='data/asqa/annotation.tsv',
+            hint_file='data/asqa/ASQA_test_general_hint.jsonl',
+            out_file='data/asqa/annotation_hint.tsv',
+        )

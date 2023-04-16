@@ -20,7 +20,7 @@ from beir.retrieval.search.lexical import BM25Search
 import openai
 from .retriever import BM25
 from .templates import CtxPrompt, ApiReturn, RetrievalInstruction
-from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, WikiAsp, ELI5, WoW, WoWLong, ASQA, ASQAtrans, MMLU, LMData
+from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, WikiAsp, ELI5, WoW, WoWLong, ASQA, ASQAAnnotation, MMLU, LMData
 
 logging.basicConfig(level=logging.INFO)
 
@@ -223,8 +223,9 @@ class QueryAgent:
             logit_bias={f'{forbid_generate[0]}': -100}
 
         # format to get the final prompt
-        prompts: List[Tuple[str, int]] = [q.format(use_ctx=self.use_ctx) for q in queries]
+        prompts: List[Tuple[str, int, List[str]]] = [q.format(use_ctx=self.use_ctx, is_chat_model=is_chat_model) for q in queries]
         prompts_to_issue: List[str] = list(map(itemgetter(0), prompts))
+        demo_for_chat: List[str] = list(map(itemgetter(2), prompts))
 
         # get prefix
         echo = False
@@ -244,7 +245,7 @@ class QueryAgent:
         # add penalty
         if self.frequency_penalty_in_prompt:
             assert len(queries) == 1, 'batching is not supported'
-            current_cases: List[str] = [q[-l:] if l else '' for q, l in prompts]  # only use the generated content
+            current_cases: List[str] = [q[-l:] if l else '' for q, l, _ in prompts]  # only use the generated content
             counter = Counter(sum(self.tokenizer(current_cases)['input_ids'], []))
             tokid2count: Dict[int, int] = dict(sorted(counter.items(), key=lambda x: (-x[1], x[0]))[:200])  # penalize at most 200 tokens
             for tokid, count in tokid2count.items():
@@ -286,13 +287,19 @@ class QueryAgent:
                     assert len(queries) == 1, ''
                     if 'max_tokens' in params:
                         params['max_tokens'] = max(1, params['max_tokens'])  # 0 is not allowed for chatgpt
+                    messages=[  # system
+                        #{'role': 'system', 'content': 'Follow the given examples and answer the question.'},
+                        #{'role': 'system', 'content': 'You are a helpful assistant.'}
+                    ] + [  # demo
+                        {'role': 'user', 'content': demo.rsplit('The original question', 1)[0].strip()} if role == 'user' else {'role': 'assistant', 'content': 'The original question' + demo.rsplit('The original question', 1)[1]}  # TODO: better code?
+                        for demo in demo_for_chat[0] for role in ['user', 'assistant']
+                    ] + [  # current example
+                        {'role': 'user', 'content': prompts_to_issue[0]},
+                    ]
                     responses = openai.ChatCompletion.create(
                         api_key=api_key,
                         model=self.model,
-                        messages=[
-                            {'role': 'system', 'content': 'Follow the given examples and answer the question.'},
-                            {'role': 'user', 'content': prompts_to_issue[0]},
-                        ],
+                        messages=messages,
                         temperature=self.temperature,
                         top_p=self.top_p,
                         logit_bias=logit_bias,
@@ -304,7 +311,7 @@ class QueryAgent:
                         text=(prefixes[0][0] + process_chatgpt(r['message']['content'])) if echo else process_chatgpt(r['message']['content']),  # TODO: corner case where space does not work?
                         finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
                         model=responses['model'],
-                        skip_len=0) for r, (q, _) in zip(responses['choices'], prompts)]
+                        skip_len=0) for r, (q, _, _) in zip(responses['choices'], prompts)]
                 else:
                     responses = openai.Completion.create(
                         api_key=api_key,
@@ -326,7 +333,7 @@ class QueryAgent:
                         offsets=r['logprobs']['text_offset'],
                         finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
                         model=responses['model'],
-                        skip_len=len(q) if echo else 0) for r, (q, _) in zip(responses['choices'], prompts)]
+                        skip_len=len(q) if echo else 0) for r, (q, _, _) in zip(responses['choices'], prompts)]
 
                 logging.info(f'finish query with key {api_key[-5:]}')
                 if self.debug:
@@ -674,7 +681,7 @@ def write_worker(output_file: str, output_queue: Queue, size: int = None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='strategyqa', choices=
-                        ['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'wikiasp', 'eli5', 'wow', 'wow_train_1k', 'asqa', 'asqatrans', 'mmlu', 'lmdata'])
+                        ['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'wikiasp', 'eli5', 'wow', 'wow_train_1k', 'asqa', 'asqa_annotation', 'mmlu', 'lmdata'])
     parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003', 'gpt-3.5-turbo-0301', 'text-curie-001'])
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
@@ -755,7 +762,7 @@ if __name__ == '__main__':
         'use_instruction': False,
         'format_reference_method': 'searchresults',
         'ctx_position': 'before_case',
-        'prompt_type': 'cot_subq_cot',
+        'prompt_type': 'specific_hint_in_input',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,
@@ -787,9 +794,9 @@ if __name__ == '__main__':
     elif args.dataset == 'asqa':
         data = ASQA(json_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = ASQA.get_gold_ctxs
-    elif args.dataset == 'asqatrans':
-        data = ASQAtrans(json_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
-        use_gold_func = ASQAtrans.get_gold_ctxs
+    elif args.dataset == 'asqa_annotation':
+        data = ASQAAnnotation(json_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = ASQAAnnotation.get_gold_ctxs
     elif args.dataset == 'wow':
         data = WoW(prompt_type=retrieval_kwargs['prompt_type'])
         use_gold_func = WoW.get_gold_ctxs

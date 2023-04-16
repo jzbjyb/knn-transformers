@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-debug=true
+debug=false
 
 source openai_keys.sh
 num_keys=${#keys[@]}
@@ -57,14 +57,14 @@ elif [[ ${dataset} == 'asqa' ]]; then
     index_name=wikipedia_dpr
     fewshot=8
     if [[ ${expensive} == true ]]; then
-        fewshot=4
+        fewshot=8
     fi
     max_num_examples=1000000
     max_generation_len=256
-elif [[ ${dataset} == 'asqatrans' ]]; then
+elif [[ ${dataset} == 'asqa_annotation' ]]; then
     input="--input data/asqa/ASQA.json"
     index_name=wikipedia_dpr
-    fewshot=8
+    fewshot=12
     max_num_examples=1000000
     max_generation_len=256
 elif [[ ${dataset} == 'wow' ]]; then
@@ -115,7 +115,7 @@ else
     exit
 fi
 
-if [[ ${expensive} == true ]]; then  # use 200 examples as most
+if [[ ${expensive} == true && ${dataset} != *_annotation ]]; then  # use 200 examples as most
     max_num_examples=$(( max_num_examples < 300 ? max_num_examples : 300 ))
 fi
 

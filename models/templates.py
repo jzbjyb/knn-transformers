@@ -172,9 +172,10 @@ class CtxPrompt:
         use_ctx: bool = False,
         use_ret_instruction: bool = True,
         use_instruction: bool = True,
+        is_chat_model: bool = False
     ):
         # run on demo
-        demo_formatted: str = '\n\n'.join([d.format(use_ctx=use_ctx, use_ret_instruction=False, use_instruction=False)[0] for d in self.demo])
+        demo_formatted: List[str] = [d.format(use_ctx=use_ctx, use_ret_instruction=False, use_instruction=False)[0] for d in self.demo]
 
         use_ctx = use_ctx and bool(self.ctx)  # do not use ctx when it's None or empty string
         use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
@@ -198,8 +199,8 @@ class CtxPrompt:
             elements.append(self.instruction)
 
         # append demo
-        if len(demo_formatted):
-            elements.append(demo_formatted)
+        if len(demo_formatted) and not is_chat_model:
+            elements.extend(demo_formatted)
 
         # append ensemble
         if use_ret_instruction:
@@ -210,7 +211,7 @@ class CtxPrompt:
         else:
             elements.append(self.case)
 
-        return '\n\n'.join(elements), self.gen_len
+        return '\n\n'.join(elements), self.gen_len, demo_formatted
 
 
 class ApiReturn:
