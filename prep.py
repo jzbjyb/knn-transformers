@@ -1952,7 +1952,13 @@ if __name__ == '__main__':
     elif args.task == 'jsonl_to_keyvalue':
         jsonl_file = args.inp[0]
         keyvalue_file = args.out
-        jsonl_to_keyvalue(jsonl_file, keyvalue_file)
+        jsonl_to_keyvalue(
+            jsonl_file,
+            keyvalue_file,
+            prefix_to_remove=[
+                'The answers to all interpretations are\: (.*)$',
+                'The answer to this interpretation is\: (.*)$',
+                'The answer to this interpretation is (.*)$'])
 
     elif args.task == 'mmlu_retrieval_usefulness':
         mmlu_retrieval_usefulness()
