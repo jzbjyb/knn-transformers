@@ -1,6 +1,8 @@
 from typing import List, Dict, Any, Tuple
 from operator import itemgetter
+from collections import namedtuple
 import spacy
+from nltk.tokenize.punkt import PunktSentenceTokenizer
 import tiktoken
 
 
@@ -214,9 +216,13 @@ class CtxPrompt:
         return '\n\n'.join(elements), self.gen_len, demo_formatted
 
 
+Sentence = namedtuple('Sentence', 'text start_char end_char')
+
+
 class ApiReturn:
     EOS = '<|endoftext|>'
-    nlp = spacy.load('en_core_web_sm')
+    #nlp = spacy.load('en_core_web_sm')
+    psentencizer = PunktSentenceTokenizer()
     min_sent_len = 5
 
     def __init__(
@@ -295,10 +301,11 @@ class ApiReturn:
 
     @classmethod
     def get_sent(cls, text: str, position: str = 'begin'):
-        doc = cls.nlp(text)
+        #sents = list(cls.nlp(text).sents)
+        sents = [Sentence(text[s:e], s, e) for s, e in cls.psentencizer.span_tokenize(text)]
         if position == 'begin':
             break_at = len(text)
-            for sent in doc.sents:
+            for sent in sents:
                 # remove trailing spaces which is usually tokenized into the next token of the next sentence by GPT tokeniers
                 num_trail_spaces = len(sent.text) - len(sent.text.rstrip())
                 if sent.end_char - num_trail_spaces >= cls.min_sent_len:
@@ -306,7 +313,6 @@ class ApiReturn:
                     break
             return text[:break_at], break_at
         if position == 'end':
-            sents = list(doc.sents)
             break_at = 0
             for i in range(len(sents)):
                 sent = sents[len(sents) - i - 1]
@@ -352,9 +358,10 @@ class ApiReturn:
             return self
 
         if unit == 'sentence':
-            doc = self.nlp(self.text)
+            #sents = list(self.nlp(self.text).sents)
+            sents = [Sentence(self.text[s:e], s, e) for s, e in self.psentencizer.span_tokenize(self.text)]
             break_at = len(self.text)
-            for sent in doc.sents:
+            for sent in sents:
                 # remove trailing spaces which is usually tokenized into the next token of the next sentence by GPT tokeniers
                 num_trail_spaces = len(sent.text) - len(sent.text.rstrip())
                 if sent.end_char - num_trail_spaces >= self.min_sent_len:
@@ -411,11 +418,14 @@ class ApiReturn:
                 if p <= low:
                     ok = True
                     break
-            return self.text if ok else ''
-        elif mask:
+            if not ok:
+                return ''
+        if mask:
             keep = [(t if p > mask else ' ') for t, p in zip(self.tokens, self.probs)]
             keep = ''.join(keep).strip()
             return keep
+        else:
+            return self.text
 
 
 class RetrievalInstruction:

@@ -296,6 +296,7 @@ class QueryAgent:
                     ] + [  # current example
                         {'role': 'user', 'content': prompts_to_issue[0]},
                     ]
+                    #print(json.dumps(messages, indent=True))
                     responses = openai.ChatCompletion.create(
                         api_key=api_key,
                         model=self.model,
@@ -743,8 +744,9 @@ if __name__ == '__main__':
         'retrieval_at_beginning': False,
         'look_ahead_steps': 64,
         'look_ahead_truncate_at_boundary': 'sentence',
-        'look_ahead_filter_prob': 0.4,
-        'look_ahead_mask_prob': 0.0,
+        'look_ahead_pre_retrieval': 'first',
+        'look_ahead_filter_prob': 0.5,
+        'look_ahead_mask_prob': 0.5,
         'look_ahead_boundary': [],
         'only_use_look_ahead': True,
         'retrieval_trigers': [],
@@ -762,7 +764,7 @@ if __name__ == '__main__':
         'use_instruction': False,
         'format_reference_method': 'searchresults',
         'ctx_position': 'before_case',
-        'prompt_type': 'specific_hint_in_input',
+        'prompt_type': 'general_hint_in_output',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,

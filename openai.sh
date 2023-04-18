@@ -64,7 +64,7 @@ elif [[ ${dataset} == 'asqa' ]]; then
 elif [[ ${dataset} == 'asqa_annotation' ]]; then
     input="--input data/asqa/ASQA.json"
     index_name=wikipedia_dpr
-    fewshot=12
+    fewshot=13
     max_num_examples=1000000
     max_generation_len=256
 elif [[ ${dataset} == 'wow' ]]; then
@@ -116,7 +116,7 @@ else
 fi
 
 if [[ ${expensive} == true && ${dataset} != *_annotation ]]; then  # use 200 examples as most
-    max_num_examples=$(( max_num_examples < 300 ? max_num_examples : 300 ))
+    max_num_examples=$(( max_num_examples < 100 ? max_num_examples : 100 ))
 fi
 
 if [[ ${index_name} == "test" && ${input} != "none" ]]; then  # build index

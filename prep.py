@@ -787,6 +787,7 @@ def compare(
         only_first_right: bool = False,
         show_final: bool = False,
         only_last_trace: bool = False,
+        use_raw_data: bool = True,
     ):
     raw_data = json.load(open('data/asqa/ASQA.json'))
     get_ans = lambda x: x.strip().rsplit(' ', 1)[-1][:-1].lower()
@@ -830,7 +831,7 @@ def compare(
             else:
                 show = False
 
-            if show and _id == '-6009084797339061172':
+            if show:
                 print('^' * 100)
                 for i, t1 in enumerate(ts1):
                     if type(t1) is str:
@@ -859,7 +860,8 @@ def compare(
                 print('Q2->', example2['question'])
                 print('C->', c)
                 print('A->', a)
-                print('subQ->', '\n', '\n'.join([qa['question'] + '     ' + ', '.join(qa['short_answers']) for qa in raw_data['dev'][_id]['qa_pairs']]))
+                if use_raw_data:
+                    print('subQ->', '\n', '\n'.join([qa['question'] + '     ' + ', '.join(qa['short_answers']) for qa in raw_data['dev'][_id]['qa_pairs']]))
                 print('')
 
                 print('-' * 30)
@@ -1176,6 +1178,7 @@ def eval(
     followups: List[str] = []
     references: List[str] = []
     num_steps: List[int] = []
+    retrieval_ratios: List[float] = []
 
     root_file = None
     if len(jsonl_files) > 1:  # consistency
@@ -1216,6 +1219,7 @@ def eval(
         references.append(ref)
         predictions.append(pred)
         num_steps.append(len(trace))
+        retrieval_ratios.append(len((example['retrieval'] or []) if 'retrieval' in example else []) / (len(trace) or 1))
         if 'retrieval' in example and example['retrieval']:
             ret_dids = np.array([r if type(r[0]) is str else r[0] for r in example['retrieval']], dtype=np.str_)
         else:
@@ -1329,7 +1333,7 @@ def eval(
 
     print('retrieval acc\tcoverage')
     print(f'{format_list(ret_accs)}\t{format_list(ret_covers)}')
-    print(f'#examples with search: {scount}, #avg search per example {np.mean(search_per_example)}, #steps {np.mean(num_steps)}')
+    print(f'#examples with search: {scount}, #avg search per example {np.mean(search_per_example)}, #steps {np.mean(num_steps)}, ret ratio {np.mean(retrieval_ratios)}')
 
 
 def build_elasticsearch(
@@ -1988,6 +1992,6 @@ if __name__ == '__main__':
     elif args.task == 'annotate_asqa_get_hint':
         annotate_asqa_get_hint(
             tsv_file='data/asqa/annotation.tsv',
-            hint_file='data/asqa/ASQA_test_general_hint.jsonl',
+            hint_file='data/asqa/ASQA_test_specific_hint_keyword.jsonl',
             out_file='data/asqa/annotation_hint.tsv',
         )
