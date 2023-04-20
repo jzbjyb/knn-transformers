@@ -4,6 +4,8 @@ from collections import namedtuple
 import spacy
 from nltk.tokenize.punkt import PunktSentenceTokenizer
 import tiktoken
+import openai
+from .utils import openai_api_call
 
 
 class CtxPrompt:
@@ -11,6 +13,7 @@ class CtxPrompt:
     ret_instruction: "RetrievalInstruction" = None
     instruction: str = None
     format_reference_method: str = 'default'
+    clean_reference: bool = False
     add_ref_suffix: str = None
     add_ref_prefix: str = None
 
@@ -54,6 +57,166 @@ class CtxPrompt:
     @classmethod
     def clean_rets(cls, rets: List[str]) -> List[str]:
         return [ret.replace('\n', ' ').strip() for ret in rets if ret.replace('\n', ' ').strip()]
+
+    @classmethod
+    def chatgpt_get_response(cls, prompt: str, examplars: List[Tuple[str, str]] = [], max_tokens: int = 2048, api_key: str = None):
+        assert len(prompt.split()) <= max_tokens
+        responses = openai_api_call(
+            api_key=api_key,
+            model='gpt-3.5-turbo-0301',
+            messages=[
+                {'role': 'user' if i == 0 else 'assistant', 'content': examplar[i]} for examplar in examplars for i in range(2)
+            ] + [
+                {'role': 'user', 'content': prompt},
+            ],
+            temperature=0.0,
+            top_p=0.0,
+            max_tokens=max_tokens)
+        return responses['choices'][0]['message']['content']
+
+    @classmethod
+    def canonicalize_text(cls, text: str, field: str = 'paragraph', api_key: str = None):
+        prompt = f'For the following {field}, remove unnecessary spaces and capitalize words properly.\n{field.capitalize()}\n{text}'
+        clean_text = cls.chatgpt_get_response(prompt, api_key=api_key)
+        return clean_text
+
+    @classmethod
+    def annotate_low_confidence_terms(cls, tokens: List[str], probs: List[float], low: float = 0.0, special_symbol: str = '*', min_gap: int = 5):
+        # mark with symbol
+        text = []
+        prev_is_low = -1
+        has = False
+        for i, (token, prob) in enumerate(zip(tokens, probs)):
+            if prob <= low:
+                if prev_is_low == -1 or i - prev_is_low >= min_gap:
+                    has = True
+                    leading_spaces = len(token) - len(token.lstrip())
+                    if leading_spaces <= 0:
+                        text.append(f'*{token}')
+                    else:
+                        text.append(f'{token[:leading_spaces]}*{token[leading_spaces:]}')
+                    prev_is_low = i
+                else:
+                    text.append(token)
+            else:
+                text.append(token)
+        text = ''.join(text)
+        return text, has
+
+    @classmethod
+    def extract_low_confidence_terms(cls, context: str, tokens: List[str], probs: List[float], low: float = 0.0, api_key: str = None, special_symbol: str = '*', debug: bool = False):
+        examplars = [
+            ('*Egypt has one of the longest histories of any country, tracing its heritage along *the Nile Delta back to the *6th–4th millennia BCE.', '*Egypt\n*the Nile Delta\n*6th–4th'),
+            ('The settlement, which *legal experts said was *the largest struck by an American media company, was *announced by the two sides and the judge in the case at the 11th hour.', '*legal experts\n*the largest struck\n*announced'),
+            ('In his only *surviving love letter to her, written a few months before their wedding, Tyler promised, "*Whether I *float or sink in the stream of fortune, you may be assured of this, that I shall never *cease to love you."', '*surviving love letter\n*Whether\n*float or sink\n*cease to love you')
+        ]
+        original_text = ''.join(tokens)
+        text, has = cls.annotate_low_confidence_terms(tokens=tokens, probs=probs, low=low, special_symbol=special_symbol)
+        if not has:
+            return []
+        # extract terms
+        #prompt_format = lambda x: f'Given the previous context and the last sentence, extract all terms/entities in the last sentence starting with the symbol "{special_symbol}", one at a line.\nPrevious context:\n{context}\nLast sentence:\n{x}'
+        prompt_format = lambda x: f'Given the following sentence, extract all terms/entities starting with the symbol "{special_symbol}", one at a line.\n{x}'
+        examplars = [(prompt_format(inp), out) for inp, out in examplars]
+        prompt = prompt_format(text)
+        response = cls.chatgpt_get_response(prompt, examplars=examplars, api_key=api_key)
+        terms = [t.strip() for t in response.strip().split('\n') if t.strip().startswith(special_symbol)]  # remove outlier
+        terms = [t.lstrip(special_symbol) for t in terms if t in text and t.lstrip(special_symbol) in original_text]  # remove non-exist terms
+        if debug:
+            print('-' * 10)
+            print(prompt)
+            print('-' * 10)
+            print(response)
+            print('-' * 10)
+            print(terms)
+            print('-' * 10)
+        return terms
+
+    @classmethod
+    def replace_low_confidence_terms(cls, context: str, tokens: List[str], probs: List[float], low: float = 0.0, api_key: str = None, special_symbol: str = '*', replace_symbol: str = 'XXX', debug: bool = False):
+        text, has = cls.annotate_low_confidence_terms(tokens=tokens, probs=probs, low=low, special_symbol=special_symbol)
+        if not has:
+            return text
+        # replace terms
+        prompt = f'Given the previous context and the last sentence, detect all terms/entities in the last sentence starting with the symbol "{special_symbol}", then replace them with "{replace_symbol}".\nPrevious context:\n{context}\nLast sentence:\n{text}'
+        replaced_text = cls.chatgpt_get_response(prompt, api_key=api_key)
+        if debug:
+            print('-' * 10)
+            print(prompt)
+            print('-' * 10)
+            print(replaced_text)
+            print('-' * 10)
+        return replaced_text
+
+    @classmethod
+    def replace_low_confidence_terms_by_extract(cls, context: str, tokens: List[str], probs: List[float], low: float = 0.0, api_key: str = None, special_symbol: str = '*', replace_symbol: str = 'XXX', min_term_length: int = 0):
+        text = ''.join(tokens)
+        terms = cls.extract_low_confidence_terms(context=context, tokens=tokens, probs=probs, low=low, api_key=api_key, special_symbol=special_symbol)
+        for term in terms:
+            if min_term_length and len(term) <= min_term_length:  # ignore short terms
+                continue
+            text = text.replace(term, replace_symbol)
+        return text
+
+    @classmethod
+    def decontextualize_text(cls, context: str, text: str, api_key: str = None, debug: bool = False):
+        examplars = [
+            ("The first American author to use natural diction and a pioneer of colloquialism, John Neal is the first to use the phrase son-of-a-bitch in a work of fiction.", "He attained his greatest literary achievements between 1817 and 1835, during which time he was America's first daily newspaper columnist, the first American published in British literary journals, author of the first history of American literature, America's first art critic, a short story pioneer, a children's literature pioneer, and a forerunner of the American Renaissance.", "John Neal attained his greatest literary achievements between 1817 and 1835, during which time he was America's first daily newspaper columnist, the first American published in British literary journals, author of the first history of American literature, America's first art critic, a short story pioneer, a children's literature pioneer, and a forerunner of the American Renaissance."),
+            ("The Scottish wildcat is a European wildcat (Felis silvestris silvestris) population in Scotland.", "It was once widely distributed across Great Britain, but the population has declined drastically since the turn of the 20th century due to habitat loss and persecution.", "The Scottish wildcat was once widely distributed across Great Britain, but the population has declined drastically since the turn of the 20th century due to habitat loss and persecution."),
+        ]
+        examplars = []
+        #prompt = f'Given the previous context and the last sentence, make minimal changes to the last sentence to make it self-contained by resolving pronoun references.\nPrevious context:\n{context}\nLast sentence:\n{text}'
+        #prompt_format = lambda x, y: f'Given the previous context and the last text, copy the last text and only replace pronouns (if any) with corresponding references to make the text self-contained.\n=== Previous context ===\n{x.strip()}\n=== Last text ===\n{y.strip()}'
+        #indicator = '---'
+        #prompt_format = lambda x, y: f'Replace pronouns in the following text with their corresponding references.\n\n=== Text (start) ===\n{x.strip()}\n{indicator}\n{y.strip()}\n=== Text (end) ==='
+        prompt_format = lambda x, y: f'Replace pronouns in the following text with their corresponding references.\n\n{x.strip()}\n=== Text (start) ===\n{y.strip()}\n=== Text (end) ==='
+        examplars = [(prompt_format(e[0], e[1]), e[2]) for e in examplars]
+        prompt = prompt_format(context, text)
+        #decontext_text = cls.chatgpt_get_response(prompt, examplars=examplars, api_key=api_key).split(indicator, 1)[-1].strip()
+        decontext_text = cls.chatgpt_get_response(prompt, examplars=examplars, api_key=api_key).strip()
+        if debug:
+            print('-' * 10)
+            print(prompt)
+            print('-' * 10)
+            print(decontext_text)
+            print('-' * 10)
+        return decontext_text
+
+    @classmethod
+    def process_text_for_retrieval(
+        cls,
+        context: str,
+        tokens: List[str],
+        probs: List[float],
+        low: float = 0.0,
+        api_key: str = None,
+        replace_symbol: str = 'XXX',
+        detect_low_terms: bool = False,
+        decontextualize: bool = False,
+        debug: bool = False
+    ):
+        text = ''.join(tokens)
+        if debug:
+            print('0->', context)
+            print('1->', text)
+            print(list(zip(tokens, probs)))
+        if detect_low_terms:
+            #text = cls.replace_low_confidence_terms_by_extract(context=context, tokens=tokens, probs=probs, low=low, api_key=api_key, replace_symbol=replace_symbol)
+            terms = cls.extract_low_confidence_terms(context=context, tokens=tokens, probs=probs, low=low, api_key=api_key)
+        if debug:
+            print('2->', terms)
+        if decontextualize:
+            text = cls.decontextualize_text(context=context, text=text, api_key=api_key)
+        if debug:
+            print('3->', text)
+        if detect_low_terms:
+            #text = text.replace(replace_symbol, ' ')
+            for term in terms:
+                text = text.replace(term, ' ')
+        if debug:
+            print('4->', text)
+            input()
+        return text
 
     def get_query_for_retrieval(self):
         if self.gen_len == 0:
@@ -121,17 +284,21 @@ class CtxPrompt:
                 raise NotImplementedError
 
     @classmethod
-    def format_reference(cls, ref: str):
+    def format_reference(cls, ref: str, api_key: str = None):
         if cls.add_ref_suffix and not ref.endswith(cls.add_ref_suffix):
             ref += cls.add_ref_suffix
         if cls.add_ref_prefix and not ref.startswith(cls.add_ref_prefix):
             ref = cls.add_ref_prefix + ref
+        if cls.clean_reference:
+            ref = cls.canonicalize_text(ref, field='text', api_key=api_key)
         method = cls.format_reference_method
-        assert method in {'default', 'searchresults', 'ignore', 'ignore_for_retrieval_instruct', 'short_ignore'}
+        assert method in {'default', 'searchresults', 'searchresultsrank', 'ignore', 'ignore_for_retrieval_instruct', 'short_ignore'}
         if method == 'default':
             return 'Reference: ' + ref
         if method == 'searchresults':
-            return 'Search results:\n' + ref
+            return 'Search results :\n' + ref
+        if method == 'searchresultsrank':
+            return 'Search results ranked based on relevance in descending order:\n' + ref
         if method == 'ignore':
             formatted = [
                 '1. The reference below might be helpful when answering questions but it is noisy. Free free to ignore irrelevant information in it.', ref.strip(),
@@ -174,14 +341,15 @@ class CtxPrompt:
         use_ctx: bool = False,
         use_ret_instruction: bool = True,
         use_instruction: bool = True,
-        is_chat_model: bool = False
+        is_chat_model: bool = False,
+        api_key: str = None
     ):
         # run on demo
         demo_formatted: List[str] = [d.format(use_ctx=use_ctx, use_ret_instruction=False, use_instruction=False)[0] for d in self.demo]
 
         use_ctx = use_ctx and bool(self.ctx)  # do not use ctx when it's None or empty string
         use_ret_instruction = use_ret_instruction and self.ret_instruction is not None
-        ref = self.format_reference(self.ctx) if use_ctx else None
+        ref = self.format_reference(self.ctx, api_key=api_key) if use_ctx else None
         task, ret, ensemble = self.ret_instruction.format(use_ctx=use_ctx) if use_ret_instruction else (None, None, None)
         elements: List[str] = []
 
@@ -287,17 +455,6 @@ class ApiReturn:
     def has_endoftext(self):
         return self.EOS in self.tokens
 
-    @classmethod
-    def is_chat(cls, model: str):
-        return 'turbo' in model
-
-    @classmethod
-    def is_code(cls, model: str):
-        return 'code' in model
-
-    @classmethod
-    def no_stop(cls, model: str, dataset: str):
-        return 'turbo' in model or dataset in {'lmdata', 'mmlu'}
 
     @classmethod
     def get_sent(cls, text: str, position: str = 'begin'):
@@ -406,24 +563,44 @@ class ApiReturn:
 
     def use_as_query(
         self,
-        low: float = None,
-        mask: float = None
+        low_prob: float = None,
+        mask_prob: float = None,
+        mask_method: str = 'simple',
+        n_gen_char_in_prompt: int = 0,
+        api_key: str = None,
     ):
-        if not low and not mask:
+        if not low_prob and not mask_prob:
             return self.text
         assert self.has_tokens, 'not supported'
-        if low:
+        if low_prob:
             ok = False
             for p in self.probs:
-                if p <= low:
+                if p <= low_prob:
                     ok = True
                     break
             if not ok:
                 return ''
-        if mask:
-            keep = [(t if p > mask else ' ') for t, p in zip(self.tokens, self.probs)]
-            keep = ''.join(keep).strip()
-            return keep
+        if mask_prob:
+            if mask_method == 'simple':
+                keep = [(t if p > mask_prob else ' ') for t, p in zip(self.tokens, self.probs)]
+                keep = ''.join(keep).strip()
+                return keep
+            elif mask_method == 'wholeterm-decontextualize':
+                if n_gen_char_in_prompt == 0:
+                    context = ''
+                else:
+                    context = self.prompt[-n_gen_char_in_prompt:]
+                keep = CtxPrompt.process_text_for_retrieval(
+                    context=context,
+                    tokens=self.tokens,
+                    probs=self.probs,
+                    low=mask_prob,
+                    api_key=api_key,
+                    detect_low_terms=True,
+                    decontextualize=True)
+                return keep
+            else:
+                raise NotImplementedError
         else:
             return self.text
 

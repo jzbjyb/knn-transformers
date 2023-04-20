@@ -7,12 +7,15 @@ import logging
 from operator import itemgetter
 from collections import Counter, defaultdict
 import re
+from urllib.parse import unquote
 import string
+import glob
 from tqdm import tqdm
 import numpy as np
 import spacy
 from datasets import Dataset, load_dataset, concatenate_datasets, load_from_disk
 from beir.datasets.data_loader import GenericDataLoader
+import openai
 from .templates import CtxPrompt
 logging.basicConfig(level=logging.INFO)
 
@@ -1090,7 +1093,7 @@ class WikiAsp(BaseDataset):
             "answer": "# Location\nThe mosque is in the old quarter of ankara next to ankara castle. With an altitude of 947 metres (3,107 ft) it overlooks ankara at 39°56′12″N 32°51′55″E.\n# History\nThe mosque is one of the oldest mosques in Turkey still standing. It was built during the reign of Mesud II of the Anatolian Seljuks in 1290. Its architect was Ebubekir Mehmet. It was commissioned by two Ahi leaders named Hüsamettin and Hasaneddin. However, in 1330, it was repaired by another Ahi leader named Şerafettin after whom the mosque was named. After several minor repairs the mosque was restored by the directorate general of foundations in 2010-2013 term.",
             "domain": "building"
         },
-        {  # originally wrong title
+        {
             "id": "train-64-5493",
             "question": "Untold Legends: The Warrior's Code including the following aspects: reception, gameplay, development",
             "answer_raw": "# reception\nthe game received \" mixed or average reviews \" according to video game review aggregator metacritic .\n# gameplay\nthe warrior ' s code is a hack n ' slash action role - playing game , which concentrates on action - oriented combat .\n# development\nas a pre - order bonus , the game was shipped with a small action figure of the guardian class .",
@@ -1143,26 +1146,39 @@ class WikiAsp(BaseDataset):
     cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a summary about {ques} with one aspect per line.\n'
     cot_output_template = lambda self, cot, ans: ans
 
-    def __init__(self, hf_dataset_dir: str, prompt_type: str = 'cot'):
+    def __init__(self, hf_dataset_dir_pattern: str, prompt_type: str = 'cot'):
         assert prompt_type in {'cot'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
         self.examplars = getattr(self, f'{prompt_type}_examplars')
-        self.dataset = self.load_data(hf_dataset_dir)
+        self.dataset = self.load_data(hf_dataset_dir_pattern)
 
-    def load_data(self, hf_dataset_dir: str):
+    @staticmethod
+    def get_wiki_url(urls: List[str]):
+        for url in urls:
+            if 'wikipedia.org' in url:
+                return url
+        return None
+
+    @staticmethod
+    def wiki_url_to_title(url: str):
+        title = ' '.join(unquote(url).rsplit('/wiki/', 1)[-1].split('_')) if url else url
+        return title
+
+    def load_data(self, hf_dataset_dir_pattern: str):
         def map_fn(example):
             qid = example['exid']
-            title = example['title']
+            title = example['clean_title'] if 'clean_title' in example else example['title']
+            targets = example['clean_targets'] if 'clean_targets' in example else example['targets']
             aspects: List[str] = []
             summary: List[str] = []
-            for asp, text in example['targets']:
+            for asp, text in targets:
                 asp, text = asp.strip(), text.strip().replace('\n', ' ')
                 if len(text) <= 0:  # remove empty aspects
                     continue
                 aspects.append(asp)
-                summary.append(f'# {asp}\n{text}')
+                summary.append(f'# {asp.capitalize()}\n{text}')
             summary: str = '\n'.join(summary)
             output = self.output_template(cot=None, ans=summary)
             question = f'{title} including the following aspects: {", ".join(aspects)}'
@@ -1174,7 +1190,10 @@ class WikiAsp(BaseDataset):
             }
             return new_example
 
-        data = load_from_disk(hf_dataset_dir)
+        all_hf_dirs = glob.glob(hf_dataset_dir_pattern.strip('"'))  # TODO: fix this bug
+        logging.info(f'loading from {all_hf_dirs}')
+        data = concatenate_datasets([load_from_disk(hf_dir) for hf_dir in all_hf_dirs])
+        #data = data.filter(lambda example: example['exid'] == 'test-7-4930')
         return data.map(map_fn)
 
 

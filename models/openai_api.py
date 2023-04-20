@@ -21,16 +21,10 @@ import openai
 from .retriever import BM25
 from .templates import CtxPrompt, ApiReturn, RetrievalInstruction
 from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, WikiAsp, ELI5, WoW, WoWLong, ASQA, ASQAAnnotation, MMLU, LMData
+from .utils import Utils, NoKeyAvailable, openai_api_call
+
 
 logging.basicConfig(level=logging.INFO)
-
-
-class NoKeyAvailable(Exception):
-    pass
-
-
-class KeyBrokenException(Exception):
-    pass
 
 
 class CustomManager(BaseManager):
@@ -128,6 +122,7 @@ class QueryAgent:
         self.look_ahead_truncate_at_boundary = retrieval_kwargs.get('look_ahead_truncate_at_boundary', None)
         self.look_ahead_filter_prob = retrieval_kwargs.get('look_ahead_filter_prob', 0)
         self.look_ahead_mask_prob = retrieval_kwargs.get('look_ahead_mask_prob', 0)
+        self.look_ahead_mask_method = retrieval_kwargs.get('look_ahead_mask_method', 'simple')
         self.look_ahead_pre_retrieval = retrieval_kwargs.get('look_ahead_pre_retrieval', False)
         assert self.look_ahead_pre_retrieval in {False, 'first', 'all'}
         self.max_query_length = retrieval_kwargs.get('max_query_length', None)
@@ -184,46 +179,36 @@ class QueryAgent:
         self,
         queries: List[CtxPrompt],
         params: Dict[str, Any],
-        max_num_req_per_min: int = 10,
-        max_retry: int = 5,  # retry before switching keys
-        max_keys: int = 5,  # max number of keys tried before raising exceptions
-        key_tried: int = 0,  # number of keys tried
         force_generate: int = None,
         forbid_generate: int = None,
-        api_key: str = None,
         is_lookahead: bool = False,
+        api_key: str = None,
     ) -> List[ApiReturn]:
-        is_chat_model = ApiReturn.is_chat(self.model)
-        is_code_model = ApiReturn.is_code(self.model)
-        def process_chatgpt(message: str):
-            if message:
-                return ' ' + message
-            return message
+        # check model
+        is_chat_model = Utils.is_chat(self.model)
+        is_code_model = Utils.is_code(self.model)
+        if is_chat_model:
+            assert len(queries) == 1, 'chatgpt doesn\'t support batching'
+            if 'max_tokens' in params:
+                params['max_tokens'] = max(1, params['max_tokens'])  # 0 is not allowed for chatgpt
+            def process_chatgpt(message: str):
+                if message:
+                    return ' ' + message
+                return message
+        else:
+            if 'max_tokens' in params:
+                params['max_tokens'] = max(2, params['max_tokens'])  # TODO: OPT doesn't have this bug, but openai returns nothing if set to 1
 
-        # check num of keys tried
-        if key_tried >= max_keys:
-            logging.error(f'skip {len(queries)} examples because of key broken')
-            raise KeyBrokenException()
 
-        # init tracking variables
-        max_num_req_per_min = 15 if is_code_model else 1000
-        min_sleep = 60 / max_num_req_per_min
-        add_sleep = 3
-        expbf = 2
-        retry = 0
-
-        # init param
-        if 'max_tokens' in params:  # TODO: OPT doesn't have this bug
-            params['max_tokens'] = max(2, params['max_tokens'])  # openai returns nothing if set to 1
+        # logit bias
         logit_bias = dict()
-
         if force_generate:
             logit_bias={f'{force_generate[0]}': force_generate[1]}
         elif forbid_generate:
             logit_bias={f'{forbid_generate[0]}': -100}
 
         # format to get the final prompt
-        prompts: List[Tuple[str, int, List[str]]] = [q.format(use_ctx=self.use_ctx, is_chat_model=is_chat_model) for q in queries]
+        prompts: List[Tuple[str, int, List[str]]] = [q.format(use_ctx=self.use_ctx, is_chat_model=is_chat_model, api_key=api_key) for q in queries]
         prompts_to_issue: List[str] = list(map(itemgetter(0), prompts))
         demo_for_chat: List[str] = list(map(itemgetter(2), prompts))
 
@@ -253,157 +238,67 @@ class QueryAgent:
                     logit_bias[str(tokid)] = 0
                 logit_bias[str(tokid)] -= self.frequency_penalty_in_prompt * count
 
-        # init key
-        ori_api_key = api_key
-        get_key_func = return_key_func = None
-        if type(ori_api_key) is tuple:  # get and return function
-            get_key_func, return_key_func = ori_api_key
-        else:  # a specific key or none
-            api_key = ori_api_key or os.getenv('OPENAI_API_KEY')
-        if get_key_func:  # get key
-            start_t = time.time()
-            try:
-                api_key = get_key_func()
-            except NoKeyAvailable as e:
-                logging.info(f'sleep for nokey 30')
-                time.sleep(30)
-                return self.complete(
-                    queries,
-                    params,
-                    max_num_req_per_min=max_num_req_per_min,
-                    max_retry=max_retry,
-                    max_keys=max_keys,
-                    key_tried=key_tried + 1,
-                    force_generate=force_generate,
-                    forbid_generate=forbid_generate,
-                    api_key=ori_api_key,
-                    is_lookahead=is_lookahead)
+        # API call
+        if is_chat_model:
+            messages=[  # system
+                #{'role': 'system', 'content': 'Follow the given examples and answer the question.'},
+                #{'role': 'system', 'content': 'You are a helpful assistant.'}
+            ] + [  # demo
+                {'role': 'user', 'content': demo.rsplit('The original question', 1)[0].strip()} if role == 'user' else {'role': 'assistant', 'content': 'The original question' + demo.rsplit('The original question', 1)[1]}  # TODO: better code?
+                for demo in demo_for_chat[0] for role in ['user', 'assistant']
+            ] + [  # current example
+                {'role': 'user', 'content': prompts_to_issue[0]},
+            ]
+            #print(json.dumps(messages, indent=True))
+            responses = openai_api_call(
+                api_key=api_key,
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                logit_bias=logit_bias,
+                frequency_penalty=self.frequency_penalty,
+                **params)
 
-        # error-tolerant querying
-        while True:
-            try:
-                logging.info(f'start query with key {api_key[-5:]}')
-                if is_chat_model:
-                    assert len(queries) == 1, ''
-                    if 'max_tokens' in params:
-                        params['max_tokens'] = max(1, params['max_tokens'])  # 0 is not allowed for chatgpt
-                    messages=[  # system
-                        #{'role': 'system', 'content': 'Follow the given examples and answer the question.'},
-                        #{'role': 'system', 'content': 'You are a helpful assistant.'}
-                    ] + [  # demo
-                        {'role': 'user', 'content': demo.rsplit('The original question', 1)[0].strip()} if role == 'user' else {'role': 'assistant', 'content': 'The original question' + demo.rsplit('The original question', 1)[1]}  # TODO: better code?
-                        for demo in demo_for_chat[0] for role in ['user', 'assistant']
-                    ] + [  # current example
-                        {'role': 'user', 'content': prompts_to_issue[0]},
-                    ]
-                    #print(json.dumps(messages, indent=True))
-                    responses = openai.ChatCompletion.create(
-                        api_key=api_key,
-                        model=self.model,
-                        messages=messages,
-                        temperature=self.temperature,
-                        top_p=self.top_p,
-                        logit_bias=logit_bias,
-                        frequency_penalty=self.frequency_penalty,
-                        **params)
+            generations = [ApiReturn(
+                prompt=q,
+                text=(prefixes[0][0] + process_chatgpt(r['message']['content'])) if echo else process_chatgpt(r['message']['content']),  # TODO: corner case where space does not work?
+                finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
+                model=responses['model'],
+                skip_len=0) for r, (q, _, _) in zip(responses['choices'], prompts)]
+        else:
+            responses = openai_api_call(
+                api_key=api_key,
+                model=self.model,
+                prompt=prompts_to_issue,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                logprobs=0,
+                logit_bias=logit_bias,
+                frequency_penalty=self.frequency_penalty,
+                echo=echo,
+                **params)
 
-                    generations = [ApiReturn(
-                        prompt=q,
-                        text=(prefixes[0][0] + process_chatgpt(r['message']['content'])) if echo else process_chatgpt(r['message']['content']),  # TODO: corner case where space does not work?
-                        finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
-                        model=responses['model'],
-                        skip_len=0) for r, (q, _, _) in zip(responses['choices'], prompts)]
-                else:
-                    responses = openai.Completion.create(
-                        api_key=api_key,
-                        model=self.model,
-                        prompt=prompts_to_issue,
-                        temperature=self.temperature,
-                        top_p=self.top_p,
-                        logprobs=0,
-                        logit_bias=logit_bias,
-                        frequency_penalty=self.frequency_penalty,
-                        echo=echo,
-                        **params)
+            generations = [ApiReturn(
+                prompt=q,
+                text=r['text'],
+                tokens=r['logprobs']['tokens'],
+                probs=[np.exp(lp) if lp is not None else lp for lp in r['logprobs']['token_logprobs']],
+                offsets=r['logprobs']['text_offset'],
+                finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
+                model=responses['model'],
+                skip_len=len(q) if echo else 0) for r, (q, _, _) in zip(responses['choices'], prompts)]
 
-                    generations = [ApiReturn(
-                        prompt=q,
-                        text=r['text'],
-                        tokens=r['logprobs']['tokens'],
-                        probs=[np.exp(lp) if lp is not None else lp for lp in r['logprobs']['token_logprobs']],
-                        offsets=r['logprobs']['text_offset'],
-                        finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
-                        model=responses['model'],
-                        skip_len=len(q) if echo else 0) for r, (q, _, _) in zip(responses['choices'], prompts)]
+        if self.debug:
+            print('Params ->', params)
+            print('Prompt ->', generations[0].prompt)
+            print('Output ->', generations[0].text)
+            print('Stop ->', generations[0].finish_reason)
+            print('Tokens ->', generations[0].tokens)
+            print('Probs ->', generations[0].token_probs)
+            print('Gold ->', queries[0].gold_output)
+            input('-' * 50 + '\n')
 
-                logging.info(f'finish query with key {api_key[-5:]}')
-                if self.debug:
-                    print('Params ->', params)
-                    print('Prompt ->', generations[0].prompt)
-                    print('Output ->', generations[0].text)
-                    print('Stop ->', generations[0].finish_reason)
-                    print('Tokens ->', generations[0].tokens)
-                    print('Probs ->', generations[0].token_probs)
-                    print('Gold ->', queries[0].gold_output)
-                    input('-' * 50 + '\n')
-            except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:  # limit-related errors
-                forbid = False
-                if e.json_body is not None and 'error' in e.json_body and 'type' in e.json_body['error'] and e.json_body['error']['type'] == 'insufficient_quota':  # quota error
-                    retry = max_retry
-                    forbid = True
-                if e.json_body is not None and 'error' in e.json_body and 'type' in e.json_body['error'] and e.json_body['error']['code'] == 'account_deactivated':  # ban error
-                    retry = max_retry
-                    forbid = True
-                if retry >= max_retry:
-                    if return_key_func:  # return key
-                        end_t = time.time()
-                        return_key_func(api_key, time_spent=end_t - start_t, forbid=forbid)
-                    return self.complete(
-                        queries,
-                        params,
-                        max_num_req_per_min=max_num_req_per_min,
-                        max_retry=max_retry,
-                        max_keys=max_keys,
-                        key_tried=key_tried + 1,
-                        force_generate=force_generate,
-                        forbid_generate=forbid_generate,
-                        api_key=ori_api_key,
-                        is_lookahead=is_lookahead)
-                retry += 1
-                logging.info(f'sleep for rate {add_sleep + min_sleep} with key {api_key[-5:]} with type {type(e)}')
-                time.sleep(add_sleep + min_sleep)
-                add_sleep = add_sleep * expbf
-            except KeyboardInterrupt as e:
-                raise e
-            except Exception as e:  # other errors TODO: exclude length limitation
-                raise e
-                if retry >= max_retry:
-                    if return_key_func:  # return key
-                        end_t = time.time()
-                        return_key_func(api_key, time_spent=end_t - start_t)
-                    return self.complete(
-                        queries,
-                        params,
-                        max_num_req_per_min=max_num_req_per_min,
-                        max_retry=max_retry,
-                        max_keys=max_keys,
-                        key_tried=key_tried + 1,
-                        force_generate=force_generate,
-                        forbid_generate=forbid_generate,
-                        api_key=ori_api_key,
-                        is_lookahead=is_lookahead)
-                retry += 1
-                logging.info(f'sleep for error {min_sleep} with key {api_key[-5:]}')
-                logging.info(e)
-                time.sleep(min_sleep)
-            else:
-                break
-
-        if return_key_func:  # return key
-            end_t = time.time()
-            return_key_func(api_key, time_spent=end_t - start_t)
-
-        time.sleep(min_sleep)
         return generations
 
     def prompt(
@@ -435,7 +330,7 @@ class QueryAgent:
         max_iteration: int = 10000,  # TODO: too high?
     ):
         batch_size = len(queries)
-        final_retrievals: List[List[List[str]]] = [[] for _ in range(len(queries))]  # (bs, n_ret_steps, ret_topk)
+        final_retrievals: List[List[Tuple[str, List[str]]]] = [[] for _ in range(len(queries))]  # (bs, n_ret_steps, ret_topk)
         final_outputs: List[str] = [''] * len(queries)
         final_probs: List[List[float]] = [[] for _ in range(len(queries))]
         final_queries: List[CtxPrompt] = [None] * len(queries)
@@ -456,10 +351,11 @@ class QueryAgent:
             look_aheads: List[str] = [''] * len(queries)
             if self.look_ahead_steps:  # generate a fixed number tokens for retrieval
                 if (self.look_ahead_pre_retrieval == 'first' and step_ind == 0) or self.look_ahead_pre_retrieval == 'all':  # pre-retrieval for look ahead
-                    ctx_ids, ctx_texts = self.retrieve([q.get_query_for_retrieval() for i, q in queries], is_question=first_ret)
+                    queries_to_issue = [q.get_query_for_retrieval() for i, q in queries]
+                    ctx_ids, ctx_texts = self.retrieve(queries_to_issue, is_question=first_ret)
                     for _i, (i, q) in enumerate(queries):
                         ret_id, ret_text = ctx_ids[_i].tolist(), ctx_texts[_i].tolist()
-                        final_retrievals[i].append(ret_id)
+                        final_retrievals[i].append((queries_to_issue[_i], ret_id))
                         if self.append_retrieval:
                             q.ctx = None
                             q.append_retrieval(ret_text, add_index=False)
@@ -472,7 +368,12 @@ class QueryAgent:
                     is_lookahead=True)
                 if self.look_ahead_truncate_at_boundary:
                     apireturns = [ar.truncate_at_boundary(self.look_ahead_truncate_at_boundary) for ar in apireturns]
-                look_aheads = [ar.use_as_query(low=self.look_ahead_filter_prob, mask=self.look_ahead_mask_prob) for ar in apireturns]
+                look_aheads = [ar.use_as_query(
+                    low_prob=self.look_ahead_filter_prob,
+                    mask_prob=self.look_ahead_mask_prob,
+                    mask_method=self.look_ahead_mask_method,
+                    n_gen_char_in_prompt=q.gen_len,
+                    api_key=api_key) for ar, (_, q) in zip(apireturns, queries)]
             elif self.look_ahead_boundary:  # generate tokens until boundary for retrieval
                 apireturns = self.complete(
                     list(map(itemgetter(1), queries)),
@@ -508,7 +409,7 @@ class QueryAgent:
                                 ret_id = [ret_id]
                             else:
                                 ret_id, ret_text = ctx_ids[idx].tolist(), ctx_texts[idx].tolist()
-                            final_retrievals[i].append(ret_id)
+                            final_retrievals[i].append((queries_to_issue[_i], ret_id))
                             if self.append_retrieval:
                                 q.ctx = None
                                 q.append_retrieval(ret_text, add_index=False)
@@ -744,9 +645,10 @@ if __name__ == '__main__':
         'retrieval_at_beginning': False,
         'look_ahead_steps': 64,
         'look_ahead_truncate_at_boundary': 'sentence',
-        'look_ahead_pre_retrieval': 'first',
-        'look_ahead_filter_prob': 0.5,
-        'look_ahead_mask_prob': 0.5,
+        'look_ahead_pre_retrieval': False,
+        'look_ahead_filter_prob': 0.4,
+        'look_ahead_mask_prob': 0.4,
+        'look_ahead_mask_method': 'wholeterm-decontextualize',
         'look_ahead_boundary': [],
         'only_use_look_ahead': True,
         'retrieval_trigers': [],
@@ -762,9 +664,9 @@ if __name__ == '__main__':
         'use_ctx_for_examplars': False,
         'use_retrieval_instruction': False,
         'use_instruction': False,
-        'format_reference_method': 'searchresults',
+        'format_reference_method': 'searchresultsrank',
         'ctx_position': 'before_case',
-        'prompt_type': 'general_hint_in_output',
+        'prompt_type': 'cot',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,
@@ -773,7 +675,7 @@ if __name__ == '__main__':
     if args.final_stop_sym:
         retrieval_kwargs['final_stop_sym'] = args.final_stop_sym
     else:
-        retrieval_kwargs['final_stop_sym'] = '!@#$%^&*()\n\n)(*&^%$#@!' if ApiReturn.no_stop(model=args.model, dataset=args.dataset) else '\n\n'
+        retrieval_kwargs['final_stop_sym'] = '!@#$%^&*()\n\n)(*&^%$#@!' if Utils.no_stop(model=args.model, dataset=args.dataset) else '\n\n'
     qagent = QueryAgent(
         model=args.model,
         tokenizer=prompt_tokenizer,
@@ -838,6 +740,7 @@ if __name__ == '__main__':
         CtxPrompt.instruction = data.instruction
     CtxPrompt.retrieval_kwargs = retrieval_kwargs
     CtxPrompt.format_reference_method = retrieval_kwargs['format_reference_method']
+    CtxPrompt.clean_reference = retrieval_kwargs['clean_reference'] if 'clean_reference' in retrieval_kwargs else False
     CtxPrompt.ctx_position = retrieval_kwargs['ctx_position']
     CtxPrompt.add_ref_suffix = retrieval_kwargs['add_ref_suffix']
     CtxPrompt.add_ref_prefix = retrieval_kwargs['add_ref_prefix']

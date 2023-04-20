@@ -12,17 +12,17 @@ import copy
 import evaluate
 import re
 import logging
-from urllib.parse import unquote
 from tqdm import tqdm
 import numpy as np
 import torch
 from transformers import AutoTokenizer
-from datasets import load_dataset, concatenate_datasets
+from datasets import load_dataset, concatenate_datasets, load_from_disk
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.lexical import BM25Search
 from models.datasets import HotpotQA, WikiMultiHopQA, WikiSum, WikiAsp, ELI5, WoW, ASQA, LMData, MMLU
-from models.templates import ApiReturn
+from models.templates import CtxPrompt
+from models.utils import Utils
 
 
 class Wikipedia(object):
@@ -787,7 +787,7 @@ def compare(
         only_first_right: bool = False,
         show_final: bool = False,
         only_last_trace: bool = False,
-        use_raw_data: bool = True,
+        use_raw_data: bool = False,
     ):
     raw_data = json.load(open('data/asqa/ASQA.json'))
     get_ans = lambda x: x.strip().rsplit(' ', 1)[-1][:-1].lower()
@@ -831,7 +831,7 @@ def compare(
             else:
                 show = False
 
-            if show:
+            if show and _id in {"test-2-17359", "test-7-4930"}:
                 print('^' * 100)
                 for i, t1 in enumerate(ts1):
                     if type(t1) is str:
@@ -1092,10 +1092,10 @@ def eval(
     model: str,
     dataset: str,
     jsonl_files: List[str],
-    anchor_text: List[str] = ['So the answer is'],
+    anchor_text: List[str] = [],
     prefix_to_remove: List[str] = [],
     retrieval_percentiles: List[Union[int, float]] = [1, 0.25, 0.5, 0.75, 1.0],
-    remove_followup: Tuple[str, str] = ('Follow up[^:]*:', '?'),
+    remove_followup: Tuple[str, str] = None,  # ('Follow up[^:]*:', '?'),
     beir_dir: str = None,
     consistency_suffix: str = 'run',
     use_multi_ref: bool = False,
@@ -1140,19 +1140,19 @@ def eval(
         return answers if len(answers) > 1 else answers[0]
 
     def choose_full_prediction(example):
-        if ApiReturn.no_stop(model=model, dataset=dataset):
+        if Utils.no_stop(model=model, dataset=dataset):
             pred = example['output'].strip()
         else:
             pred = example['output'].split('\n\n', 1)[0].strip()
-        find = None
         if prefix_to_remove:
+            find = None
             for pattern in prefix_to_remove:
                 find = re.compile(pattern).search(pred)
                 if find:
                     pred = find.group(1)
                     break
-        if find is None:
-            logging.warning(f'format error "{pred}"')
+            if find is None:
+                logging.warning(f'format error "{pred}"')
         return pred
 
     def get_final_answer_from_pred(pred: str):
@@ -1179,6 +1179,7 @@ def eval(
     references: List[str] = []
     num_steps: List[int] = []
     retrieval_ratios: List[float] = []
+    retrieval_hits: List[int] = []
 
     root_file = None
     if len(jsonl_files) > 1:  # consistency
@@ -1199,7 +1200,13 @@ def eval(
 
         # get necessary info for evaluation
         trace = example['trace'] if 'trace' in example else []
+        retrieval = (example['retrieval'] or []) if 'retrieval' in example else []
+        retrieval = [r if len(r) == 2 else ('', r) for r in retrieval]  # add a empty query
         qid = example['qid'] if 'qid' in example else example['id']
+
+        if qid not in ["test-7-16931","test-4-9383","test-4-11991","test-2-4118","test-7-18508","test-2-17359","test-7-4930","test-7-5920","test-0-11051"]:
+            continue
+
         question = example['question'] if 'question' in example else None
         ref = choose_reference(example)
         final_ans = choose_final_answer(example)
@@ -1216,12 +1223,20 @@ def eval(
         final_metrics['ppl'] += np.sum(probs)
         final_metrics['tokens'] += len(probs)
 
+        retrieval_ratios.append(len(retrieval) / (len(trace) or 1))
+        rhit = len(set([r for (query, rs) in retrieval for r in rs if r.startswith(qid)]))
+        retrieval_hits.append(rhit)
+
+        #if rhit <= 5:
+        #    continue
+        #print('qid', qid)
+
         references.append(ref)
         predictions.append(pred)
         num_steps.append(len(trace))
-        retrieval_ratios.append(len((example['retrieval'] or []) if 'retrieval' in example else []) / (len(trace) or 1))
-        if 'retrieval' in example and example['retrieval']:
-            ret_dids = np.array([r if type(r[0]) is str else r[0] for r in example['retrieval']], dtype=np.str_)
+
+        if retrieval:
+            ret_dids = np.array([rs if type(rs[0]) is str else rs[0] for (query, rs) in retrieval], dtype=np.str_)
         else:
             ret_dids = np.array([['placeholder']], dtype=np.str_)
 
@@ -1244,6 +1259,7 @@ def eval(
                 add_metric_kvs(WikiSum.entity_f1_score(pred_ans, final_ans))
             elif dataset in {'wikiasp'}:
                 add_metric_kvs(WikiAsp.entity_f1_score(pred_ans, final_ans))
+                print('qid', qid, WikiAsp.entity_f1_score(pred_ans, final_ans))
             elif dataset in {'eli5'}:
                 add_metric_kvs(ELI5.entity_f1_score(pred_ans, final_ans))
             elif dataset in {'asqa'}:
@@ -1303,6 +1319,13 @@ def eval(
 
     total = len(predictions)  # change total
 
+    format_list = lambda arr: ', '.join(map(lambda x: '{:.3f}'.format(x), arr.tolist()))
+    ret_accs = np.array(ret_accs, dtype=float).mean(0)
+    ret_covers = np.array(ret_covers, dtype=float).mean(0)
+    print('retrieval acc\tcoverage')
+    print(f'{format_list(ret_accs)}\t{format_list(ret_covers)}')
+    print(f'#examples with search: {scount}, #avg search per example {np.mean(search_per_example)}, #steps {np.mean(num_steps)}, ret ratio {np.mean(retrieval_ratios)}, ret hit {np.mean(retrieval_hits)}')
+
     # rouge
     if dataset == 'lmdata':
         metrics = {}
@@ -1311,9 +1334,6 @@ def eval(
     if remove_followup:
         metrics_followup = metric_func.compute(predictions=followups, references=references)
 
-    ret_accs = np.array(ret_accs, dtype=float).mean(0)
-    ret_covers = np.array(ret_covers, dtype=float).mean(0)
-    format_list = lambda arr: ', '.join(map(lambda x: '{:.3f}'.format(x), arr.tolist()))
     print('\t'.join(final_metrics.keys()))
     print('\t'.join(map(lambda kv: str(np.exp(kv[1] / final_metrics['tokens'] or 1)) if kv[0] == 'ppl' else str(kv[1] / total), final_metrics.items())))
     print('')
@@ -1330,10 +1350,6 @@ def eval(
         print('#pred\t#gold')
         print(f'{np.mean([len(p) for p in followups])}\t{np.mean([len(r) for r in references])}')
         print('')
-
-    print('retrieval acc\tcoverage')
-    print(f'{format_list(ret_accs)}\t{format_list(ret_covers)}')
-    print(f'#examples with search: {scount}, #avg search per example {np.mean(search_per_example)}, #steps {np.mean(num_steps)}, ret ratio {np.mean(retrieval_ratios)}')
 
 
 def build_elasticsearch(
@@ -1492,15 +1508,15 @@ def jsonl_to_keyvalue(
         for l in fin:
             l = json.loads(l)
             pred = l['output'].strip()
-            find = None
             if prefix_to_remove:
+                find = None
                 for pattern in prefix_to_remove:
                     find = re.compile(pattern).search(pred)
                     if find:
                         pred = find.group(1)
                         break
-            if find is None:
-                logging.warning(f'format error "{pred}"')
+                if find is None:
+                    logging.warning(f'format error "{pred}"')
             key2output[l['qid']] = pred
         json.dump(key2output, fout)
 
@@ -1602,20 +1618,12 @@ def  wikiasp_match_title(
         if use_site_operator:
             query += ' site:en.wikipedia.org'
         return query
-    def get_wiki_url(urls: List[str]):
-        for url in urls:
-            if 'wikipedia.org' in url:
-                return url
-        return None
-    def wiki_url_to_title(url: str):
-        title = ' '.join(unquote(url).rsplit('/wiki/', 1)[-1].split('_')) if url else url
-        return title
     domain2success: Dict[str, int] = defaultdict(lambda: 0)
     def map_fn(example, domain: str):
         query = get_query(example['targets'])
         urls, snippets = retriever.retrieve_and_prepare(decoder_texts=[query], topk=50)
-        url = get_wiki_url(urls[0])
-        title = wiki_url_to_title(url)
+        url = WikiAsp.get_wiki_url(urls[0])
+        title = WikiAsp.wiki_url_to_title(url)
         example['query'] = query
         example['url'] = url
         example['title'] = title
@@ -1641,6 +1649,64 @@ def  wikiasp_match_title(
     concat_data = concatenate_datasets(processed)
     concat_data.save_to_disk(output_dir)
     print(domain2success)
+
+
+def wikiasp_improve(
+    dataset_dir: str = 'data/wikiasp/matched_with_bing_test',
+    title_file: str = 'data/wikiasp/wikiasp_titles.txt',
+    shard_id: int = 0,
+    num_shards: int = 1,
+    shard_size: int = None,
+    output_dir: str = 'data/wikiasp/matched_with_bing_test.improved'
+):
+    from models.retriever import BM25
+    retriever = BM25(
+        tokenizer=None,
+        dataset=(None, None, None),
+        index_name=None,
+        use_decoder_input_ids=True,
+        engine='bing',
+        file_lock=None)
+
+    id2title: Dict[str, str] = dict(tuple(l.rstrip('\n').split('\t')) for l in open(title_file))
+    data = load_from_disk(dataset_dir)
+    title_consist = []
+
+    # get one shard
+    if shard_size is None:
+        shard_size = int(np.ceil(len(data) / num_shards))
+    else:
+        num_shards = int(np.ceil(len(data) / shard_size))
+    from_ind, to_ind = min(shard_id * shard_size, len(data)), min(shard_id * shard_size + shard_size, len(data))
+    shard = data.select(range(from_ind, to_ind))
+    print(f'shard {shard_id} from {from_ind} to {to_ind}')
+
+    def map_fn(example):
+        eid = example['exid']
+        title = id2title[eid]
+
+        # get title
+        query = f'{title} site:en.wikipedia.org'
+        urls = retriever.retrieve_and_prepare(decoder_texts=[query], topk=50)[0][0]
+        url = WikiAsp.get_wiki_url(urls)
+        real_title = WikiAsp.wiki_url_to_title(url)
+        if not real_title:
+            print(f'ERROR: {eid} previous: {example["title"]} new: {real_title}')
+            if eid == 'test-5-18982':
+                real_title = 'Lebia Cruxminor'
+        title_consist.append(int(real_title == example['title']))
+        example['clean_title'] = real_title
+
+        # convert target
+        example['clean_targets'] = []
+        for asp, text in example['targets']:
+            new_text = CtxPrompt.canonicalize_text(text, field='paragraph')
+            example['clean_targets'].append((asp, new_text))
+        return example
+
+    shard = shard.map(map_fn)
+    shard.save_to_disk(output_dir + f'.{num_shards}_{shard_id}')
+    print(f'title consistency {np.mean(title_consist)}')
 
 
 def wikiasp_corpus(beir_dir: str, paragraph_min_len: int = 100):
@@ -1738,9 +1804,10 @@ if __name__ == '__main__':
         'strategyqa_to_beir', 'hotpotqa_to_beir', 'tsv_to_beir', 'eval', 'kilt_to_beir',
         'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir',
         'add_ref_to_kilt', 'jsonl_to_keyvalue', 'mmlu_retrieval_usefulness',
-        'wikiasp_match_title', 'wikiasp_corpus', 'annotate_asqa', 'annotate_asqa_get_hint'])
+        'wikiasp_match_title', 'wikiasp_corpus', 'wikiasp_improve',
+        'annotate_asqa', 'annotate_asqa_get_hint'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='asqa', help='input dataset', choices=[
+    parser.add_argument('--dataset', type=str, default='wikiasp', help='input dataset', choices=[
         'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'wikiasp', 'eli5', 'wow', 'asqa', 'lmdata'])
     parser.add_argument('--model', type=str, default='gpt-3.5-turbo-0301', help='model name',
                         choices=['code-davinci-002', 'gpt-3.5-turbo-0301'])
@@ -1900,7 +1967,6 @@ if __name__ == '__main__':
             eval(model=args.model,
                 dataset=dataset,
                 jsonl_files=jsonl_files,
-                anchor_text=None,
                 beir_dir=None)  # 'data/wikisum/wikisum_all_beir'
         elif dataset in {'eli5', 'wow', 'lmdata'}:
             eval(model=args.model,
@@ -1995,3 +2061,7 @@ if __name__ == '__main__':
             hint_file='data/asqa/ASQA_test_specific_hint_keyword.jsonl',
             out_file='data/asqa/annotation_hint.tsv',
         )
+
+    elif args.task == 'wikiasp_improve':
+        shard_id = int(args.inp[0])
+        wikiasp_improve(shard_id=shard_id, shard_size=50)

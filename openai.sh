@@ -7,7 +7,7 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=asqa
+dataset=wikiasp
 debug_batch_size=1
 batch_size=8
 model=text-davinci-003  # code-davinci-002, gpt-3.5-turbo-0301, text-davinci-003, text-curie-001
@@ -86,7 +86,7 @@ elif [[ ${dataset} == 'wikisum_all_beir' ]]; then
     max_num_examples=1000
     max_generation_len=256
 elif [[ ${dataset} == 'wikiasp' ]]; then
-    input="--input data/wikiasp/matched_with_bing_test"
+    input="--input \"data/wikiasp/matched_with_bing_test.improved.*\""
     index_name=wikiasp
     fewshot=8
     if [[ ${expensive} == true ]]; then
@@ -217,7 +217,7 @@ retrieval_kwargs = {
     'use_ctx_for_examplars': False,
     'use_retrieval_instruction': False,
     'use_instruction': False,
-    'format_reference_method': 'searchresults',
+    'format_reference_method': 'searchresultsrank',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -259,7 +259,7 @@ retrieval_kwargs = {
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
     'use_instruction': False,
-    'format_reference_method': 'searchresults',
+    'format_reference_method': 'searchresultsrank',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -302,7 +302,7 @@ retrieval_kwargs = {
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
     'use_instruction': False,
-    'format_reference_method': 'searchresults',
+    'format_reference_method': 'searchresultsrank',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -344,7 +344,7 @@ retrieval_kwargs = {
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
     'use_instruction': False,
-    'format_reference_method': 'searchresults',
+    'format_reference_method': 'searchresultsrank',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -386,7 +386,7 @@ retrieval_kwargs = {
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
     'use_instruction': False,
-    'format_reference_method': 'searchresults',
+    'format_reference_method': 'searchresultsrank',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -428,7 +428,7 @@ retrieval_kwargs = {
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
     'use_instruction': False,
-    'format_reference_method': 'searchresults',
+    'format_reference_method': 'searchresultsrank',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave',
     'ctx_increase': 'replace',
@@ -476,7 +476,7 @@ retrieval_kwargs = {
     'use_ctx_for_examplars': False,
     'use_retrieval_instruction': 'cot',
     'use_instruction': False,
-    'format_reference_method': 'searchresults',
+    'format_reference_method': 'searchresultsrank',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave_ret',
     'ctx_increase': 'replace',
@@ -518,7 +518,7 @@ retrieval_kwargs = {
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': 'cot',
     'use_instruction': False,
-    'format_reference_method': 'searchresults',
+    'format_reference_method': 'searchresultsrank',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave_ret',
     'ctx_increase': 'replace',
@@ -560,7 +560,7 @@ retrieval_kwargs = {
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': 'cot',
     'use_instruction': False,
-    'format_reference_method': 'searchresults',
+    'format_reference_method': 'searchresultsrank',
     'ctx_position': 'before_case',
     'prompt_type': 'cot_interleave_ret',
     'ctx_increase': 'replace',
@@ -604,7 +604,7 @@ retrieval_kwargs = {
     'use_ctx_for_examplars': 'gold',
     'use_retrieval_instruction': False,
     'use_instruction': False,
-    'format_reference_method': 'searchresults',
+    'format_reference_method': 'searchresultsrank',
     'ctx_position': 'before_case',
     'prompt_type': 'none',
     'ctx_increase': 'replace',
