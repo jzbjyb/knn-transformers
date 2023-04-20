@@ -169,11 +169,14 @@ class CtxPrompt:
         #prompt_format = lambda x, y: f'Given the previous context and the last text, copy the last text and only replace pronouns (if any) with corresponding references to make the text self-contained.\n=== Previous context ===\n{x.strip()}\n=== Last text ===\n{y.strip()}'
         #indicator = '---'
         #prompt_format = lambda x, y: f'Replace pronouns in the following text with their corresponding references.\n\n=== Text (start) ===\n{x.strip()}\n{indicator}\n{y.strip()}\n=== Text (end) ==='
-        prompt_format = lambda x, y: f'Replace pronouns in the following text with their corresponding references.\n\n{x.strip()}\n=== Text (start) ===\n{y.strip()}\n=== Text (end) ==='
+        start_sym, end_sym = "=== Text (start) ===", "=== Text (start) ==="
+        prompt_format = lambda x, y: f'Replace pronouns in the following text with their corresponding references.\n\n{x.strip()}\n{start_sym}\n{y.strip()}\n{end_sym}'
         examplars = [(prompt_format(e[0], e[1]), e[2]) for e in examplars]
         prompt = prompt_format(context, text)
         #decontext_text = cls.chatgpt_get_response(prompt, examplars=examplars, api_key=api_key).split(indicator, 1)[-1].strip()
         decontext_text = cls.chatgpt_get_response(prompt, examplars=examplars, api_key=api_key).strip()
+        decontext_text = decontext_text.split(start_sym, 1)[-1].strip()
+        decontext_text = decontext_text[:-len(end_sym)] if decontext_text.endswith(end_sym) else decontext_text
         if debug:
             print('-' * 10)
             print(prompt)
@@ -193,7 +196,7 @@ class CtxPrompt:
         replace_symbol: str = 'XXX',
         detect_low_terms: bool = False,
         decontextualize: bool = False,
-        debug: bool = False
+        debug: bool = False,
     ):
         text = ''.join(tokens)
         if debug:
