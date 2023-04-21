@@ -6,6 +6,6 @@ input=$1
 
 eval "$(conda shell.bash hook)"
 conda deactivate
-conda activate knn2
+conda activate knn
 
 INSPIREDCO_API_KEY=${inspiredco_key} python inspiredco_eval.py --input ${input}

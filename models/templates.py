@@ -104,6 +104,29 @@ class CtxPrompt:
         return text, has
 
     @classmethod
+    def extract_low_confidence_terms_rule(
+        cls,
+        tokens: List[str],
+        probs: List[float],
+        low: float = 0.0,
+        min_gap: int = 5):  # the minimal token-based gap to separate two terms
+        prev_low_pos = -1
+        has = False
+        terms: List[List[str]] = []
+        for i, (token, prob) in enumerate(zip(tokens, probs)):
+            if prob <= low:
+                if prev_low_pos == -1 or i - prev_low_pos >= min_gap:
+                    # new term
+                    terms.append([token])
+                else:
+                    # old term
+                    for j in range(prev_low_pos + 1, i + 1):
+                        terms[-1].append(tokens[j])
+                prev_low_pos = i
+        terms = [''.join(term).strip() for term in terms]
+        return terms
+
+    @classmethod
     def extract_low_confidence_terms(cls, context: str, tokens: List[str], probs: List[float], low: float = 0.0, api_key: str = None, special_symbol: str = '*', debug: bool = False):
         examplars = [
             ('*Egypt has one of the longest histories of any country, tracing its heritage along *the Nile Delta back to the *6th–4th millennia BCE.', '*Egypt\n*the Nile Delta\n*6th–4th'),
@@ -186,7 +209,25 @@ class CtxPrompt:
         return decontext_text
 
     @classmethod
-    def process_text_for_retrieval(
+    def ask_question_text(cls, context: str, text: str, terms: List[str], api_key: str = None, debug: bool = False, filter_question: bool = True):
+        questions: List[str] = []
+        for term in terms:
+            term = term.strip('"')
+            prompt = f'{context.lstrip()}{text.rstrip()}\n\nGiven the above passage, generate a question that can be used to look up relevant information to verify the following term "{term}".'
+            question = cls.chatgpt_get_response(prompt, api_key=api_key).strip()
+            if filter_question and not question.endswith('?'):
+                continue
+            questions.append(question)
+            if debug:
+                print('-' * 10)
+                print(prompt)
+                print('-' * 10)
+                print(question)
+                print('-' * 10)
+        return questions
+
+    @classmethod
+    def get_queries_from_text_for_retrieval(
         cls,
         context: str,
         tokens: List[str],
@@ -196,8 +237,9 @@ class CtxPrompt:
         replace_symbol: str = 'XXX',
         detect_low_terms: bool = False,
         decontextualize: bool = False,
+        askquestion: bool = False,
         debug: bool = False,
-    ):
+    ) -> List[str]:
         text = ''.join(tokens)
         if debug:
             print('0->', context)
@@ -205,21 +247,27 @@ class CtxPrompt:
             print(list(zip(tokens, probs)))
         if detect_low_terms:
             #text = cls.replace_low_confidence_terms_by_extract(context=context, tokens=tokens, probs=probs, low=low, api_key=api_key, replace_symbol=replace_symbol)
-            terms = cls.extract_low_confidence_terms(context=context, tokens=tokens, probs=probs, low=low, api_key=api_key)
+            #terms = cls.extract_low_confidence_terms(context=context, tokens=tokens, probs=probs, low=low, api_key=api_key)
+            terms = cls.extract_low_confidence_terms_rule(tokens=tokens, probs=probs, low=low)
         if debug:
             print('2->', terms)
         if decontextualize:
             text = cls.decontextualize_text(context=context, text=text, api_key=api_key)
-        if debug:
-            print('3->', text)
+            if debug:
+                print('3->', text)
+        elif askquestion:
+            questions = cls.ask_question_text(context=context, text=text, terms=terms, api_key=api_key)
         if detect_low_terms:
-            #text = text.replace(replace_symbol, ' ')
-            for term in terms:
-                text = text.replace(term, ' ')
+            if decontextualize:
+                #text = text.replace(replace_symbol, ' ')
+                for term in terms:
+                    questions = [text.replace(term, ' ')]
+            elif askquestion:
+                pass
         if debug:
-            print('4->', text)
+            print('4->', questions)
             input()
-        return text
+        return questions
 
     def get_query_for_retrieval(self):
         if self.gen_len == 0:
@@ -588,19 +636,22 @@ class ApiReturn:
                 keep = [(t if p > mask_prob else ' ') for t, p in zip(self.tokens, self.probs)]
                 keep = ''.join(keep).strip()
                 return keep
-            elif mask_method == 'wholeterm-decontextualize':
+            elif mask_method in {'wholeterm-decontextualize', 'wholeterm-askquestion'}:
                 if n_gen_char_in_prompt == 0:
                     context = ''
                 else:
                     context = self.prompt[-n_gen_char_in_prompt:]
-                keep = CtxPrompt.process_text_for_retrieval(
+                decontextualize = 'decontextualize' in mask_method
+                askquestion = 'askquestion' in mask_method
+                keep = CtxPrompt.get_queries_from_text_for_retrieval(
                     context=context,
                     tokens=self.tokens,
                     probs=self.probs,
                     low=mask_prob,
                     api_key=api_key,
                     detect_low_terms=True,
-                    decontextualize=True)
+                    decontextualize=decontextualize,
+                    askquestion=askquestion)
                 return keep
             else:
                 raise NotImplementedError

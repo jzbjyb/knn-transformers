@@ -831,7 +831,7 @@ def compare(
             else:
                 show = False
 
-            if show and _id in {"test-2-17359", "test-7-4930"}:
+            if show:  # {'test-2-16963'} {'test-1-17912'}:
                 print('^' * 100)
                 for i, t1 in enumerate(ts1):
                     if type(t1) is str:
@@ -1204,8 +1204,8 @@ def eval(
         retrieval = [r if len(r) == 2 else ('', r) for r in retrieval]  # add a empty query
         qid = example['qid'] if 'qid' in example else example['id']
 
-        if qid not in ["test-7-16931","test-4-9383","test-4-11991","test-2-4118","test-7-18508","test-2-17359","test-7-4930","test-7-5920","test-0-11051"]:
-            continue
+        #if qid not in {'test-2-16963'}  :#{'test-1-17912'}: #["test-7-16931","test-4-9383","test-4-11991","test-2-4118","test-7-18508","test-2-17359","test-7-4930","test-7-5920","test-0-11051"]:
+        #    continue
 
         question = example['question'] if 'question' in example else None
         ref = choose_reference(example)
@@ -1276,7 +1276,7 @@ def eval(
         if has_search:
             search_per_example.append(len(re.findall('\[Search\(', pred)))
 
-        if debug and (not correct or wrongformat):
+        if debug:
             print('ID->', qid)
             print('Q->', question)
             print()

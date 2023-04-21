@@ -17,6 +17,7 @@ pip install filelock
 pip install spacy==3.5.0
 python -m spacy download en_core_web_sm
 conda install -c conda-forge gsutil
+pip install stanza
 
 # mongo for KILT
 #mongod --dbpath /path/to/data --logpath /path/to/mongod.log --fork

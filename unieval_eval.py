@@ -1,36 +1,9 @@
 from typing import List, Dict
-import os
-import argparse
 import json
-from inspiredco import critique
+import argparse
+from utils import convert_to_json
+from metric.evaluator import get_evaluator
 
-
-
-
-metric = "bert_score"
-config = {
-    "variety": "f_measure",
-    "model": "bert-base-uncased",
-    "language": "eng"
-}
-
-metric = "bart_score"
-config = {
-    "variety": "reference_target_bidirectional",
-    "model": "facebook/bart-large-cnn",
-    "language": "eng"
-}
-
-metric = "rouge"
-config = {
-    "variety": "rouge_1"
-}
-
-metric = "uni_eval"
-config = {
-    "task": "summarization",
-    "evaluation_aspect": "relevance",
-}
 
 def extract_source_target_ref(input_file: str):
     dataset: List[Dict] = []
@@ -50,14 +23,16 @@ def extract_source_target_ref(input_file: str):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('--task', type=str, default='fact')
     parser.add_argument('--input', type=str, default=None)
     args = parser.parse_args()
 
     print('load data ...')
     dataset = extract_source_target_ref(args.input)
+    src_list = ['\n'.join(e['references']) for e in dataset]
+    output_list = [e['target'] for e in dataset]
+    data = convert_to_json(output_list=output_list, src_list=src_list)
 
     print('eval ...')
-    client = critique.Critique(api_key=os.environ['INSPIREDCO_API_KEY'])
-    results = client.evaluate(metric=metric, config=config, dataset=dataset)
-
-    print(results['overall'])
+    evaluator = get_evaluator(args.task)
+    eval_scores = evaluator.evaluate(data, print_result=True)

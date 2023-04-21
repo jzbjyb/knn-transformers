@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Union
 import argparse
 import random
 import numpy as np
@@ -167,12 +167,51 @@ class QueryAgent:
         prefix = text[:last_position]
         return prefix, last_position
 
-    def retrieve(self, queries: List[str], is_question: bool = False):
+    def retrieve(
+        self,
+        queries: List[Union[str, List[str]]],
+        is_question: bool = False,
+        debug: bool = False
+    ):
         mql = None if (self.use_full_input_as_query and is_question) else self.max_query_length
-        ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
-            decoder_texts=queries,
-            topk=self.ret_topk,
-            max_query_length=mql)
+        if len(queries) and type(queries[0]) is list:  # nested queries
+            flatten = sum(queries, [])
+            _ctx_ids, _ctx_texts = self.retriever.retrieve_and_prepare(
+                decoder_texts=flatten,
+                topk=self.ret_topk,
+                max_query_length=mql)
+            ctx_ids, ctx_texts = [], []
+            # merge results
+            prev_ind = 0
+            for i in range(len(queries)):
+                ctx_ids.append([])
+                ctx_texts.append([])
+
+                nqi = len(queries[i])
+                cids, ctxts = _ctx_ids[prev_ind:prev_ind + nqi], _ctx_texts[prev_ind:prev_ind + nqi]
+                assert cids.shape[-1] == ctxts.shape[-1] == self.ret_topk
+                for j in range(self.ret_topk):
+                    for k in range(nqi):  # TODO: sort by score?
+                        if cids[k, j] not in ctx_ids[-1]:
+                            ctx_ids[-1].append(cids[k, j])
+                            ctx_texts[-1].append(ctxts[k, j])
+                ctx_ids[-1] = ctx_ids[-1][:self.ret_topk]
+                ctx_texts[-1] = ctx_texts[-1][:self.ret_topk]
+                prev_ind = prev_ind + nqi
+                if debug:
+                    print('-------------- ret -------------')
+                    print(queries[i])
+                    print(ctx_ids[-1])
+                    print(ctx_texts[-1])
+                    print('-------------- ret -------------')
+            ctx_ids = np.array(ctx_ids)
+            ctx_texts = np.array(ctx_texts)
+            assert ctx_ids.shape == ctx_texts.shape == (len(queries), self.ret_topk)
+        else:
+            ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
+                decoder_texts=queries,
+                topk=self.ret_topk,
+                max_query_length=mql)
         return ctx_ids, ctx_texts
 
     def complete(
@@ -267,6 +306,15 @@ class QueryAgent:
                 model=responses['model'],
                 skip_len=0) for r, (q, _, _) in zip(responses['choices'], prompts)]
         else:
+            # TODO: handle prompt too long
+            '''
+            # retry on prompt being too long
+            except openai.error.InvalidRequestError as e:
+                if e.json_body is not None and 'error' in e.json_body and 'message' in e.json_body['error'] and 'maximum context length' in e.json_body['error']['message']:
+                    # remove one example
+                else:
+                    raise e
+            '''
             responses = openai_api_call(
                 api_key=api_key,
                 model=self.model,
@@ -395,6 +443,7 @@ class QueryAgent:
                     queries_to_issue = [lh if self.only_use_look_ahead else (q.get_query_for_retrieval() + lh) for (i, q), lh in zip(queries, look_aheads)]
                 if self.debug:
                     print(f'Query -> !{queries_to_issue[0]}!')
+                assert len(queries_to_issue) == len(queries)
                 nonemp_queries_to_issue = [q for q in queries_to_issue if q]
                 if nonemp_queries_to_issue and (not self.retrieval_at_beginning or first_ret):
                     # (bs, ret_topk) * 2
@@ -648,7 +697,7 @@ if __name__ == '__main__':
         'look_ahead_pre_retrieval': False,
         'look_ahead_filter_prob': 0.4,
         'look_ahead_mask_prob': 0.4,
-        'look_ahead_mask_method': 'wholeterm-decontextualize',
+        'look_ahead_mask_method': 'wholeterm-askquestion',
         'look_ahead_boundary': [],
         'only_use_look_ahead': True,
         'retrieval_trigers': [],
