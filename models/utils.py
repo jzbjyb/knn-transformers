@@ -1,7 +1,9 @@
+from typing import Any, List, Dict
 import random
 import time
 import os
 import logging
+import asyncio
 import openai
 logging.basicConfig(level=logging.INFO)
 
@@ -104,11 +106,30 @@ def retry_with_exponential_backoff(
     return wrapper
 
 
+async def async_chatgpt(
+    *args,
+    messages: List[List[Dict[str, Any]]],
+    **kwargs,
+) -> List[str]:
+    async_responses = [
+        openai.ChatCompletion.acreate(
+            *args,
+            messages=x,
+            **kwargs,
+        )
+        for x in messages
+    ]
+    return await asyncio.gather(*async_responses)
+
+
 @retry_with_exponential_backoff
 def openai_api_call(*args, **kwargs):
     model = kwargs['model']
     is_chat_model = Utils.is_chat(model)
     if is_chat_model:
-        return openai.ChatCompletion.create(*args, **kwargs)
+        if type(kwargs['messages'][0]) is list:  # batch request
+            return asyncio.run(async_chatgpt(*args, **kwargs))
+        else:
+            return openai.ChatCompletion.create(*args, **kwargs)
     else:
         return openai.Completion.create(*args, **kwargs)

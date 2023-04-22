@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Union
 from operator import itemgetter
 from collections import namedtuple
 import spacy
@@ -59,32 +59,51 @@ class CtxPrompt:
         return [ret.replace('\n', ' ').strip() for ret in rets if ret.replace('\n', ' ').strip()]
 
     @classmethod
-    def chatgpt_get_response(cls, prompt: str, examplars: List[Tuple[str, str]] = [], max_tokens: int = 2048, api_key: str = None):
-        assert len(prompt.split()) <= max_tokens
+    def chatgpt_get_response(cls, prompt: Union[str, List[str]], examplars: List[List[Tuple[str, str]]] = [[]], max_tokens: int = 2048, api_key: str = None):
+        is_single = type(prompt) is str
+        if is_single:
+            prompt = [prompt]
+            examplars = examplars or [[]]
+        if len(prompt) != len(examplars):
+            examplars = [[] for _ in range(len(prompt))]
+        for p in prompt:
+            assert len(p.split()) <= max_tokens
         responses = openai_api_call(
             api_key=api_key,
             model='gpt-3.5-turbo-0301',
-            messages=[
-                {'role': 'user' if i == 0 else 'assistant', 'content': examplar[i]} for examplar in examplars for i in range(2)
+            messages=[[
+                {'role': 'user' if i == 0 else 'assistant', 'content': e[i]} for e in es for i in range(2)
             ] + [
-                {'role': 'user', 'content': prompt},
-            ],
+                {'role': 'user', 'content': p},
+            ] for p, es in zip(prompt, examplars)],
             temperature=0.0,
             top_p=0.0,
             max_tokens=max_tokens)
-        return responses['choices'][0]['message']['content']
+        generations = [r['choices'][0]['message']['content'] for r in responses]
+        if is_single:
+            assert len(generations) == 1
+            return generations[0]
+        return generations
 
     @classmethod
-    def canonicalize_text(cls, text: str, field: str = 'paragraph', api_key: str = None, debug: bool = False):
-        prompt = f'For the following {field}, remove unnecessary spaces and capitalize words properly.\n{field.capitalize()}\n{text}'
-        clean_text = cls.chatgpt_get_response(prompt, api_key=api_key)
+    def canonicalize_text(cls, text: Union[str, List[str]], field: str = 'paragraph', api_key: str = None, debug: bool = False):
+        is_single = type(text) is not list
+        if is_single:
+            text = [text]
+        prompts = [f'For the following {field}, remove unnecessary spaces and capitalize words properly.\n{field.capitalize()}\n{t}' for t in text]
+        clean_texts = cls.chatgpt_get_response(prompts, api_key=api_key)
         if debug:
-            print('-' * 10)
-            print(prompt)
-            print('-' * 10)
-            print(clean_text)
+            for p, ct in zip(prompts, clean_texts):
+                print('-' * 10)
+                print(p)
+                print('-' * 10)
+                print(ct)
+                print('-' * 10)
             input()
-        return clean_text
+        if is_single:
+            assert len(clean_texts) == 1
+            return clean_texts[0]
+        return clean_texts
 
     @classmethod
     def annotate_low_confidence_terms(cls, tokens: List[str], probs: List[float], low: float = 0.0, special_symbol: str = '*', min_gap: int = 5):

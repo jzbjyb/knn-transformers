@@ -1837,7 +1837,7 @@ def wikisum_improve(
     shard_id: int = 0,
     num_shards: int = 1,
     shard_size: int = None,
-    nsents_batch_size: int = 10,
+    nsents_batch_size: int = 1,
     from_ind: int = None,
     to_ind: int = None,
 ):
@@ -1858,12 +1858,10 @@ def wikisum_improve(
                 continue
             l = json.loads(l)
             ctx_texts = l['metadata']['ctx_texts']
-            l['metadata']['clean_ctx_texts'] = []
-            for b in range(0, len(ctx_texts), nsents_batch_size):
-                ctx = ' '.join(ctx_texts[b:b + nsents_batch_size]).replace('\n', ' ')
-                new_ctx = CtxPrompt.canonicalize_text(ctx, field='paragraph')
-                l['metadata']['clean_ctx_texts'].append(new_ctx)
-            l['metadata']['clean_ctx_texts'] = ' '.join(l['metadata']['clean_ctx_texts'])
+            ctxs = [' '.join(ctx_texts[b:b + nsents_batch_size]).replace('\n', ' ') for b in range(0, len(ctx_texts), nsents_batch_size)]
+            new_ctxs = CtxPrompt.canonicalize_text(ctxs, field='paragraph')
+            l['metadata']['clean_ctx_texts'] = new_ctxs
+            assert len(new_ctxs) == len(ctx_texts)
             fout.write(json.dumps(l) + '\n')
 
 

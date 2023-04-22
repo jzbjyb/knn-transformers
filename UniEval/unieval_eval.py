@@ -32,11 +32,12 @@ if __name__ == '__main__':
     parser.add_argument('--task', type=str, default='fact')
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--devices', type=int, default=None, nargs='+')
+    parser.add_argument('--gold_field', type=str, default='references')
     args = parser.parse_args()
 
     print('load data ...')
     dataset = extract_source_target_ref(args.input)
-    src_list = ['\n'.join(e['summarization_references']) for e in dataset]
+    src_list = ['\n'.join(e[args.gold_field]) for e in dataset]
     output_list = [e['target'] for e in dataset]
     data = convert_to_json(output_list=output_list, src_list=src_list)
 
