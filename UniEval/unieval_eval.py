@@ -2,7 +2,7 @@ from typing import List, Dict
 import json
 import argparse
 from utils import convert_to_json
-from metric.evaluator import get_evaluator
+from metric.evaluator import get_evaluator, evaluate, multi_gpu
 
 
 def extract_source_target_ref(input_file: str):
@@ -31,6 +31,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, default='fact')
     parser.add_argument('--input', type=str, default=None)
+    parser.add_argument('--devices', type=int, default=None, nargs='+')
     args = parser.parse_args()
 
     print('load data ...')
@@ -41,4 +42,5 @@ if __name__ == '__main__':
 
     print('eval ...')
     evaluator = get_evaluator(args.task)
-    eval_scores = evaluator.evaluate(data, print_result=True)
+    multi_evaluate = multi_gpu(evaluate, cuda_devices=args.devices)
+    eval_scores = multi_evaluate(evaluator, data, print_result=True)

@@ -1,4 +1,6 @@
+from typing import List
 import sys
+import torch
 import numpy as np
 from nltk import sent_tokenize
 from multiprocessing.pool import Pool
@@ -12,28 +14,32 @@ def multi_gpu(
     cuda_devices: List[int] = None
 ):
     def wrapper(*args, **kwargs):
-        cuda_devices = [torch.cuda.device(i) for i in cuda_devices] if cuda_devices else [torch.cuda.device(i) for i in range(torch.cuda.device_count())]
-        num_shards = len(cuda_devices)
-        data = args[0]
+        devices = [torch.device(f'cuda:{i}') for i in cuda_devices] if cuda_devices else [torch.device(f'cuda:{i}') for i in range(torch.cuda.device_count())]
+        num_shards = len(devices)
+        self = args[0]
+        data = args[1]
         shard_size = round(len(data) / num_shards)
         all_result = []
         with Pool(num_shards) as pool:
             shards = [data[i * shard_size:i * shard_size + shard_size] for i in range(num_shards)]
-            for result in pool.map(evaluate_func, shards):
+            # only support *args
+            for result in pool.map(evaluate_func, [(self, shard, devices[i]) + tuple(args[2:]) for i, shard in enumerate(shards)]):
                 all_result.extend(result)
+        print_scores(all_result)
+        return all_result
     return wrapper
 
 
 class SumEvaluator:
     def __init__(self, max_length=1024, device='cuda:0', cache_dir=None):
         """ Set up evaluator for text summarization """
-        self.scorer = UniEvaluator(model_name_or_path='MingZhong/unieval-sum',
-                                   max_length=max_length,
-                                   device=device, cache_dir=cache_dir)
+        self.max_length = max_length
+        self.device = device
+        self.cache_dir = cache_dir
         self.task = 'summarization'
         self.dimensions = ['coherence', 'consistency', 'fluency', 'relevance']
 
-    def evaluate(self, data, dims=None, overall=True, print_result=False):
+    def evaluate(self, data, device, dims=None, overall=True, print_result=False):
         """
             Get the scores of all the given dimensions
 
@@ -55,6 +61,12 @@ class SumEvaluator:
             assert isinstance(dims, list)
             eval_dims = dims
 
+        scorer = UniEvaluator(
+            model_name_or_path='MingZhong/unieval-sum',
+            max_length=self.max_length,
+            device=device,
+            cache_dir=self.cache_dir)
+
         for dim in eval_dims:
             print('Evaluating {} of {} samples !!!'.format(dim, n_data))
 
@@ -71,7 +83,7 @@ class SumEvaluator:
                         output_list.append(system_outputs[j])
                 input_list = add_question(dimension=dim, output=output_list,
                                           src=src_list, task=self.task)
-                sent_score = self.scorer.score(input_list)
+                sent_score = scorer.score(input_list)
 
                 # Get average score for each sample
                 start_idx = 0
@@ -90,7 +102,7 @@ class SumEvaluator:
                         ref_list.append(data[i]['reference'])
                 input_list = add_question(dimension=dim, output=output_list,
                                           src=src_list, ref=ref_list, task=self.task)
-                score = self.scorer.score(input_list)
+                score = scorer.score(input_list)
 
             # Please customize other dimensions here for summarization
             else:
@@ -114,14 +126,14 @@ class SumEvaluator:
 class DialogEvaluator:
     def __init__(self, max_length=1024, device='cuda:0', cache_dir=None):
         """ Set up evaluator for dialogues """
-        self.scorer = UniEvaluator(model_name_or_path='MingZhong/unieval-dialog',
-                                   max_length=max_length,
-                                   device=device, cache_dir=cache_dir)
+        self.max_length = max_length
+        self.device = device
+        self.cache_dir = cache_dir
         self.task = 'dialogue'
         self.dimensions = ['naturalness', 'coherence', 'engagingness',
                            'groundedness', 'understandability']
 
-    def evaluate(self, data, dims=None, overall=True, print_result=False):
+    def evaluate(self, data, device, dims=None, overall=True, print_result=False):
         """
             Get the scores of all the given dimensions
 
@@ -143,6 +155,12 @@ class DialogEvaluator:
             assert isinstance(dims, list)
             eval_dims = dims
 
+        scorer = UniEvaluator(
+            model_name_or_path='MingZhong/unieval-dialog',
+            max_length=self.max_length,
+            device=device,
+            cache_dir=self.cache_dir)
+
         for dim in eval_dims:
             print('Evaluating {} of {} samples !!!'.format(dim, n_data))
 
@@ -161,7 +179,7 @@ class DialogEvaluator:
                         output_list.append(system_outputs[j])
                 input_list = add_question(dimension=dim, output=output_list,
                                           src=src_list, context=context_list, task=self.task)
-                sent_score = self.scorer.score(input_list)
+                sent_score = scorer.score(input_list)
 
                 # Get the summation score for each sample
                 start_idx = 0
@@ -179,7 +197,7 @@ class DialogEvaluator:
                     context_list.append(data[i]['context'])
                 input_list = add_question(dimension=dim, output=output_list,
                                           src=src_list, context=context_list, task=self.task)
-                score = self.scorer.score(input_list)
+                score = scorer.score(input_list)
 
             # Please customize other dimensions here for summarization
             else:
@@ -203,13 +221,13 @@ class DialogEvaluator:
 class D2tEvaluator:
     def __init__(self, max_length=1024, device='cuda:0', cache_dir=None):
         """ Set up evaluator for data-to-text """
-        self.scorer = UniEvaluator(model_name_or_path='MingZhong/unieval-sum',
-                                   max_length=max_length,
-                                   device=device, cache_dir=cache_dir)
+        self.max_length = max_length
+        self.device = device
+        self.cache_dir = cache_dir
         self.task = 'data2text'
         self.dimensions = ['naturalness', 'informativeness']
 
-    def evaluate(self, data, dims=None, overall=True, print_result=False):
+    def evaluate(self, data, device, dims=None, overall=True, print_result=False):
         """
             Get the scores of all the given dimensions
 
@@ -231,6 +249,12 @@ class D2tEvaluator:
             assert isinstance(dims, list)
             eval_dims = dims
 
+        scorer = UniEvaluator(
+            model_name_or_path='MingZhong/unieval-sum',
+            max_length=self.max_length,
+            device=device,
+            cache_dir=self.cache_dir)
+
         for dim in eval_dims:
             print('Evaluating {} of {} samples !!!'.format(dim, n_data))
 
@@ -241,7 +265,7 @@ class D2tEvaluator:
 
             input_list = add_question(dimension=dim, output=output_list,
                                       ref=ref_list, task=self.task)
-            score = self.scorer.score(input_list)
+            score = scorer.score(input_list)
 
             for i in range(n_data):
                 eval_scores[i][dim] = score[i]
@@ -260,19 +284,13 @@ class D2tEvaluator:
 class FactEvaluator:
     def __init__(self, max_length=1024, device='cuda:0', cache_dir=None):
         """ Set up evaluator for factual consistency detection """
-        self.get_scorer = lambda device: UniEvaluator(
-            model_name_or_path='MingZhong/unieval-fact',
-            max_length=max_length,
-            device=device,
-            cache_dir=cache_dir)
+        self.max_length = max_length
         self.device = device
-
+        self.cache_dir = cache_dir
         self.task = 'fact'
         self.dim = 'consistency'
 
-    @multi_gpu
-    def evaluate(self, data, print_result=False, device=None):
-        device = device or self.device
+    def evaluate(self, data, device, print_result=False):
         """
             Get the factual consistency score (only 1 dimension for this task)
 
@@ -294,8 +312,14 @@ class FactEvaluator:
                 src_list.append(source)
                 output_list.append(system_outputs[j])
         input_list = add_question(dimension=self.dim, output=output_list,
-                                  src=src_list, task=self.task)
-        sent_score = self.get_scorer(device).score(input_list)
+                                    src=src_list, task=self.task)
+
+        scorer = UniEvaluator(
+            model_name_or_path='MingZhong/unieval-fact',
+            max_length=self.max_length,
+            device=device,
+            cache_dir=self.cache_dir)
+        sent_score = scorer.score(input_list)
 
         # Get average score for each sample
         start_idx = 0
@@ -311,6 +335,12 @@ class FactEvaluator:
             print_scores(eval_scores)
 
         return eval_scores
+
+
+def evaluate(all_arg):
+    self = all_arg[0]
+    return getattr(self, 'evaluate')(*all_arg[1:])
+
 
 def get_evaluator(task, max_length=1024, device='cuda:0', cache_dir=None):
     assert task in ['summarization', 'dialogue', 'data2text', 'fact']
@@ -333,4 +363,3 @@ def get_evaluator(task, max_length=1024, device='cuda:0', cache_dir=None):
     else:
         raise NotImplementedError('Other tasks are not implemented, \
                                    please customize specific tasks here.')
-
