@@ -1,5 +1,6 @@
 import random
 import time
+import os
 import logging
 import openai
 logging.basicConfig(level=logging.INFO)

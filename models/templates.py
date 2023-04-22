@@ -75,9 +75,15 @@ class CtxPrompt:
         return responses['choices'][0]['message']['content']
 
     @classmethod
-    def canonicalize_text(cls, text: str, field: str = 'paragraph', api_key: str = None):
+    def canonicalize_text(cls, text: str, field: str = 'paragraph', api_key: str = None, debug: bool = False):
         prompt = f'For the following {field}, remove unnecessary spaces and capitalize words properly.\n{field.capitalize()}\n{text}'
         clean_text = cls.chatgpt_get_response(prompt, api_key=api_key)
+        if debug:
+            print('-' * 10)
+            print(prompt)
+            print('-' * 10)
+            print(clean_text)
+            input()
         return clean_text
 
     @classmethod

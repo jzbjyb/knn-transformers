@@ -13,10 +13,16 @@ def extract_source_target_ref(input_file: str):
             source = example['question']
             target = example['output']
             refs = example['answers'] if 'answers' in example else [example['gold_output']]
+            summarization_references = None
+            if 'references' in example:
+                summarization_references = example['references']
+            elif 'raw_references' in example:
+                summarization_references = example['raw_references']
             dataset.append({
                 'source': source,
                 'target': target,
                 'references': refs,
+                'summarization_references': summarization_references
             })
         return dataset
 
@@ -29,7 +35,7 @@ if __name__ == '__main__':
 
     print('load data ...')
     dataset = extract_source_target_ref(args.input)
-    src_list = ['\n'.join(e['references']) for e in dataset]
+    src_list = ['\n'.join(e['summarization_references']) for e in dataset]
     output_list = [e['target'] for e in dataset]
     data = convert_to_json(output_list=output_list, src_list=src_list)
 

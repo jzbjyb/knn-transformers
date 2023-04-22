@@ -1652,12 +1652,16 @@ def  wikiasp_match_title(
 
 
 def wikiasp_improve(
-    dataset_dir: str = 'data/wikiasp/matched_with_bing_test',
+    dataset_dir_pattern: str = 'data/wikiasp/matched_with_bing_test.improved.*',
     title_file: str = 'data/wikiasp/wikiasp_titles.txt',
     shard_id: int = 0,
     num_shards: int = 1,
     shard_size: int = None,
-    output_dir: str = 'data/wikiasp/matched_with_bing_test.improved'
+    output_dir: str = 'data/wikiasp/matched_with_bing_test.furtherimproved',
+    clean_title: bool = False,
+    clean_targets: bool = False,
+    clean_refs: bool = True,
+    nsents_batch_size: int = 32,
 ):
     from models.retriever import BM25
     retriever = BM25(
@@ -1669,7 +1673,8 @@ def wikiasp_improve(
         file_lock=None)
 
     id2title: Dict[str, str] = dict(tuple(l.rstrip('\n').split('\t')) for l in open(title_file))
-    data = load_from_disk(dataset_dir)
+    data = concatenate_datasets([load_from_disk(f) for f in glob.glob(dataset_dir_pattern)])
+    print(f'#examples {len(data)}')
     title_consist = []
 
     # get one shard
@@ -1685,23 +1690,33 @@ def wikiasp_improve(
         eid = example['exid']
         title = id2title[eid]
 
-        # get title
-        query = f'{title} site:en.wikipedia.org'
-        urls = retriever.retrieve_and_prepare(decoder_texts=[query], topk=50)[0][0]
-        url = WikiAsp.get_wiki_url(urls)
-        real_title = WikiAsp.wiki_url_to_title(url)
-        if not real_title:
-            print(f'ERROR: {eid} previous: {example["title"]} new: {real_title}')
-            if eid == 'test-5-18982':
-                real_title = 'Lebia Cruxminor'
-        title_consist.append(int(real_title == example['title']))
-        example['clean_title'] = real_title
+        if clean_title:  # get title
+            query = f'{title} site:en.wikipedia.org'
+            urls = retriever.retrieve_and_prepare(decoder_texts=[query], topk=50)[0][0]
+            url = WikiAsp.get_wiki_url(urls)
+            real_title = WikiAsp.wiki_url_to_title(url)
+            if not real_title:
+                print(f'ERROR: {eid} previous: {example["title"]} new: {real_title}')
+                if eid == 'test-5-18982':
+                    real_title = 'Lebia Cruxminor'
+            title_consist.append(int(real_title == example['title']))
+            example['clean_title'] = real_title
 
-        # convert target
-        example['clean_targets'] = []
-        for asp, text in example['targets']:
-            new_text = CtxPrompt.canonicalize_text(text, field='paragraph')
-            example['clean_targets'].append((asp, new_text))
+        if clean_targets:  # convert target
+            example['clean_targets'] = []
+            for asp, text in example['targets']:
+                new_text = CtxPrompt.canonicalize_text(text, field='paragraph')
+                example['clean_targets'].append((asp, new_text))
+
+        if clean_refs:
+            example['clean_inputs'] = []
+            refs = example['inputs']
+            for b in range(0, len(refs), nsents_batch_size):
+                ref = ' '.join(refs[b:b + nsents_batch_size]).replace('\n', ' ')
+                new_ref = CtxPrompt.canonicalize_text(ref, field='paragraph')
+                example['clean_inputs'].append(new_ref)
+            example['clean_inputs'] = ' '.join(example['clean_inputs'])
+
         return example
 
     shard = shard.map(map_fn)
@@ -1794,6 +1809,64 @@ def annotate_asqa_get_hint(
             writer.writerow(row.values())
 
 
+def filter_wikisum(
+    wikisum_beir_dir: str,
+    prediction_file: str,
+    out_file: str,
+):
+    qids = set([json.loads(l)['qid'] for l in open(prediction_file, 'r')])
+    did2text: Dict[str, str] = {}
+    with open(os.path.join(wikisum_beir_dir, 'corpus.jsonl'), 'r') as fin:
+        for l in tqdm(fin, desc='corpus file'):
+            l = json.loads(l)
+            did2text[l['_id']] = l['text']
+    with open(os.path.join(wikisum_beir_dir, 'queries.jsonl'), 'r') as fin, open(out_file, 'w') as fout:
+        for l in tqdm(fin, desc='query file'):
+            l = json.loads(l)
+            if l['_id'] not in qids:
+                continue
+            ctx_texts = [did2text[did] for did in l['metadata']['ctx_ids']]
+            l['metadata']['ctx_texts'] = ctx_texts
+            fout.write(json.dumps(l) + '\n')
+
+
+def wikisum_improve(
+    query_jsonl_file: str,
+    out_file: str,
+    num_samples: int = 1000,
+    shard_id: int = 0,
+    num_shards: int = 1,
+    shard_size: int = None,
+    nsents_batch_size: int = 10,
+    from_ind: int = None,
+    to_ind: int = None,
+):
+    # sharding
+    if from_ind is None and to_ind is None:
+        if shard_size is None:
+            shard_size = int(np.ceil(num_samples / num_shards))
+        else:
+            num_shards = int(np.ceil(num_samples / shard_size))
+        from_ind, to_ind = min(shard_id * shard_size, num_samples), min(shard_id * shard_size + shard_size, num_samples)
+    else:
+        shard_id = f'{from_ind}-{to_ind}'
+    print(f'shard {shard_id} from {from_ind} to {to_ind}')
+
+    with open(query_jsonl_file, 'r') as fin, open(out_file + f'.{shard_id}', 'w') as fout:
+        for i, l in tqdm(enumerate(fin), desc='query file'):
+            if i < from_ind or i >= to_ind:
+                continue
+            l = json.loads(l)
+            ctx_texts = l['metadata']['ctx_texts']
+            l['metadata']['clean_ctx_texts'] = []
+            for b in range(0, len(ctx_texts), nsents_batch_size):
+                ctx = ' '.join(ctx_texts[b:b + nsents_batch_size]).replace('\n', ' ')
+                new_ctx = CtxPrompt.canonicalize_text(ctx, field='paragraph')
+                l['metadata']['clean_ctx_texts'].append(new_ctx)
+            l['metadata']['clean_ctx_texts'] = ' '.join(l['metadata']['clean_ctx_texts'])
+            fout.write(json.dumps(l) + '\n')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--task', type=str, required=True, help='task to perform', choices=[
@@ -1805,7 +1878,7 @@ if __name__ == '__main__':
         'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir',
         'add_ref_to_kilt', 'jsonl_to_keyvalue', 'mmlu_retrieval_usefulness',
         'wikiasp_match_title', 'wikiasp_corpus', 'wikiasp_improve',
-        'annotate_asqa', 'annotate_asqa_get_hint'])
+        'annotate_asqa', 'annotate_asqa_get_hint', 'filter_wikisum', 'wikisum_improve'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
     parser.add_argument('--dataset', type=str, default='wikiasp', help='input dataset', choices=[
         'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'wikiasp', 'eli5', 'wow', 'asqa', 'lmdata'])
@@ -2064,4 +2137,16 @@ if __name__ == '__main__':
 
     elif args.task == 'wikiasp_improve':
         shard_id = int(args.inp[0])
-        wikiasp_improve(shard_id=shard_id, shard_size=50)
+        wikiasp_improve(shard_id=shard_id, shard_size=10)
+
+    elif args.task == 'filter_wikisum':
+        wikisum_beir_dir, prediction_file = args.inp
+        out_file = args.out
+        filter_wikisum(wikisum_beir_dir, prediction_file, out_file)
+
+    elif args.task == 'wikisum_improve':
+        query_jsonl_file, from_ind, to_ind = args.inp
+        from_ind = int(from_ind)
+        to_ind = int(to_ind)
+        out_file = args.out
+        wikisum_improve(query_jsonl_file, out_file, from_ind=from_ind, to_ind=to_ind)

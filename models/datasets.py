@@ -1081,11 +1081,15 @@ class WikiSum(BaseDataset):
                     continue
                 question = example['text']
                 ans = example['metadata']['summary']
+                tokenized_references = ' '.join(example['metadata']['ctx_texts'])
+                references = example['metadata']['clean_ctx_texts']
                 output = self.output_template(cot=None, ans=ans)
                 dataset.append({
                     'qid': qid,
                     'question': question,
                     'answer': ans,
+                    'references': references,
+                    'raw_references': tokenized_references,
                     'gold_output': output,
                 })
         return Dataset.from_list(dataset)
@@ -1177,7 +1181,7 @@ class WikiAsp(BaseDataset):
     def load_data(self, hf_dataset_dir_pattern: str):
         def map_fn(example):
             qid = example['exid']
-            references = example['inputs']
+            references = ' '.join(example['inputs'])
             title = example['clean_title'] if 'clean_title' in example else example['title']
             targets = example['clean_targets'] if 'clean_targets' in example else example['targets']
             aspects: List[str] = []
