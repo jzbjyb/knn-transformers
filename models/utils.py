@@ -3,12 +3,15 @@ import random
 import time
 import os
 import logging
+import string
 import asyncio
 import openai
 logging.basicConfig(level=logging.INFO)
 
 
 class Utils:
+    punctuations = set(string.punctuation)
+
     @classmethod
     def is_chat(cls, model: str):
         return 'turbo' in model
@@ -127,7 +130,13 @@ def openai_api_call(*args, **kwargs):
     model = kwargs['model']
     is_chat_model = Utils.is_chat(model)
     if is_chat_model:
+        if len(kwargs['messages']) <= 0:
+            return []
         if type(kwargs['messages'][0]) is list:  # batch request
+            #import json
+            #print(json.dumps(kwargs['messages'][0], indent=True))
+            #print(json.dumps(kwargs['messages'][1], indent=True))
+            #input()
             return asyncio.run(async_chatgpt(*args, **kwargs))
         else:
             return openai.ChatCompletion.create(*args, **kwargs)

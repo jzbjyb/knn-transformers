@@ -1,6 +1,7 @@
 from typing import List, Dict, Tuple, Callable
 import time
 import tqdm
+import uuid
 import numpy as np
 import torch
 from filelock import FileLock
@@ -11,6 +12,10 @@ from beir.retrieval.search.lexical import BM25Search
 from beir.retrieval.search.lexical.elastic_search import ElasticSearch
 from .brave import get_batch_brave_search_results
 from .bing import search_bing_batch
+
+
+def get_random_doc_id():
+    return f'_{uuid.uuid4()}'
 
 
 class SearchEngineConnector:
@@ -47,7 +52,7 @@ class SearchEngineConnector:
                 raise NotImplementedError
             results: Dict[int, Dict[str, Tuple[float, str]]] = {}
             for (qid, query), ser in zip(queries.items(), se_results):
-                results[qid] = {str(r['url']): (self.fake_score, r['snippet']) for did, r in enumerate(ser)}
+                results[qid] = {str(r['url']) + get_random_doc_id(): (self.fake_score, r['snippet']) for did, r in enumerate(ser)}
             return results
         finally:
             if self.file_lock is not None:
@@ -179,7 +184,7 @@ class BM25:
                         if len(_docids) >= topk:
                             break
                 if len(_docids) < topk:  # add dummy docs
-                    _docids += ['-1'] * (topk - len(_docids))
+                    _docids += [get_random_doc_id() for _ in range(topk - len(_docids))]
                     _docs += [''] * (topk - len(_docs))
                 docids.extend(_docids)
                 docs.extend(_docs)

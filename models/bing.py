@@ -76,6 +76,8 @@ def search_bing_api(
                     'title': page['name'],
                     'snippet': page['snippet']
                 }
+                if exclude_domain and exclude_domain in page['url']:
+                    continue
                 results.append(result)
         return results
     except Exception as ex:

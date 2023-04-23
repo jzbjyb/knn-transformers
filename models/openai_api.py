@@ -123,8 +123,8 @@ class QueryAgent:
         self.look_ahead_filter_prob = retrieval_kwargs.get('look_ahead_filter_prob', 0)
         self.look_ahead_mask_prob = retrieval_kwargs.get('look_ahead_mask_prob', 0)
         self.look_ahead_mask_method = retrieval_kwargs.get('look_ahead_mask_method', 'simple')
-        self.look_ahead_pre_retrieval = retrieval_kwargs.get('look_ahead_pre_retrieval', False)
-        assert self.look_ahead_pre_retrieval in {False, 'first', 'all'}
+        self.look_ahead_pre_retrieval = retrieval_kwargs.get('look_ahead_pre_retrieval', '')
+        assert self.look_ahead_pre_retrieval in {'', 'first', 'first-keep', 'all'}
         self.max_query_length = retrieval_kwargs.get('max_query_length', None)
         self.use_full_input_as_query = retrieval_kwargs.get('use_full_input_as_query', False)
         self.only_use_look_ahead = retrieval_kwargs.get('only_use_look_ahead', False)
@@ -206,7 +206,7 @@ class QueryAgent:
                     print('-------------- ret -------------')
             ctx_ids = np.array(ctx_ids)
             ctx_texts = np.array(ctx_texts)
-            assert ctx_ids.shape == ctx_texts.shape == (len(queries), self.ret_topk)
+            assert ctx_ids.shape == ctx_texts.shape == (len(queries), self.ret_topk), f'{ctx_ids.shape}, {ctx_texts.shape}, {queries}'
         else:
             ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
                 decoder_texts=queries,
@@ -398,7 +398,7 @@ class QueryAgent:
             # retrieve
             look_aheads: List[str] = [''] * len(queries)
             if self.look_ahead_steps:  # generate a fixed number tokens for retrieval
-                if (self.look_ahead_pre_retrieval == 'first' and step_ind == 0) or self.look_ahead_pre_retrieval == 'all':  # pre-retrieval for look ahead
+                if (self.look_ahead_pre_retrieval in {'first', 'first-keep'} and step_ind == 0) or self.look_ahead_pre_retrieval == 'all':  # pre-retrieval for look ahead
                     queries_to_issue = [q.get_query_for_retrieval() for i, q in queries]
                     ctx_ids, ctx_texts = self.retrieve(queries_to_issue, is_question=first_ret)
                     for _i, (i, q) in enumerate(queries):
@@ -408,7 +408,12 @@ class QueryAgent:
                             q.ctx = None
                             q.append_retrieval(ret_text, add_index=False)
                         else:
-                            q.update_retrieval(ret_text, method=self.ctx_increase)
+                            q.update_retrieval(list(zip(ret_id, ret_text)), method=self.ctx_increase)
+                        if 'keep' in self.look_ahead_pre_retrieval:
+                            q._ctxs = list(zip(ret_id, ret_text))
+                # check ctx and kept ctx
+                for i, q in queries:
+                    q.check_ctx(method=self.ctx_increase)
                 apireturns = self.complete(
                     list(map(itemgetter(1), queries)),
                     params={'max_tokens': self.look_ahead_steps, 'stop': self.final_stop_sym},
@@ -463,8 +468,11 @@ class QueryAgent:
                                 q.ctx = None
                                 q.append_retrieval(ret_text, add_index=False)
                             else:
-                                q.update_retrieval(ret_text, method=self.ctx_increase)
+                                q.update_retrieval(list(zip(ret_id, ret_text)), method=self.ctx_increase)
             generate_queries = []
+            # check ctx and kept ctx
+            for i, q in queries:
+                q.check_ctx(method=self.ctx_increase)
 
             # complete
             if self.ret_frequency:
@@ -675,8 +683,8 @@ if __name__ == '__main__':
         dataset=(corpus, queries, qrels),
         index_name=args.index_name,
         use_decoder_input_ids=True,
-        engine='elasticsearch',
-        #exclude_domain='wikipedia.org',
+        engine='bing',
+        exclude_domain='wikipedia.org',
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
@@ -694,7 +702,7 @@ if __name__ == '__main__':
         'retrieval_at_beginning': False,
         'look_ahead_steps': 64,
         'look_ahead_truncate_at_boundary': 'sentence',
-        'look_ahead_pre_retrieval': False,
+        'look_ahead_pre_retrieval': 'first-keep',
         'look_ahead_filter_prob': 0.4,
         'look_ahead_mask_prob': 0.4,
         'look_ahead_mask_method': 'wholeterm-askquestion',
@@ -709,7 +717,7 @@ if __name__ == '__main__':
         'truncate_at_prob': 0.0,
         'truncate_at_boundary': 'sentence',
         'append_retrieval': False,
-        'reinit_ctx': True,
+        'reinit_ctx': False,
         'use_ctx_for_examplars': False,
         'use_retrieval_instruction': False,
         'use_instruction': False,

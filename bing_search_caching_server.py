@@ -17,9 +17,9 @@ subscription_key = [l.split('=', 1)[1].strip().strip("'") for l in open('openai_
 def bing_search(query: str, only_domain: str = None, exclude_domain: str = None):
     # modify query based on domain
     if only_domain is not None:
-        query = query + f' site: {only_domain}'
+        query = query + f' site:{only_domain}'
     elif exclude_domain is not None:
-        query = query + f' -site: {exclude_domain}'
+        query = query + f' -site:{exclude_domain}'
 
     # cache hit
     if query in cache:

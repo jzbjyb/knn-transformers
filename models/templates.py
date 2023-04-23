@@ -1,11 +1,12 @@
 from typing import List, Dict, Any, Tuple, Union
 from operator import itemgetter
+import copy
 from collections import namedtuple
 import spacy
 from nltk.tokenize.punkt import PunktSentenceTokenizer
 import tiktoken
 import openai
-from .utils import openai_api_call
+from .utils import openai_api_call, Utils
 
 
 class CtxPrompt:
@@ -32,6 +33,7 @@ class CtxPrompt:
         self.did = None
         self.ctx = ctx
         self.ctxs = ctxs
+        self._ctxs = []  # used for ctx alwayed being used
         self.ctxs_idx = 0
         self.case = case
         self.question = question or case
@@ -134,22 +136,85 @@ class CtxPrompt:
         tokens: List[str],
         probs: List[float],
         low: float = 0.0,
-        min_gap: int = 5):  # the minimal token-based gap to separate two terms
+        min_gap: int = 5,  # TODO: the minimal token-based gap to separate two terms
+        expand: bool = True,
+        exclude_punct: bool = True,
+        api_key: str = None):
         prev_low_pos = -1
         has = False
         terms: List[List[str]] = []
+        spans: List[Tuple[int, int]] = []
         for i, (token, prob) in enumerate(zip(tokens, probs)):
             if prob <= low:
                 if prev_low_pos == -1 or i - prev_low_pos >= min_gap:
                     # new term
                     terms.append([token])
+                    spans.append((i, i + 1))
                 else:
                     # old term
                     for j in range(prev_low_pos + 1, i + 1):
                         terms[-1].append(tokens[j])
+                    spans[-1] = (spans[-1][0], i + 1)
                 prev_low_pos = i
         terms = [''.join(term).strip() for term in terms]
+        if expand:
+            terms = cls.extract_constituents(tokens, spans=spans, api_key=api_key)
+            terms = [t for t in terms if t is not None]
+        if exclude_punct:
+            terms = [t for t in terms if t not in Utils.punctuations]
         return terms
+
+    @classmethod
+    def extract_constituents(cls, tokens: List[str], spans: List[Tuple[int, int]], api_key: str = None, special_symbol: str = '*', debug: bool = False):
+        examplars = [
+            ("Egypt has one of the longest histories of any country, tracing its heritage along *the Nile Delta back to the 6th–4th millennia BCE.", "*the Nile", "the Nile Delta"),
+            ("The settlement, which legal experts said was the largest struck by an American media company, was announced by the two sides and the judge in the case at the *11th hour.", "*11th", "11th hour"),
+            ("In his only surviving love letter to her, written a few months before their wedding, Tyler promised, \"*Whether I float or sink in the stream of fortune, you may be assured of this, that I shall never cease to love you.\"", "*Whether I float", "Whether I float or sink in the stream of fortune")
+        ]
+        prompt_format = lambda sent, term: f"{sent}\n\nGiven the above sentence, extract the term/entity/phrase starting with \"{term}\"."
+
+        # add special_symbol
+        ori_sent = ''.join(tokens)
+        cases: List[Tuple[str, str]] = []
+        for start_ind, end_ind in spans:
+            start_token = tokens[start_ind]
+            n_lead_spaces = len(start_token) - len(start_token.lstrip())
+            if n_lead_spaces <= 0:
+                tokens[start_ind] = f'*{start_token}'
+            else:
+                tokens[start_ind] = f'{start_token[:n_lead_spaces]}*{start_token[n_lead_spaces:]}'
+            sent = ''.join(tokens).strip()
+            term = ''.join(tokens[start_ind:end_ind]).strip()
+            cases.append((sent, term))
+            tokens[start_ind] = start_token  # convert tokens back to the original state
+
+        # call
+        prompts: List[str] = [prompt_format(s, t) for s, t in cases]
+        examplars: List[Tuple[str, str]] = [(prompt_format(s, t), out) for s, t, out in examplars]
+        responses = cls.chatgpt_get_response(prompt=prompts, examplars=[examplars] * len(prompts), api_key=api_key)
+
+        # post-process
+        constituents: List[str] = []
+        for r, (sent, term), prompt in zip(responses, cases, prompts):
+            if term.startswith(special_symbol):  # trim special_symbol
+                term = term[len(special_symbol):].strip()
+            if debug:
+                print('-' * 10)
+                print(prompt)
+                print('-' * 10)
+                print(r)
+                print('-' * 10)
+            r = r.strip().split('\n', 1)[0].strip()
+            if r.startswith(special_symbol):  # trim special_symbol
+                r = r[len(special_symbol):].strip()
+            if not r.startswith(term):  # not an expansion
+                r = None
+            elif r not in ori_sent:  # skip non-existent terms
+                r = None
+            elif not r:  # empty
+                r = None
+            constituents.append(r)
+        return constituents
 
     @classmethod
     def extract_low_confidence_terms(cls, context: str, tokens: List[str], probs: List[float], low: float = 0.0, api_key: str = None, special_symbol: str = '*', debug: bool = False):
@@ -236,16 +301,23 @@ class CtxPrompt:
     @classmethod
     def ask_question_text(cls, context: str, text: str, terms: List[str], api_key: str = None, debug: bool = False, filter_question: bool = True):
         questions: List[str] = []
+        cases: List[str] = []
         for term in terms:
             term = term.strip('"')
-            prompt = f'{context.lstrip()}{text.rstrip()}\n\nGiven the above passage, generate a question that can be used to look up relevant information to verify the following term "{term}".'
-            question = cls.chatgpt_get_response(prompt, api_key=api_key).strip()
+            #case = f'{context.lstrip()}{text.rstrip()}\n\nGiven the above passage, generate a question that can be used to look up relevant information to verify the following term "{term}".'
+            #case = f'{context.lstrip()}{text.rstrip()}\n\nThe term "{term}" in the above passage might be wrong. Generate a question that can be used to look up relevant information to verify it.'
+            case = f'{context.lstrip()}{text.rstrip()}\n\nGiven the above sentence, ask a question to which the answer is the term/entity/phrase "{term}".'
+            cases.append(case)
+        responses = cls.chatgpt_get_response(cases, api_key=api_key)
+        questions: List[str] = []
+        for case, question in zip(cases, responses):
+            question = question.strip()
             if filter_question and not question.endswith('?'):
                 continue
             questions.append(question)
             if debug:
                 print('-' * 10)
-                print(prompt)
+                print(case)
                 print('-' * 10)
                 print(question)
                 print('-' * 10)
@@ -273,7 +345,7 @@ class CtxPrompt:
         if detect_low_terms:
             #text = cls.replace_low_confidence_terms_by_extract(context=context, tokens=tokens, probs=probs, low=low, api_key=api_key, replace_symbol=replace_symbol)
             #terms = cls.extract_low_confidence_terms(context=context, tokens=tokens, probs=probs, low=low, api_key=api_key)
-            terms = cls.extract_low_confidence_terms_rule(tokens=tokens, probs=probs, low=low)
+            terms = cls.extract_low_confidence_terms_rule(tokens=tokens, probs=probs, low=low, api_key=api_key)
         if debug:
             print('2->', terms)
         if decontextualize:
@@ -303,7 +375,7 @@ class CtxPrompt:
             return self.case
 
     def get_all_ctxs(self) -> List[str]:
-        return list(map(itemgetter(1), self.ctxs))
+        return self.ctxs
 
     def add_generation(self, cont: str):
         self.case += cont
@@ -330,12 +402,33 @@ class CtxPrompt:
         self.ctx = None
         self.ind = 1
 
+    def check_ctx(self, method):
+        if self.ctx:
+            return
+        if self._ctxs:
+            self.update_retrieval([], method=method)
+
     def append_retrieval(self, rets: List[str], add_index: bool = False):
         rets = self.clean_rets(rets)
         self.case += self.get_append_retrieval(rets, index=self.ind if add_index else None)  # TODO: fix list bug
         self.ind = (self.ind + 1) if add_index else self.ind
 
-    def update_retrieval(self, rets: List[str], method: str = 'replace', dedup: bool = True, add_index: bool = True):
+    def update_retrieval(
+        self,
+        rets: List[Tuple[str, str]] = [],
+        method: str = 'replace',
+        dedup: bool = True,
+        add_index: bool = True,
+    ):
+        if self._ctxs:  # merge with kept ctxs
+            exist_ids = set([_id for _id, t in self._ctxs])
+            new_rets = copy.deepcopy(self._ctxs)
+            for _id, t in rets:
+                if _id not in exist_ids:
+                    new_rets.append((_id, t))
+                    exist_ids.add(_id)
+            rets = new_rets
+        rets = list(map(itemgetter(1), rets))
         rets = self.clean_rets(rets)
         def merge_rets():
             if add_index:

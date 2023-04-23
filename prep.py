@@ -831,7 +831,7 @@ def compare(
             else:
                 show = False
 
-            if show:  # {'test-2-16963'} {'test-1-17912'}:
+            if show:  # {'1140592'} {'test-2-16963'} {'test-1-17912'}:
                 print('^' * 100)
                 for i, t1 in enumerate(ts1):
                     if type(t1) is str:
@@ -1204,7 +1204,7 @@ def eval(
         retrieval = [r if len(r) == 2 else ('', r) for r in retrieval]  # add a empty query
         qid = example['qid'] if 'qid' in example else example['id']
 
-        #if qid not in {'test-2-16963'}  :#{'test-1-17912'}: #["test-7-16931","test-4-9383","test-4-11991","test-2-4118","test-7-18508","test-2-17359","test-7-4930","test-7-5920","test-0-11051"]:
+        #if qid not in {'1140592'}  :#{'test-1-17912'}: #["test-7-16931","test-4-9383","test-4-11991","test-2-4118","test-7-18508","test-2-17359","test-7-4930","test-7-5920","test-0-11051"]:
         #    continue
 
         question = example['question'] if 'question' in example else None
@@ -1257,6 +1257,7 @@ def eval(
                 add_metric_kvs(WikiMultiHopQA.f1_score(pred_ans, final_ans, ground_truth_id=ans_id))
             elif dataset in {'wikisum'}:
                 add_metric_kvs(WikiSum.entity_f1_score(pred_ans, final_ans))
+                print('qid', qid, WikiAsp.entity_f1_score(pred_ans, final_ans)['ent_f1'])
             elif dataset in {'wikiasp'}:
                 add_metric_kvs(WikiAsp.entity_f1_score(pred_ans, final_ans))
                 print('qid', qid, WikiAsp.entity_f1_score(pred_ans, final_ans))
@@ -1878,7 +1879,7 @@ if __name__ == '__main__':
         'wikiasp_match_title', 'wikiasp_corpus', 'wikiasp_improve',
         'annotate_asqa', 'annotate_asqa_get_hint', 'filter_wikisum', 'wikisum_improve'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='wikiasp', help='input dataset', choices=[
+    parser.add_argument('--dataset', type=str, default='wikisum', help='input dataset', choices=[
         'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'wikiasp', 'eli5', 'wow', 'asqa', 'lmdata'])
     parser.add_argument('--model', type=str, default='gpt-3.5-turbo-0301', help='model name',
                         choices=['code-davinci-002', 'gpt-3.5-turbo-0301'])

@@ -7,7 +7,7 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=wikiasp
+dataset=wikisum_all_beir
 debug_batch_size=1
 batch_size=8
 model=text-davinci-003  # code-davinci-002, gpt-3.5-turbo-0301, text-davinci-003, text-curie-001
@@ -77,14 +77,20 @@ elif [[ ${dataset} == 'wow_train_1k' ]]; then
     input="--input data/wow/train_with_ref.1008.jsonl"
     index_name=wikipedia_dpr
     fewshot=8
+    if [[ ${expensive} == true ]]; then
+        fewshot=4
+    fi
     max_num_examples=1000
     max_generation_len=256
 elif [[ ${dataset} == 'wikisum_all_beir' ]]; then
     input="--input data/wikisum/wikisum_all_beir"
     index_name=wikisum_all_beir
     fewshot=8
+    if [[ ${expensive} == true ]]; then
+        fewshot=4
+    fi
     max_num_examples=1000
-    max_generation_len=256
+    max_generation_len=512
 elif [[ ${dataset} == 'wikiasp' ]]; then
     input="--input \"data/wikiasp/matched_with_bing_test.improved.*\""
     index_name=wikiasp
