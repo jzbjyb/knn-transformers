@@ -1107,7 +1107,7 @@ class WikiSum(BaseDataset):
 
 
 class WikiAsp(BaseDataset):
-    raw_train_data_file: str = ''
+    title_annotation_file: str = 'data/wikiasp/wikiasp_titles_annotated.tsv'
     cot_examplars: List[Dict] = [
         {
             "id": "train-45-14962",
@@ -1189,11 +1189,22 @@ class WikiAsp(BaseDataset):
         title = ' '.join(unquote(url).rsplit('/wiki/', 1)[-1].split('_')) if url else url
         return title
 
+    @classmethod
+    def load_id2title(cls):  # load id2title that is human annotated to corret machine generated title
+        cls.id2title = {}
+        if os.path.exists(cls.title_annotation_file):
+            cls.id2title = dict([tuple(l.strip().split('\t')) for l in open(cls.title_annotation_file)])
+
     def load_data(self, hf_dataset_dir_pattern: str):
+        self.load_id2title()
+
         def map_fn(example):
             qid = example['exid']
-            references = ' '.join(example['inputs'])
             title = example['clean_title'] if 'clean_title' in example else example['title']
+            if qid in self.id2title:
+                logging.info(f'modify title based on annotation for {qid}')
+                title = self.id2title[qid]
+            references = ' '.join(example['inputs'])
             targets = example['clean_targets'] if 'clean_targets' in example else example['targets']
             aspects: List[str] = []
             summary: List[str] = []
@@ -1209,7 +1220,7 @@ class WikiAsp(BaseDataset):
             new_example = {
                 'qid': qid,
                 'question': question,
-                'references': references,
+                'raw_references': references,
                 'answer': summary,
                 'gold_output': output,
             }
@@ -1218,7 +1229,6 @@ class WikiAsp(BaseDataset):
         all_hf_dirs = glob.glob(hf_dataset_dir_pattern.strip('"'))  # TODO: fix this bug
         logging.info(f'loading from {all_hf_dirs}')
         data = concatenate_datasets([load_from_disk(hf_dir) for hf_dir in all_hf_dirs])
-        #data = data.filter(lambda example: example['exid'] == 'test-3-4175')
         return data.map(map_fn)
 
 

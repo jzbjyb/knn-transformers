@@ -16,7 +16,7 @@ from tqdm import tqdm
 import numpy as np
 import torch
 from transformers import AutoTokenizer
-from datasets import load_dataset, concatenate_datasets, load_from_disk
+from datasets import load_dataset, concatenate_datasets, load_from_disk, Dataset
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.evaluation import EvaluateRetrieval
 from beir.retrieval.search.lexical import BM25Search
@@ -1653,16 +1653,19 @@ def  wikiasp_match_title(
 
 
 def wikiasp_improve(
-    dataset_dir_pattern: str = 'data/wikiasp/matched_with_bing_test.improved.*',
+    dataset_dir_pattern: str = 'data/wikiasp/matched_with_bing_test.500',
     title_file: str = 'data/wikiasp/wikiasp_titles.txt',
     shard_id: int = 0,
     num_shards: int = 1,
     shard_size: int = None,
-    output_dir: str = 'data/wikiasp/matched_with_bing_test.furtherimproved',
-    clean_title: bool = False,
-    clean_targets: bool = False,
-    clean_refs: bool = True,
-    nsents_batch_size: int = 32,
+    output_dir: str = 'data/wikiasp/matched_with_bing_test.500.annotated',
+    clean_title: bool = True,
+    clean_targets: bool = True,
+    clean_refs: bool = False,
+    merge_nsents: int = 16,
+    max_char_len: int = 2048 * 2,
+    batch_size: int = 4,
+    sleep_time: int = 3,
 ):
     from models.retriever import BM25
     retriever = BM25(
@@ -1692,37 +1695,87 @@ def wikiasp_improve(
         title = id2title[eid]
 
         if clean_title:  # get title
+            canonicalized_title = CtxPrompt.canonicalize_text(title, field='title').strip()
+            if canonicalized_title.startswith('Title:'):
+                canonicalized_title = canonicalized_title[len('Title:'):].strip()
             query = f'{title} site:en.wikipedia.org'
             urls = retriever.retrieve_and_prepare(decoder_texts=[query], topk=50)[0][0]
+            urls = [url.rsplit('_', 1)[0] for url in urls]
             url = WikiAsp.get_wiki_url(urls)
             real_title = WikiAsp.wiki_url_to_title(url)
             if not real_title:
-                print(f'ERROR: {eid} previous: {example["title"]} new: {real_title}')
+                print(f'ERROR: {eid} previous: {example["title"]} new: {real_title}', flush=True)
                 if eid == 'test-5-18982':
                     real_title = 'Lebia Cruxminor'
             title_consist.append(int(real_title == example['title']))
-            example['clean_title'] = real_title
+            if re.sub('\s+', '', canonicalized_title.lower()) != re.sub('\s+', '', real_title.lower()):
+                print(f'ISSUE\t{eid}\t{canonicalized_title}\t{real_title}\t{title}', flush=True)
+            example['clean_title'] = canonicalized_title
 
         if clean_targets:  # convert target
-            example['clean_targets'] = []
-            for asp, text in example['targets']:
-                new_text = CtxPrompt.canonicalize_text(text, field='paragraph')
-                example['clean_targets'].append((asp, new_text))
+            new_texts = CtxPrompt.canonicalize_text([text for asp, text in example['targets']], field='paragraph')
+            example['clean_targets'] = [(asp, new_text) for (asp, text), new_text in zip(example['targets'], new_texts)]
+            time.sleep(sleep_time)
 
         if clean_refs:
-            example['clean_inputs'] = []
             refs = example['inputs']
-            for b in range(0, len(refs), nsents_batch_size):
-                ref = ' '.join(refs[b:b + nsents_batch_size]).replace('\n', ' ')
-                new_ref = CtxPrompt.canonicalize_text(ref, field='paragraph')
-                example['clean_inputs'].append(new_ref)
-            example['clean_inputs'] = ' '.join(example['clean_inputs'])
+            merge_refs = []
+            # merge
+            i = 0
+            print(len(refs))
+            while i < len(refs):
+                nsents = min(merge_nsents, len(refs) - i)
+                merge = ' '.join(refs[i:i + nsents]).replace('\n', ' ')
+                while len(merge) > max_char_len and nsents > 1:
+                    nsents -= 1
+                    merge = ' '.join(refs[i:i + nsents]).replace('\n', ' ')
+                print(i, nsents)
+                if len(merge) > max_char_len:  # a too long sentence
+                    print('LONG', eid, len(merge))
+                    merge = merge[:max_char_len]
+                merge_refs.append(merge)
+                i = i + nsents
+
+            # clean
+            new_merges = []
+            for b in range(0, len(merge_refs), batch_size):
+                new_merges.extend(CtxPrompt.canonicalize_text(merge_refs[b:b + batch_size], field='paragraph'))
+                time.sleep(sleep_time)
+            example['clean_inputs'] = new_merges
 
         return example
 
     shard = shard.map(map_fn)
     shard.save_to_disk(output_dir + f'.{num_shards}_{shard_id}')
     print(f'title consistency {np.mean(title_consist)}')
+
+
+def wikiasp_downsample(
+    dataset_dir_pattern: str,
+    output_dir: str,
+    size_per_domain: int = 25,
+):
+    data = concatenate_datasets([load_from_disk(f) for f in glob.glob(dataset_dir_pattern)])
+    print(f'#examples {len(data)}')
+
+    # split by domain
+    domain2examples: Dict[str, List] = defaultdict(list)
+    for e in data:
+        domain2examples[e['domain']].append(e)
+    print('old count')
+    print(json.dumps({d: len(es) for d, es in domain2examples.items()}, indent=True))
+
+    # downsample
+    for domain in domain2examples:
+        dsize = len(domain2examples[domain])
+        if dsize > size_per_domain:  # downsample
+            inds = np.random.choice(dsize, size_per_domain, replace=False)
+            domain2examples[domain] = [domain2examples[domain][ind] for ind in inds]
+    print('new count')
+    print(json.dumps({d: len(es) for d, es in domain2examples.items()}, indent=True))
+
+    new_data = Dataset.from_list([e for d, es in domain2examples.items() for e in es])
+    new_data.save_to_disk(output_dir)
 
 
 def wikiasp_corpus(beir_dir: str, paragraph_min_len: int = 100):
@@ -1877,9 +1930,9 @@ if __name__ == '__main__':
         'build_elasticsearch', 'dpr_to_beir', 'mmlu_ret', 'prompt_dump', 'kilt_dataset_to_beir',
         'add_ref_to_kilt', 'jsonl_to_keyvalue', 'mmlu_retrieval_usefulness',
         'wikiasp_match_title', 'wikiasp_corpus', 'wikiasp_improve',
-        'annotate_asqa', 'annotate_asqa_get_hint', 'filter_wikisum', 'wikisum_improve'])
+        'annotate_asqa', 'annotate_asqa_get_hint', 'filter_wikisum', 'wikisum_improve', 'wikiasp_downsample'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='wikisum', help='input dataset', choices=[
+    parser.add_argument('--dataset', type=str, default='wikiasp', help='input dataset', choices=[
         'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'wikiasp', 'eli5', 'wow', 'asqa', 'lmdata'])
     parser.add_argument('--model', type=str, default='gpt-3.5-turbo-0301', help='model name',
                         choices=['code-davinci-002', 'gpt-3.5-turbo-0301'])
@@ -2113,6 +2166,11 @@ if __name__ == '__main__':
         beir_dir = args.out
         wikiasp_corpus(beir_dir)
 
+    elif args.task == 'wikiasp_downsample':
+        input_dir = args.inp[0]
+        output_dir = args.out
+        wikiasp_downsample(input_dir, output_dir)
+
     elif args.task == 'annotate_asqa':
         pred_json_file = args.inp[0]
         out_file = args.out
@@ -2136,7 +2194,7 @@ if __name__ == '__main__':
 
     elif args.task == 'wikiasp_improve':
         shard_id = int(args.inp[0])
-        wikiasp_improve(shard_id=shard_id, shard_size=10)
+        wikiasp_improve(shard_id=shard_id, shard_size=50, sleep_time=0)
 
     elif args.task == 'filter_wikisum':
         wikisum_beir_dir, prediction_file = args.inp

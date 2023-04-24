@@ -92,10 +92,16 @@ class CtxPrompt:
         is_single = type(text) is not list
         if is_single:
             text = [text]
-        prompts = [f'For the following {field}, remove unnecessary spaces and capitalize words properly.\n{field.capitalize()}\n{t}' for t in text]
+        prompts = [f'For the following {field}, remove unnecessary spaces and capitalize words properly.\n{field.capitalize()}:\n{t}' for t in text]
         clean_texts = cls.chatgpt_get_response(prompts, api_key=api_key)
+        post_clean_texts = []
+        for ct, t in zip(clean_texts, text):
+            if ct.strip().startswith(f'Sorry, there is no {field} provided'):
+                post_clean_texts.append(t)
+            else:
+                post_clean_texts.append(ct)
         if debug:
-            for p, ct in zip(prompts, clean_texts):
+            for p, ct in zip(prompts, post_clean_texts):
                 print('-' * 10)
                 print(p)
                 print('-' * 10)
@@ -103,9 +109,9 @@ class CtxPrompt:
                 print('-' * 10)
             input()
         if is_single:
-            assert len(clean_texts) == 1
-            return clean_texts[0]
-        return clean_texts
+            assert len(post_clean_texts) == 1
+            return post_clean_texts[0]
+        return post_clean_texts
 
     @classmethod
     def annotate_low_confidence_terms(cls, tokens: List[str], probs: List[float], low: float = 0.0, special_symbol: str = '*', min_gap: int = 5):
