@@ -7,7 +7,7 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=2wikihop
+dataset=strategyqa
 debug_batch_size=1
 batch_size=8
 model=text-davinci-003  # code-davinci-002, gpt-3.5-turbo-0301, text-davinci-003, text-curie-001
@@ -122,7 +122,7 @@ else
 fi
 
 if [[ ${expensive} == true && ${dataset} != *_annotation ]]; then
-    max_num_examples=$(( max_num_examples < 100 ? max_num_examples : 100 ))
+    max_num_examples=$(( max_num_examples < 300 ? max_num_examples : 300 ))
 fi
 
 if [[ ${index_name} == "test" && ${input} != "none" ]]; then  # build index

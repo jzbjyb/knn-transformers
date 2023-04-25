@@ -333,8 +333,7 @@ class StrategyQA(BaseDataset):
             'answer': 'no',
         }
     ]
-    cot_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer:'
-    cot_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer:'
+    cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a yes or no answer to the following question.\nQuestion: {ques}\nAnswer:'
     cot_output_template = lambda self, cot, ans: f'{cot} So the final answer is {ans}.'
 
     sa_ctx_examplars: List[Dict] = [
