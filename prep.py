@@ -1153,6 +1153,8 @@ def eval(
                     break
             if find is None:
                 logging.warning(f'format error "{pred}"')
+        if pred.strip().endswith('Intermediate answer:'):
+            pred = pred.strip()[:-len('Intermediate answer:')]
         return pred
 
     def get_final_answer_from_pred(pred: str):
@@ -1178,6 +1180,7 @@ def eval(
     followups: List[str] = []
     references: List[str] = []
     num_steps: List[int] = []
+    num_rets: List[int] = []
     retrieval_ratios: List[float] = []
     retrieval_hits: List[int] = []
 
@@ -1186,6 +1189,7 @@ def eval(
         for jf in jsonl_files:
             assert jf.rsplit('.', 1)[1].startswith(consistency_suffix)
         root_file = jsonl_files[0].rsplit('.', 1)[0]
+
     examples_all_files = [[json.loads(l) for l in open(jf)] for jf in jsonl_files]
     assert len(set([len(examples) for examples in examples_all_files])) == 1
     total = len(examples_all_files[0])
@@ -1224,6 +1228,7 @@ def eval(
         final_metrics['tokens'] += len(probs)
 
         retrieval_ratios.append(len(retrieval) / (len(trace) or 1))
+        num_rets.append(len(retrieval))
         rhit = len(set([r for (query, rs) in retrieval for r in rs if r.startswith(qid)]))
         retrieval_hits.append(rhit)
 
@@ -1277,7 +1282,7 @@ def eval(
         if has_search:
             search_per_example.append(len(re.findall('\[Search\(', pred)))
 
-        if debug:
+        if debug and wrongformat:
             print('ID->', qid)
             print('Q->', question)
             print()
@@ -1321,29 +1326,34 @@ def eval(
     total = len(predictions)  # change total
 
     format_list = lambda arr: ', '.join(map(lambda x: '{:.3f}'.format(x), arr.tolist()))
+
+    # overall stats
+    print('#pred\t#gold\t#examples')
+    print(f'{np.mean([len(p) for p in predictions])}\t{np.mean([len(r) if type(r) is str else np.mean([len(_r) for _r in r]) for r in references])}\t{total}')
+    print('')
+
+    # retrieval-related stats
     ret_accs = np.array(ret_accs, dtype=float).mean(0)
     ret_covers = np.array(ret_covers, dtype=float).mean(0)
-    print('retrieval acc\tcoverage')
-    print(f'{format_list(ret_accs)}\t{format_list(ret_covers)}')
-    print(f'#examples with search: {scount}, #avg search per example {np.mean(search_per_example)}, #steps {np.mean(num_steps)}, ret ratio {np.mean(retrieval_ratios)}, ret hit {np.mean(retrieval_hits)}')
+    #print('retrieval acc\tcoverage')
+    #print(f'{format_list(ret_accs)}\t{format_list(ret_covers)}')
+    print(f'#search\t#steps\tret ratio\tret hit')
+    print(f'{np.mean(num_rets)}\t{np.mean(num_steps)}\t{np.mean(retrieval_ratios)}\t{np.mean(retrieval_hits)}')
 
-    # rouge
+    # major metrics
+    print('\t'.join(final_metrics.keys()))
+    print('\t'.join(map(lambda kv: str(np.exp(kv[1] / (final_metrics['tokens'] or 1))) if kv[0] == 'ppl' else str(kv[1] / total), final_metrics.items())))
+    print('')
+
+    # rouge metrics
     if dataset == 'lmdata':
         metrics = {}
     else:
         metrics = metric_func.compute(predictions=predictions, references=references)
     if remove_followup:
         metrics_followup = metric_func.compute(predictions=followups, references=references)
-
-    print('\t'.join(final_metrics.keys()))
-    print('\t'.join(map(lambda kv: str(np.exp(kv[1] / final_metrics['tokens'] or 1)) if kv[0] == 'ppl' else str(kv[1] / total), final_metrics.items())))
-    print('')
-
     print('\t'.join(metrics.keys()))
     print('\t'.join(map(str, metrics.values())))
-    print('#pred\t#gold\t#examples')
-    print(f'{np.mean([len(p) for p in predictions])}\t{np.mean([len(r) if type(r) is str else np.mean([len(_r) for _r in r]) for r in references])}\t{total}')
-    print('')
 
     if remove_followup:
         print('\t'.join(metrics_followup.keys()))
@@ -1932,7 +1942,7 @@ if __name__ == '__main__':
         'wikiasp_match_title', 'wikiasp_corpus', 'wikiasp_improve',
         'annotate_asqa', 'annotate_asqa_get_hint', 'filter_wikisum', 'wikisum_improve', 'wikiasp_downsample'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='wikiasp', help='input dataset', choices=[
+    parser.add_argument('--dataset', type=str, default='2wikihop', help='input dataset', choices=[
         'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'wikiasp', 'eli5', 'wow', 'asqa', 'lmdata'])
     parser.add_argument('--model', type=str, default='gpt-3.5-turbo-0301', help='model name',
                         choices=['code-davinci-002', 'gpt-3.5-turbo-0301'])
@@ -2086,7 +2096,7 @@ if __name__ == '__main__':
             eval(model=args.model,
                 dataset=dataset,
                 jsonl_files=jsonl_files,
-                anchor_text='answer is',
+                anchor_text=['answer is (.*)'],
                 beir_dir='data/2wikimultihopqa/dev_beir')
         elif dataset in {'wikisum', 'wikiasp'}:
             eval(model=args.model,

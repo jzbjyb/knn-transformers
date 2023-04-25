@@ -793,120 +793,142 @@ class WikiMultiHopQA(BaseDataset):
             'question': "When did the director of film Hypocrite (Film) die?",
             'cot': "The film Hypocrite was directed by Miguel Morayta. Miguel Morayta died on 19 June 2013.",
             'answer': "19 June 2013",
-        },
-        {
-            'id': '97954d9408b011ebbd84ac1f6bf848b6',
-            'question': "Do director of film Coolie No. 1 (1995 Film) and director of film The Sensational Trial have the same nationality?",
-            'cot': "Coolie No. 1 (1995 film) was directed by David Dhawan. The Sensational Trial was directed by Karl Freund. David Dhawan's nationality is India. Karl Freund's nationality is Germany. Thus, they do not have the same nationality.",
-            'answer': "no",
+            "type": "compositional",
         },
         {
             'id': '35bf3490096d11ebbdafac1f6bf848b6',
             'question': "Are both Kurram Garhi and Trojkrsti located in the same country?",
             'cot': "Kurram Garhi is located in the country of Pakistan. Trojkrsti is located in the country of Republic of Macedonia. Thus, they are not in the same country.",
             'answer': "no",
+            "type": "comparison",
         },
         {
-            'id': 'c6805b2908a911ebbd80ac1f6bf848b6',
-            'question': "Who was born first out of Martin Hodge and Ivania Martinich?",
-            'cot': "Martin Hodge was born on 4 February 1959. Ivania Martinich was born on 25 July 1995. Thus, Martin Hodge was born first.",
-            'answer': "Martin Hodge",
-        },
-        {
-            'id': '5897ec7a086c11ebbd61ac1f6bf848b6',
-            'question': "Which film came out first, The Night Of Tricks or The Genealogy?",
-            'cot': "The Night of Tricks was published in the year 1939. The Genealogy was published in the year 1979. Thus, The Night of Tricks came out first.",
-            'answer': "The Night Of Tricks",
-        },
-        {
-            'id': 'e5150a5a0bda11eba7f7acde48001122',
-            'question': "When did the director of film Laughter In Hell die?",
-            'cot': "The film Laughter In Hell was directed by Edward L. Cahn. Edward L. Cahn died on August 25, 1963.",
-            'answer': "August 25, 1963",
-        },
-        {
-            'id': 'a5995da508ab11ebbd82ac1f6bf848b6',
-            'question': "Which film has the director died later, The Gal Who Took the West or Twenty Plus Two?",
-            'cot': "The film Twenty Plus Two was directed by Joseph M. Newman. The Gal Who Took the West was directed by Frederick de Cordova. Joseph M. Newman died on January 23, 2006. Fred de Cordova died on September 15, 2001. Thus, the person to die later from the two is Twenty Plus Two.",
-            'answer': "Twenty Plus Two",
+            'id': '97954d9408b011ebbd84ac1f6bf848b6',
+            'question': "Do director of film Coolie No. 1 (1995 Film) and director of film The Sensational Trial have the same nationality?",
+            'cot': "Coolie No. 1 (1995 film) was directed by David Dhawan. The Sensational Trial was directed by Karl Freund. David Dhawan's nationality is India. Karl Freund's nationality is Germany. Thus, they do not have the same nationality.",
+            'answer': "no",
+            "type": "bridge comparison",
         },
         {
             'id': 'cdbb82ec0baf11ebab90acde48001122',
             'question': "Who is Boraqchin (Wife Of Ögedei)'s father-in-law?",
             'cot': "Boraqchin is married to Ögedei Khan. Ögedei Khan's father is Genghis Khan. Thus, Boraqchin's father-in-law is Genghis Khan.",
             'answer': "Genghis Khan",
+            "type": "inference",
+        },
+
+        {
+            'id': 'c6805b2908a911ebbd80ac1f6bf848b6',
+            'question': "Who was born first out of Martin Hodge and Ivania Martinich?",
+            'cot': "Martin Hodge was born on 4 February 1959. Ivania Martinich was born on 25 July 1995. Thus, Martin Hodge was born first.",
+            'answer': "Martin Hodge",
+            "type": "comparison",
         },
         {
-            'id': 'f44939100bda11eba7f7acde48001122',
-            'question': "What is the cause of death of Grand Duke Alexei Alexandrovich Of Russia's mother?",
-            'cot': "The mother of Grand Duke Alexei Alexandrovich of Russia is Maria Alexandrovna. Maria Alexandrovna died from tuberculosis.",
-            'answer': "tuberculosis",
+            'id': 'e5150a5a0bda11eba7f7acde48001122',
+            'question': "When did the director of film Laughter In Hell die?",
+            'cot': "The film Laughter In Hell was directed by Edward L. Cahn. Edward L. Cahn died on August 25, 1963.",
+            'answer': "August 25, 1963",
+            "type": "compositional",
         },
         {
-            'id': '4724c54e08e011ebbda1ac1f6bf848b6',
-            'question': "Which film has the director died earlier, When The Mad Aunts Arrive or The Miracle Worker (1962 Film)?",
-            'cot': "When The Mad Aunts Arrive was directed by Franz Josef Gottlieb. The Miracle Worker (1962 film) was directed by Arthur Penn. Franz Josef Gottlieb died on 23 July 2006. Arthur Penn died on September 28, 2010. Thus, of the two, the director to die earlier is Franz Josef Gottlieb, who directed When The Mad Aunts Arrive.",
-            'answer': "When The Mad Aunts Arrive",
-        },
-        {
-            'id': 'f86b4a28091711ebbdaeac1f6bf848b6',
-            'question': "Which album was released earlier, What'S Inside or Cassandra'S Dream (Album)?",
-            'cot': "What's Inside was released in the year 1995. Cassandra's Dream (album) was released in the year 2008. Thus, of the two, the album to release earlier is What's Inside.",
-            'answer': "What's Inside",
-        },
-        {
-            'id': '13cda43c09b311ebbdb0ac1f6bf848b6',
-            'question': "Are both mountains, Serre Mourene and Monte Galbiga, located in the same country?",
-            'cot': "Serre Mourene is located in Spain. Monte Galbiga is located in Italy. Thus, the two countries are not located in the same country.",
-            'answer': "no",
-        },
-        {
-            'id': '228546780bdd11eba7f7acde48001122',
-            'question': "What is the date of birth of the director of film Best Friends (1982 Film)?",
-            'cot': "The film Best Friends was directed by Norman Jewison. Norman Jewison was born on July 21, 1926.",
-            'answer': "July 21, 1926",
-        },
-        {
-            'id': 'c6f63bfb089e11ebbd78ac1f6bf848b6',
-            'question': "Which film has the director born first, Two Weeks With Pay or Chhailla Babu?",
-            'cot': "Two Weeks with Pay was directed by Maurice Campbell. Chhailla Babu was directed by Joy Mukherjee. Maurice Campbell was born on November 28, 1919. Joy Mukherjee was born on 24 February 1939. Thus, from the two directors, Chhailla Babu was born first, who directed Two Weeks With Pay.",
-            'answer': "Two Weeks With Pay",
+            'id': 'a5995da508ab11ebbd82ac1f6bf848b6',
+            'question': "Which film has the director died later, The Gal Who Took the West or Twenty Plus Two?",
+            'cot': "The film Twenty Plus Two was directed by Joseph M. Newman. The Gal Who Took the West was directed by Frederick de Cordova. Joseph M. Newman died on January 23, 2006. Fred de Cordova died on September 15, 2001. Thus, the person to die later from the two is Twenty Plus Two.",
+            'answer': "Twenty Plus Two",
+            "type": "bridge comparison",
         },
         {
             'id': '1ceeab380baf11ebab90acde48001122',
             'question': "Who is the grandchild of Krishna Shah (Nepalese Royal)?",
             'cot': "Krishna Shah has a child named Rudra Shah. Rudra Shah has a child named Prithvipati Shah. Thus, Krishna Shah has a grandchild named Prithvipati Shah.",
             'answer': "Prithvipati Shah",
+            "type": "inference",
+        },
+
+        {
+            'id': '5897ec7a086c11ebbd61ac1f6bf848b6',
+            'question': "Which film came out first, The Night Of Tricks or The Genealogy?",
+            'cot': "The Night of Tricks was published in the year 1939. The Genealogy was published in the year 1979. Thus, The Night of Tricks came out first.",
+            'answer': "The Night Of Tricks",
+            "type": "comparison",
+        },
+        {
+            'id': 'f44939100bda11eba7f7acde48001122',
+            'question': "What is the cause of death of Grand Duke Alexei Alexandrovich Of Russia's mother?",
+            'cot': "The mother of Grand Duke Alexei Alexandrovich of Russia is Maria Alexandrovna. Maria Alexandrovna died from tuberculosis.",
+            'answer': "tuberculosis",
+            "type": "compositional",
+        },
+        {
+            'id': '4724c54e08e011ebbda1ac1f6bf848b6',
+            'question': "Which film has the director died earlier, When The Mad Aunts Arrive or The Miracle Worker (1962 Film)?",
+            'cot': "When The Mad Aunts Arrive was directed by Franz Josef Gottlieb. The Miracle Worker (1962 film) was directed by Arthur Penn. Franz Josef Gottlieb died on 23 July 2006. Arthur Penn died on September 28, 2010. Thus, of the two, the director to die earlier is Franz Josef Gottlieb, who directed When The Mad Aunts Arrive.",
+            'answer': "When The Mad Aunts Arrive",
+            "type": "bridge comparison",
+        },
+        {
+            'id': 'f86b4a28091711ebbdaeac1f6bf848b6',
+            'question': "Which album was released earlier, What'S Inside or Cassandra'S Dream (Album)?",
+            'cot': "What's Inside was released in the year 1995. Cassandra's Dream (album) was released in the year 2008. Thus, of the two, the album to release earlier is What's Inside.",
+            'answer': "What's Inside",
+            "type": "comparison",
+        },
+        {
+            'id': '13cda43c09b311ebbdb0ac1f6bf848b6',
+            'question': "Are both mountains, Serre Mourene and Monte Galbiga, located in the same country?",
+            'cot': "Serre Mourene is located in Spain. Monte Galbiga is located in Italy. Thus, the two countries are not located in the same country.",
+            'answer': "no",
+            "type": "comparison",
+        },
+        {
+            'id': '228546780bdd11eba7f7acde48001122',
+            'question': "What is the date of birth of the director of film Best Friends (1982 Film)?",
+            'cot': "The film Best Friends was directed by Norman Jewison. Norman Jewison was born on July 21, 1926.",
+            'answer': "July 21, 1926",
+            "type": "compositional",
+        },
+        {
+            'id': 'c6f63bfb089e11ebbd78ac1f6bf848b6',
+            'question': "Which film has the director born first, Two Weeks With Pay or Chhailla Babu?",
+            'cot': "Two Weeks with Pay was directed by Maurice Campbell. Chhailla Babu was directed by Joy Mukherjee. Maurice Campbell was born on November 28, 1919. Joy Mukherjee was born on 24 February 1939. Thus, from the two directors, Chhailla Babu was born first, who directed Two Weeks With Pay.",
+            'answer': "Two Weeks With Pay",
+            "type": "bridge comparison",
         },
         {
             'id': '8727d1280bdc11eba7f7acde48001122',
             'question': "When was the director of film P.S. Jerusalem born?",
             'cot': "P.S. Jerusalem was directed by Danae Elon. Danae Elon was born on December 23, 1970.",
             'answer': "December 23, 1970",
+            "type": "compositional",
         },
         {
             'id': 'f1ccdfee094011ebbdaeac1f6bf848b6',
             'question': "Which album was released more recently, If I Have to Stand Alone or Answering Machine Music?",
             'cot': "If I Have to Stand Alone was published in the year 1991. Answering Machine Music was released in the year 1999. Thus, of the two, the album to release more recently is Answering Machine Music.",
             'answer': "Answering Machine Music",
+            "type": "comparison",
         },
         {
             'id': '79a863dc0bdc11eba7f7acde48001122',
             'question': "Where did the director of film Maddalena (1954 Film) die?",
             'cot': "The film Maddalena is directed by Augusto Genina. Augusto Genina died in Rome.",
             'answer': "Rome",
+            "type": "compositional",
         },
         {
             'id': '028eaef60bdb11eba7f7acde48001122',
             'question': "When did the director of film The Boy And The Fog die?",
             'cot': "The director of The Boy and the Fog is Roberto Gavaldón. Roberto Gavaldón died on September 4, 1986.",
             'answer': "September 4, 1986",
+            "type": "compositional",
         },
         {
             'id': 'af8c6722088b11ebbd6fac1f6bf848b6',
             'question': "Are the directors of films The Sun of the Sleepless and Nevada (1927 film) both from the same country?",
             'cot': "The director of Sun of the Sleepless is Temur Babluani. The director of Nevada (1927 film) is John Waters. John Waters is from the country of America. Temur Babluani is from the country of Georgia. Thus, John Walters and Temur Babluani are not from the same country.",
             'answer': "no",
+            "type": "bridge comparison",
         }
     ]
     cot_interleave_demo_input_template = cot_interleave_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer:'
@@ -958,7 +980,7 @@ class WikiMultiHopQA(BaseDataset):
                 ans = example['metadata']['answer']
                 ans_id = example['metadata']['answer_id']
                 ctxs = example['metadata']['ctxs']
-                output = self.output_template(cot=None, ans=ans)
+                output = self.output_template(cot='', ans=ans)
                 dataset.append({
                     'qid': qid,
                     'question': question,
@@ -1093,8 +1115,6 @@ class WikiSum(BaseDataset):
                 tokenized_references = ' '.join(example['metadata']['ctx_texts'])
                 references = example['metadata']['clean_ctx_texts']
                 output = self.output_template(cot=None, ans=ans)
-                #if qid != '1140592':
-                #    continue
                 dataset.append({
                     'qid': qid,
                     'question': question,

@@ -17,6 +17,7 @@ from multiprocessing.managers import BaseManager
 from transformers import AutoTokenizer, GPT2TokenizerFast
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.search.lexical import BM25Search
+from tenacity import retry, stop_after_attempt, wait_random_exponential, wait_fixed
 import openai
 from .retriever import BM25
 from .templates import CtxPrompt, ApiReturn, RetrievalInstruction
@@ -167,6 +168,7 @@ class QueryAgent:
         prefix = text[:last_position]
         return prefix, last_position
 
+    @retry(wait=wait_fixed(3), stop=stop_after_attempt(3))
     def retrieve(
         self,
         queries: List[Union[str, List[str]]],
@@ -496,31 +498,38 @@ class QueryAgent:
                     ar.truncate_at_substring(self.final_stop_sym)
             elif self.ret_boundary:
                 if self.forbid_generate_step and self.retrieval_trigers and step_ind > 0:  # start from the second step to forbid the force_generate token
-                    apireturns = self.complete(
+                    _apireturns = self.complete(
                         list(map(itemgetter(1), queries)),
                         params={'max_tokens': min(self.max_generation_len - max_gen_len, self.forbid_generate_step), 'stop': self.final_stop_sym},
                         forbid_generate=self.force_generate,
                         api_key=api_key)
-                    for (i, query), ar in zip(queries, apireturns):
-                        cont = ar.text
-                        final_outputs[i] += cont
-                        final_probs[i].extend(ar.token_probs or [])
-                        final_queries[i] = query
-                        traces[i].append((ar.prompt, cont))
-                        query.add_generation(cont)
+                    for (i, query), ar in zip(queries, _apireturns):
+                        if not ar.is_empty:
+                            cont = ar.text
+                            final_outputs[i] += cont
+                            final_probs[i].extend(ar.token_probs or [])
+                            final_queries[i] = query
+                            traces[i].append((ar.prompt, cont))
+                            query.add_generation(cont)
                 apireturns = self.complete(
                     list(map(itemgetter(1), queries)),
                     params={'max_tokens': self.max_generation_len - max_gen_len, 'stop': self.ret_boundary},
                     force_generate=self.force_generate,
                     api_key=api_key)
+                if self.forbid_generate_step and self.retrieval_trigers and step_ind > 0:  # if the previous generation is empty, no need to continue
+                    assert len(apireturns) == len(_apireturns)
+                    apireturns = [_ar if _ar.is_empty else ar for ar, _ar in zip(apireturns, _apireturns)]
+
                 # used to collect the generation with ret_boundary
                 min_cont_len = 100000
                 for i, ar in enumerate(apireturns):
                     cont, reason = ar.text, ar.finish_reason
-                    if ar.has_endoftext:  # 003 stops proactively by returning endoftext
+                    if ar.has_endoftext or ar.is_empty:  # 003 stops proactively by returning endoftext or when nothing is generated
+                        reason = 'stop'
                         if self.retrieval_trigers:
                             generate_queries.append('')
                     elif reason == 'stop' and self.final_stop_sym not in cont:  # stop at ret_boundary
+                        reason = 'boundary'
                         remove_query = False
                         if self.retrieval_trigers:  # extract queries from generation
                             assert len(self.retrieval_trigers) == 1
@@ -534,13 +543,13 @@ class QueryAgent:
                                     generate_queries.append(cont[found_query.span()[1]:].strip())
                                     if self.forbid_generate_step:
                                         remove_query = True
-                                        cont = cont[:found_query.span()[0]]  # remove queries
-                                else:
+                                        cont = cont[:found_query.span()[0]].rstrip()  # remove queries
+                                else:  # no retrieval query deteced, the generation is finished
                                     generate_queries.append('')
+                                    reason = 'stop'
                         assert len(self.ret_boundary) == 1
-                        if not remove_query:
+                        if not remove_query and reason == 'boundary':
                             cont += self.ret_boundary[0]
-                        reason = 'boundary'
                         #assert len(cont) > 0, 'empty generation will cause dead lock'
                     else:
                         if self.retrieval_trigers:
@@ -688,17 +697,17 @@ if __name__ == '__main__':
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 1,
+        'topk': 3,
         'use_ctx': False,
         'frequency': 0,
-        'boundary': [],
+        #'boundary': [],
         #'boundary': ['Intermediate answer:'],
-        #'boundary': ['")]'],
+        'boundary': [')]'],
         #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 16,
-        'use_full_input_as_query': False,
+        'max_query_length': 64,
+        'use_full_input_as_query': True,
         'retrieval_at_beginning': False,
         'look_ahead_steps': 0,
         'look_ahead_truncate_at_boundary': None,
@@ -706,21 +715,21 @@ if __name__ == '__main__':
         'look_ahead_mask_prob': 0.0,
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
-        'retrieval_trigers': [],
+        #'retrieval_trigers': [],
         #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
-        #'retrieval_trigers': [('\[Search\("', '")]')],
+        'retrieval_trigers': [('\[Search\(', ')]')],
         #'retrieval_trigers': [(None, '. ')],
-        'force_generate': None,
-        'forbid_generate_step': 0,
+        'force_generate': (685, 2.0),
+        'forbid_generate_step': 5,
         'truncate_at_prob': 0.0,
         'truncate_at_boundary': None,
         'append_retrieval': False,
         'use_ctx_for_examplars': False,
-        'use_retrieval_instruction': False,
+        'use_retrieval_instruction': 'cot',
         'use_instruction': False,
         'format_reference_method': 'searchresultsrank',
         'ctx_position': 'before_case',
-        'prompt_type': 'cot',
+        'prompt_type': 'cot_ret',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,

@@ -3,6 +3,7 @@ from operator import itemgetter
 import copy
 from collections import namedtuple
 import spacy
+import stanza
 from nltk.tokenize.punkt import PunktSentenceTokenizer
 import tiktoken
 import openai
@@ -305,16 +306,33 @@ class CtxPrompt:
         return decontext_text
 
     @classmethod
-    def ask_question_text(cls, context: str, text: str, terms: List[str], api_key: str = None, debug: bool = False, filter_question: bool = True):
+    def ask_question_text(
+        cls,
+        context: str,
+        text: str,
+        terms: List[str],
+        api_key: str = None,
+        debug: bool = False,
+        filter_question: bool = True,
+        ask_full_text: bool = False,
+        use_full_text: bool = True,
+    ):
         questions: List[str] = []
         cases: List[str] = []
         for term in terms:
             term = term.strip('"')
             #case = f'{context.lstrip()}{text.rstrip()}\n\nGiven the above passage, generate a question that can be used to look up relevant information to verify the following term "{term}".'
             #case = f'{context.lstrip()}{text.rstrip()}\n\nThe term "{term}" in the above passage might be wrong. Generate a question that can be used to look up relevant information to verify it.'
-            case = f'{context.lstrip()}{text.rstrip()}\n\nGiven the above sentence, ask a question to which the answer is the term/entity/phrase "{term}".'
+            case = f'{context.lstrip()}{text.rstrip()}\n\nGiven the above passage, ask a question to which the answer is the term/entity/phrase "{term}".'
             cases.append(case)
+        if ask_full_text and len(terms) <= 0:
+            case = f'{context.lstrip()}{text.rstrip()}\n\nGiven the above passage, ask a question to which the answer is the information contained in the last sentence "{text.strip()}".'
+            cases.append(case)
+        elif use_full_text and len(terms) <= 0:
+            return [text.strip()]
+
         responses = cls.chatgpt_get_response(cases, api_key=api_key)
+
         questions: List[str] = []
         for case, question in zip(cases, responses):
             question = question.strip()
@@ -564,8 +582,10 @@ Sentence = namedtuple('Sentence', 'text start_char end_char')
 
 class ApiReturn:
     EOS = '<|endoftext|>'
-    #nlp = spacy.load('en_core_web_sm')
+    spacy_nlp = spacy.load('en_core_web_sm')
     psentencizer = PunktSentenceTokenizer()
+    stanza_nlp = stanza.Pipeline(lang='en', processors='tokenize')
+    use_sentencizer = 'nltk'
     min_sent_len = 5
 
     def __init__(
@@ -630,11 +650,18 @@ class ApiReturn:
     def has_endoftext(self):
         return self.EOS in self.tokens
 
+    @property
+    def is_empty(self):
+        return len(self.text.strip()) == 0
 
     @classmethod
     def get_sent(cls, text: str, position: str = 'begin'):
-        #sents = list(cls.nlp(text).sents)
-        sents = [Sentence(text[s:e], s, e) for s, e in cls.psentencizer.span_tokenize(text)]
+        if cls.use_sentencizer == 'spacy':
+            sents = list(cls.spacy_nlp(text).sents)
+        elif cls.use_sentencizer == 'nltk':
+            sents = [Sentence(text[s:e], s, e) for s, e in cls.psentencizer.span_tokenize(text)]
+        else:
+            raise NotImplementedError
         if position == 'begin':
             break_at = len(text)
             for sent in sents:
@@ -690,8 +717,16 @@ class ApiReturn:
             return self
 
         if unit == 'sentence':
-            #sents = list(self.nlp(self.text).sents)
-            sents = [Sentence(self.text[s:e], s, e) for s, e in self.psentencizer.span_tokenize(self.text)]
+            if self.use_sentencizer == 'spacy':
+                sents = list(self.spacy_nlp(self.text).sents)
+                #print(self.text)
+                #print('---')
+                #print(list(map(str, sents)))
+                #print('---')
+            elif self.use_sentencizer == 'nltk':
+                sents = [Sentence(self.text[s:e], s, e) for s, e in self.psentencizer.span_tokenize(self.text)]
+            else:
+                raise NotImplementedError
             break_at = len(self.text)
             for sent in sents:
                 # remove trailing spaces which is usually tokenized into the next token of the next sentence by GPT tokeniers
@@ -785,25 +820,25 @@ class ApiReturn:
 
 class RetrievalInstruction:
     cot_instruction: Dict[str, Any] = {
-        'retrieval': '1. You should use a Search API to look up information. You can do so by writing "[Search(term)]" where "term" is the search term you want to look up. For example:',
-        'task': '2. You should answer questions by thinking step-by-step. You can do so by first write out the reasoning steps and then draw the conclusion. For example:',
-        'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw then conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible.',
+        'retrieval': 'Skill 1. Use the Search API to look up relevant information by writing "[Search(term)]" where "term" is the search term you want to look up. For example:',
+        'task': 'Skill 2. Answer questions by thinking step-by-step. First, write out the reasoning steps, then draw the conclusion. For example:',
+        'ensemble': 'Now, combine the aforementioned two skills. First, write out the reasoning steps, then draw the conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible.',
         #'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw you conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible. However, you should not directly copy chunks of words from "reference".',
         'examplars': [
             {
                 'question': 'But what are the risks during production of nanomaterials?',
                 'ctxs': [(None, 'The increased production of manufactured nanomaterials (MNMs) and their use in consumer and industrial products means that workers in all countries will be at the front line of any exposure, placing...')],
-                'answer': '[Search("nanomaterial production risks")] Some nanomaterials may give rise to various kinds of lung damage.',
+                'answer': '[Search(nanomaterial production risks)] Some nanomaterials may give rise to various kinds of lung damage.',
             },
             {
                 'question': 'The colors on the flag of Ghana have the following meanings.',
                 'ctxs': [(None, "The flag of Ghana comprises of the Pan-African colors of red, yellow and green. These colors are horizontal stripes that make up the background of the flag. Red is represents the nation's fight for independence, the gold is a sign of the country's mineral wealth, and the green is a representation of the country's natural wealth...")],
-                'answer': 'Red is for [Search("Ghana flag red meaning")] the blood of martyrs, green for forests, and gold for mineral wealth.',
+                'answer': 'Red is for [Search(Ghana flag red meaning)] the blood of martyrs, green for forests, and gold for mineral wealth.',
             },
             {
                 'question': 'Metformin is the first-line drug for what?',
                 'ctxs': [(None, "Metformin, sold under the brand name Glucophage, among others, is the main first-line medication for the treatment of type 2 diabetes,[6][7][8][9] particularly in people who are overweight.[7] It is also used in the treatment of polycystic ovary syndrome...")],
-                'answer': '[Search("Metformin first-line drug")] patients with type 2 diabetes and obesity.'
+                'answer': '[Search(Metformin first-line drug)] patients with type 2 diabetes and obesity.'
             }
         ]
     }
@@ -821,6 +856,7 @@ class RetrievalInstruction:
         self.fewshot = len(self.instruction['examplars']) if fewshot is None else self.fewshot
 
     def format(self, use_ctx: bool = False) -> Tuple[str, str]:
+        use_ctx = False  # no ctx for examplars
         demos: List[str] = []
         for i in range(self.fewshot):
             q = self.instruction['examplars'][i]['question']

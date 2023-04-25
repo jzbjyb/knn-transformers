@@ -169,6 +169,7 @@ class BM25:
                 queries = self.tokenizer.batch_decode(tokenized, skip_special_tokens=True)
 
             # retrieve
+            #print('REAL QUERY:', queries[0])
             results: Dict[str, Dict[str, Tuple[float, str]]] = self.retriever.retrieve(self.corpus, dict(zip(range(len(queries)), queries)), disable_tqdm=True)
 
             # prepare outputs
