@@ -3,6 +3,7 @@ import random
 import time
 import os
 import logging
+import copy
 import string
 import asyncio
 import openai
@@ -57,6 +58,7 @@ def retry_with_exponential_backoff(
 
             try:
                 # get key
+                _kwargs = copy.deepcopy(kwargs)
                 if 'api_key' in kwargs:
                     ori_api_key = kwargs['api_key']
                     if type(ori_api_key) is tuple:  # get a key through a call
@@ -64,22 +66,22 @@ def retry_with_exponential_backoff(
                         api_key = get_key_func()
                     else:  # a specified key
                         api_key = ori_api_key or os.getenv('OPENAI_API_KEY')
-                    kwargs['api_key'] = api_key
+                    _kwargs['api_key'] = api_key
 
                 # query API
                 start_t = time.time()
-                logging.info(f'API call start: {kwargs.get("api_key", "")[-5:]}')
-                results = func(*args, **kwargs)
-                logging.info(f'API call end: {kwargs.get("api_key", "")[-5:]}')
+                logging.info(f'API call start: {_kwargs.get("api_key", "")[-5:]}')
+                results = func(*args, **_kwargs)
+                logging.info(f'API call end: {_kwargs.get("api_key", "")[-5:]}')
                 return results
 
             # retry on specific errors
             except errors_to_catch as e:
                 # check if the key is useless
-                if e.json_body is not None and 'error' in e.json_body and 'type' in e.json_body['error'] and e.json_body['error']['type'] == 'insufficient_quota':  # quota error
+                if hasattr(e, 'json_body') and e.json_body is not None and 'error' in e.json_body and 'type' in e.json_body['error'] and e.json_body['error']['type'] == 'insufficient_quota':  # quota error
                     logging.info(f'NO QUOTA: {api_key[-5:]}')
                     forbid_key = True
-                if e.json_body is not None and 'error' in e.json_body and 'type' in e.json_body['error'] and e.json_body['error']['code'] == 'account_deactivated':  # ban error
+                if hasattr(e, 'json_body') and e.json_body is not None and 'error' in e.json_body and 'type' in e.json_body['error'] and e.json_body['error']['code'] == 'account_deactivated':  # ban error
                     logging.info(f'BAN: {api_key[-5:]}')
                     forbid_key = True
 

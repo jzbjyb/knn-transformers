@@ -1907,8 +1907,7 @@ class ASQA(BaseDataset):
 
     general_hint_in_output_examplars = general_hint_in_input_examplars
     general_hint_in_output_output_template = general_hint_in_input_output_template
-    general_hint_in_output_demo_input_template = lambda self, ques: f'Given an ambiguous question, figure out its interpretations and answer them one by one.\nQuestion: {ques}\nAnswer:'
-    general_hint_in_output_test_input_template = general_hint_in_output_demo_input_template
+    general_hint_in_output_test_input_template = general_hint_in_output_demo_input_template = lambda self, ques: f'Given an ambiguous question, figure out its interpretations and answer them one by one.\nQuestion: {ques}\nAnswer:'
 
     specific_hint_in_input_examplars = general_hint_in_input_examplars
     specific_hint_in_input_output_template = cot_output_template
