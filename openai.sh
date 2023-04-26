@@ -7,7 +7,7 @@ source openai_keys.sh
 num_keys=${#keys[@]}
 
 output=$1
-dataset=asqa
+dataset=wikiasp
 debug_batch_size=1
 batch_size=8
 model=text-davinci-003  # code-davinci-002, gpt-3.5-turbo-0301, text-davinci-003, text-curie-001
@@ -93,6 +93,7 @@ elif [[ ${dataset} == 'wikisum_all_beir' ]]; then
     max_generation_len=512
 elif [[ ${dataset} == 'wikiasp' ]]; then
     input="--input \"data/wikiasp/matched_with_bing_test.500.annotated\""
+    #input="--input \"data/wikiasp/matched_with_bing_test.improved.*\""
     index_name=wikiasp
     fewshot=8
     if [[ ${expensive} == true ]]; then
@@ -122,7 +123,7 @@ else
 fi
 
 if [[ ${expensive} == true && ${dataset} != *_annotation ]]; then
-    max_num_examples=$(( max_num_examples < 100 ? max_num_examples : 100 ))
+    max_num_examples=$(( max_num_examples < 500 ? max_num_examples : 500 ))
 fi
 
 if [[ ${index_name} == "test" && ${input} != "none" ]]; then  # build index

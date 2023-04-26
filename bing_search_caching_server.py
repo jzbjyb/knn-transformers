@@ -1,3 +1,4 @@
+from typing import List
 import json
 import os
 from pprint import pprint
@@ -14,12 +15,12 @@ subscription_key = [l.split('=', 1)[1].strip().strip("'") for l in open('openai_
 
 @sleep_and_retry
 @limits(calls=50, period=1)
-def bing_search(query: str, only_domain: str = None, exclude_domain: str = None):
+def bing_search(query: str, only_domain: str = None, exclude_domains: List[str] = []):
     # modify query based on domain
     if only_domain is not None:
         query = query + f' site:{only_domain}'
-    elif exclude_domain is not None:
-        query = query + f' -site:{exclude_domain}'
+    elif exclude_domains:
+        query = query + ' ' + ' '.join([f'-site:{d}' for d in exclude_domains])
 
     # cache hit
     if query in cache:
@@ -66,11 +67,12 @@ def bing_request():
         data = request.get_json()
         query = data.get('query', None)
         only_domain = data.get('+domain', None)
-        exclude_domain = data.get('-domain', None)
+        exclude_domains = data.get('-domain', '')
+        exclude_domains = exclude_domains.split(',') if exclude_domains else []
         result = bing_search(
             query=query,
             only_domain=only_domain,
-            exclude_domain=exclude_domain)
+            exclude_domains=exclude_domains)
         if result is None:
             return jsonify({"message": "ERROR: Request Failed"}), 404
         else:

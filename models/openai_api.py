@@ -692,12 +692,12 @@ if __name__ == '__main__':
         dataset=(corpus, queries, qrels),
         index_name=args.index_name,
         use_decoder_input_ids=True,
-        engine='elasticsearch',
-        #exclude_domain='wikipedia.org',
+        engine='bing',
+        exclude_domains=['wikipedia.org', 'wikiwand.com', 'wiki2.org', 'wikimedia.org'],
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
     retrieval_kwargs = {
         'retriever': retriever,
-        'topk': 3,
+        'topk': 5,
         'use_ctx': True,
         'frequency': 64,
         'boundary': [],
@@ -712,9 +712,9 @@ if __name__ == '__main__':
         'look_ahead_steps': 64,
         'look_ahead_truncate_at_boundary': 'sentence',
         'look_ahead_pre_retrieval': 'first-keep',
-        'look_ahead_filter_prob': 0.7,
-        'look_ahead_mask_prob': 0.7,
-        'look_ahead_mask_method': 'simple',
+        'look_ahead_filter_prob': 0.4,
+        'look_ahead_mask_prob': 0.4,
+        'look_ahead_mask_method': 'wholeterm-askquestion',
         'look_ahead_boundary': [],
         'only_use_look_ahead': True,
         'retrieval_trigers': [],
@@ -732,12 +732,13 @@ if __name__ == '__main__':
         'use_instruction': False,
         'format_reference_method': 'searchresultsrank',
         'ctx_position': 'before_case',
-        'prompt_type': 'general_hint_in_input',
+        'prompt_type': 'cot',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,
         'debug': args.debug,
     }
+
     if args.final_stop_sym:
         retrieval_kwargs['final_stop_sym'] = args.final_stop_sym
     else:

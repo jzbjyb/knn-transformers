@@ -18,7 +18,7 @@ def multi_gpu(
         num_shards = len(devices)
         self = args[0]
         data = args[1]
-        shard_size = round(len(data) / num_shards)
+        shard_size = int(np.ceil(len(data) / num_shards))
         all_result = []
         with Pool(num_shards) as pool:
             shards = [data[i * shard_size:i * shard_size + shard_size] for i in range(num_shards)]

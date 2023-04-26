@@ -23,14 +23,14 @@ class SearchEngineConnector:
         self,
         engine: str,
         only_domain: str = None,
-        exclude_domain: str = None,
+        exclude_domains: List[str] = [],
         file_lock: FileLock = None,
     ):
         self.fake_score = 0
         assert engine in {'brave', 'bing'}
         self.engine = engine
         self.only_domain = only_domain
-        self.exclude_domain = exclude_domain
+        self.exclude_domains = exclude_domains
         self.file_lock = file_lock
 
     def retrieve(
@@ -47,7 +47,7 @@ class SearchEngineConnector:
                 se_results = get_batch_brave_search_results(qs)
             elif self.engine == 'bing':
                 se_results = search_bing_batch(
-                    qs, only_domain=self.only_domain, exclude_domain=self.exclude_domain)
+                    qs, only_domain=self.only_domain, exclude_domains=self.exclude_domains)
             else:
                 raise NotImplementedError
             results: Dict[int, Dict[str, Tuple[float, str]]] = {}

@@ -1942,7 +1942,7 @@ if __name__ == '__main__':
         'wikiasp_match_title', 'wikiasp_corpus', 'wikiasp_improve',
         'annotate_asqa', 'annotate_asqa_get_hint', 'filter_wikisum', 'wikisum_improve', 'wikiasp_downsample'])
     parser.add_argument('--inp', type=str, default=None, nargs='+', help='input file')
-    parser.add_argument('--dataset', type=str, default='asqa', help='input dataset', choices=[
+    parser.add_argument('--dataset', type=str, default='wikiasp', help='input dataset', choices=[
         'strategyqa', 'mmlu', 'hotpotqa', '2wikihop', 'wikisum', 'wikiasp', 'eli5', 'wow', 'asqa', 'lmdata'])
     parser.add_argument('--model', type=str, default='gpt-3.5-turbo-0301', help='model name',
                         choices=['code-davinci-002', 'gpt-3.5-turbo-0301'])

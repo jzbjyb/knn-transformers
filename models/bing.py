@@ -52,15 +52,15 @@ def search_bing(query: str, count: int = 10, max_query_per_sec: int = 100, debug
 def search_bing_api(
         query: str,
         only_domain: str = None,
-        exclude_domain: str = None,
+        exclude_domains: List[str] = [],
         count: int = 10,
     ):
     # prepare request
     data = {'query': query}
     if only_domain:
         data['+domain'] = only_domain
-    elif exclude_domain:
-        data['-domain'] = exclude_domain
+    elif exclude_domains:
+        data['-domain'] = ','.join(exclude_domains)
     data = json.dumps(data)
     headers = {'X-Api-Key': 'jzbjybnb', 'Content-Type': 'application/json'}
     try:
@@ -76,9 +76,14 @@ def search_bing_api(
                     'title': page['name'],
                     'snippet': page['snippet']
                 }
-                if exclude_domain and exclude_domain in page['url']:
-                    continue
-                results.append(result)
+                exclude = False
+                if exclude_domains:
+                    for d in exclude_domains:
+                        if d in page['url']:
+                            exclude = True
+                            break
+                if not exclude:
+                    results.append(result)
         return results
     except Exception as ex:
         raise ex
