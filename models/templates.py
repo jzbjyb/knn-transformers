@@ -146,6 +146,7 @@ class CtxPrompt:
         min_gap: int = 5,  # TODO: the minimal token-based gap to separate two terms
         expand: bool = True,
         exclude_punct: bool = True,
+        always_extract_low: bool = False,
         api_key: str = None):
         prev_low_pos = -1
         has = False
@@ -169,7 +170,10 @@ class CtxPrompt:
         if expand:
             new_terms = cls.extract_constituents(tokens, spans=spans, api_key=api_key)
             assert len(new_terms) == len(terms)
-            terms = [nt if nt is not None else t for nt, t in zip(new_terms, terms)]
+            if always_extract_low:
+                terms = [nt if nt is not None else t for nt, t in zip(new_terms, terms)]
+            else:
+                terms = [nt for nt in new_terms if nt is not None]
         if exclude_punct:
             terms = [t for t in terms if t not in Utils.punctuations]
         return terms
