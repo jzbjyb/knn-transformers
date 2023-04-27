@@ -164,9 +164,12 @@ class CtxPrompt:
                     spans[-1] = (spans[-1][0], i + 1)
                 prev_low_pos = i
         terms = [''.join(term).strip() for term in terms]
+        if len(spans) <= 0:
+            return terms
         if expand:
-            terms = cls.extract_constituents(tokens, spans=spans, api_key=api_key)
-            terms = [t for t in terms if t is not None]
+            new_terms = cls.extract_constituents(tokens, spans=spans, api_key=api_key)
+            assert len(new_terms) == len(terms)
+            terms = [nt if nt is not None else t for nt, t in zip(new_terms, terms)]
         if exclude_punct:
             terms = [t for t in terms if t not in Utils.punctuations]
         return terms

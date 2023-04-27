@@ -938,8 +938,118 @@ class WikiMultiHopQA(BaseDataset):
     cot_interleave_ret_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search):'
     cot_interleave_ret_output_template = cot_interleave_output_template
 
+    sa_interleave_examplars: List[Dict] = [
+        {
+            'id': '5811079c0bdc11eba7f7acde48001122',
+            'question': "When did the director of film Hypocrite (Film) die?",
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: Who directed the film Hypocrite?\n"
+                "Intermediate answer: Miguel Morayta.\n"
+                "Follow up: When did Miguel Morayta die?\n"
+                "Intermediate answer: 19 June 2013."
+            ),
+            'answer': "19 June 2013",
+            "type": "compositional",
+        },
+        {
+            'id': '35bf3490096d11ebbdafac1f6bf848b6',
+            'question': "Are both Kurram Garhi and Trojkrsti located in the same country?",
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: In which country is Kurram Garhi located?\n"
+                "Intermediate answer: Pakistan.\n"
+                "Follow up: In which country is Trojkrsti located?\n"
+                "Intermediate answer: Republic of Macedonia."
+            ),
+            'answer': "no",
+            "type": "comparison",
+        },
+        {
+            'id': '97954d9408b011ebbd84ac1f6bf848b6',
+            'question': "Do director of film Coolie No. 1 (1995 Film) and director of film The Sensational Trial have the same nationality?",
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: Who directed the film Coolie No. 1 (1995 Film)?\n"
+                "Intermediate answer: David Dhawan.\n"
+                "Follow up: Who directed the film The Sensational Trial?\n"
+                "Intermediate answer: Karl Freund.\n"
+                "Follow up: What is the nationality of David Dhawan?\n"
+                "Intermediate answer: India.\n"
+                "Follow up: What is the nationality of Karl Freund?\n"
+                "Intermediate answer: Germany."
+            ),
+            'answer': "no",
+            "type": "bridge comparison",
+        },
+        {
+            'id': 'cdbb82ec0baf11ebab90acde48001122',
+            'question': "Who is Boraqchin (Wife Of Ögedei)'s father-in-law?",
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: Who is the spouse of Boraqchin?\n"
+                "Intermediate answer: Ögedei Khan.\n"
+                "Follow up: Who is the father of Ögedei Khan?\n"
+                "Intermediate answer: Genghis Khan."
+            ),
+            'answer': "Genghis Khan",
+            "type": "inference",
+        },
+
+        {
+            'id': 'c6805b2908a911ebbd80ac1f6bf848b6',
+            'question': "Who was born first out of Martin Hodge and Ivania Martinich?",
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: When was Martin Hodge born?\n"
+                "Intermediate answer: 4 February 1959.\n"
+                "Follow up: When was Ivania Martinich born?\n"
+                "Intermediate answer: 25 July 1995."
+            ),
+            'answer': "Martin Hodge",
+            "type": "comparison",
+        },
+        {
+            'id': 'e5150a5a0bda11eba7f7acde48001122',
+            'question': "When did the director of film Laughter In Hell die?",
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: Who directed the film Laughter In Hell?\n"
+                "Intermediate answer: Edward L. Cahn.\n"
+                "Follow up: When did Edward L. Cahn die?\n"
+                "Intermediate answer: August 25, 1963."
+            ),
+            'answer': "August 25, 1963",
+            "type": "compositional",
+        },
+        {
+            'id': 'a5995da508ab11ebbd82ac1f6bf848b6',
+            'question': "Which film has the director died later, The Gal Who Took the West or Twenty Plus Two?",
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: Who directed the film Twenty Plus Two?\n"
+                "Intermediate answer: Joseph M. Newman.\n"
+                "Follow up: Who directed the film The Gal Who Took the West?\n"
+                "Intermediate answer: Frederick de Cordova.\n"
+                "Follow up: When did Joseph M. Newman die?\n"
+                "Intermediate answer: January 23, 2006.\n"
+                "Follow up: When did Fred de Cordova die?\n"
+                "Intermediate answer: September 15, 2001."
+            ),
+            'answer': "Twenty Plus Two",
+            "type": "bridge comparison",
+        },
+        {
+            'id': '1ceeab380baf11ebab90acde48001122',
+            'question': "Who is the grandchild of Krishna Shah (Nepalese Royal)?",
+            'cot': ("Are follow up questions needed here: Yes.\n"
+                "Follow up: Who is the child of Krishna Shah?\n"
+                "Intermediate answer: Rudra Shah.\n"
+                "Follow up: Who is the child of Rudra Shah?\n"
+                "Intermediate answer: Prithvipati Shah."
+            ),
+            'answer': "Prithvipati Shah",
+            "type": "inference",
+        },
+    ]
+    sa_interleave_demo_input_template = sa_interleave_test_input_template = lambda self, ques: f'Question: {ques}\n'
+    sa_interleave_output_template = lambda self, cot, ans: f'{cot}\nSo the final answer is {ans}.'
+
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'cot_ret', 'sa', 'cot_interleave', 'cot_interleave_ret'}
+        assert prompt_type in {'cot', 'cot_ret', 'sa', 'cot_interleave', 'sa_interleave', 'cot_interleave_ret'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')

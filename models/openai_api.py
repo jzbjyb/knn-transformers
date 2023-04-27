@@ -658,6 +658,10 @@ if __name__ == '__main__':
     parser.add_argument('--num_shards', type=int, default=1)
     parser.add_argument('--file_lock', type=str, default=None)
     parser.add_argument('--openai_keys', type=str, default=[], help='openai keys', nargs='+')
+    parser.add_argument('--config_file', type=str, default=None, help='config file')
+    parser.add_argument('--config_kvs', type=str, default=None, help='extra config json, used to override config_file')
+    parser.add_argument('--search_engine', type=str, default='elasticsearch', choices=['bing', 'elasticsearch'])
+    parser.add_argument('--prompt_type', type=str, default=None, help='used to override config_file')
 
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--max_num_examples', type=int, default=None)
@@ -687,44 +691,31 @@ if __name__ == '__main__':
     ret_tokenizer = AutoTokenizer.from_pretrained('google/flan-t5-xl')
     prompt_tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
     prompt_tokenizer.pad_token = prompt_tokenizer.eos_token
-    retriever = BM25(
-        tokenizer=prompt_tokenizer,
-        dataset=(corpus, queries, qrels),
-        index_name=args.index_name,
-        use_decoder_input_ids=True,
-        engine='bing',
-        exclude_domains=['wikipedia.org', 'wikiwand.com', 'wiki2.org', 'wikimedia.org'],
-        file_lock=FileLock(args.file_lock) if args.file_lock else None)
+
+    # default
     retrieval_kwargs = {
-        'retriever': retriever,
-        'topk': 5,
-        'use_ctx': True,
-        'frequency': 64,
+        'topk': 1,
+        'use_ctx': False,
+        'frequency': 0,
         'boundary': [],
-        #'boundary': ['Intermediate answer:'],
-        #'boundary': ['")]'],
-        #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 64,
-        'use_full_input_as_query': True,
+        'max_query_length': 16,
+        'use_full_input_as_query': False,
         'retrieval_at_beginning': False,
-        'look_ahead_steps': 64,
-        'look_ahead_truncate_at_boundary': 'sentence',
-        'look_ahead_pre_retrieval': 'first-keep',
-        'look_ahead_filter_prob': 0.4,
-        'look_ahead_mask_prob': 0.4,
-        'look_ahead_mask_method': 'wholeterm-askquestion',
+        'look_ahead_steps': 0,
+        'look_ahead_pre_retrieval': '',
+        'look_ahead_truncate_at_boundary': None,
+        'look_ahead_filter_prob': 0.0,
+        'look_ahead_mask_prob': 0.0,
+        'look_ahead_mask_method': 'simple',
         'look_ahead_boundary': [],
-        'only_use_look_ahead': True,
+        'only_use_look_ahead': False,
         'retrieval_trigers': [],
-        #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
-        #'retrieval_trigers': [('\[Search\("', '")]')],
-        #'retrieval_trigers': [(None, '. ')],
         'force_generate': None,
-        'forbid_generate_step': None,
+        'forbid_generate_step': 0,
         'truncate_at_prob': 0.0,
-        'truncate_at_boundary': 'sentence',
+        'truncate_at_boundary': None,
         'append_retrieval': False,
         'reinit_ctx': False,
         'use_ctx_for_examplars': False,
@@ -736,8 +727,30 @@ if __name__ == '__main__':
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,
-        'debug': args.debug,
     }
+    if args.prompt_type:
+        retrieval_kwargs['prompt_type'] = args.prompt_type
+    if args.config_file:
+        with open(args.config_file) as fin:
+            for k, v in json.load(fin).items():
+                retrieval_kwargs[k] = v
+    if args.config_kvs:  # highest overriede
+        for k, v in json.loads(args.config_kvs).items():
+            retrieval_kwargs[k] = v
+
+    retriever = BM25(
+        tokenizer=prompt_tokenizer,
+        dataset=(corpus, queries, qrels),
+        index_name=args.index_name,
+        use_decoder_input_ids=True,
+        engine=args.search_engine,
+        exclude_domains=['wikipedia.org', 'wikiwand.com', 'wiki2.org', 'wikimedia.org'],
+        file_lock=FileLock(args.file_lock) if args.file_lock else None)
+    retrieval_kwargs['retriever'] = retriever
+    retrieval_kwargs['debug'] = args.debug
+
+    logging.info('=== retrieval kwargs ===')
+    logging.info(retrieval_kwargs)
 
     if args.final_stop_sym:
         retrieval_kwargs['final_stop_sym'] = args.final_stop_sym

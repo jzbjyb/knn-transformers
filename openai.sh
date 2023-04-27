@@ -6,12 +6,21 @@ debug=false
 source openai_keys.sh
 num_keys=${#keys[@]}
 
-output=$1
-dataset=wikiasp
+dataset=$1
+config_file=$2
+config_kvs=$3  # optional
+
+config_filename=$(basename -- "${config_file}")
+config_filename="${config_filename%.*}"
+
 debug_batch_size=1
 batch_size=8
 model=text-davinci-003  # code-davinci-002, gpt-3.5-turbo-0301, text-davinci-003, text-curie-001
 consistency=1
+donwsample=500
+
+output=output_final/${donwsample}/${dataset}/${model}/${config_filename}.jsonl
+echo 'output to:' $output
 
 function is_expensive() {
     if [[ ${model} == *turbo* || ${model} == *003 || ${model} == *001  ]]; then
@@ -22,29 +31,46 @@ function is_expensive() {
 }
 expensive=$(is_expensive)
 
+prompt_type=""
 if [[ ${dataset} == 'hotpotqa' ]]; then
     input=""
+    engine=elasticsearch
     index_name=wikipedia_dpr
     fewshot=12
     max_num_examples=1000
     max_generation_len=256
 elif [[ ${dataset} == 'strategyqa' ]]; then
     input="--input data/strategyqa/dev_beir"
+    engine=elasticsearch
     index_name=wikipedia_dpr
     fewshot=6
     max_num_examples=229
     max_generation_len=256
 elif [[ ${dataset} == '2wikihop' ]]; then
     input="--input data/2wikimultihopqa/dev_beir"
+    engine=elasticsearch
     index_name=wikipedia_dpr
-    fewshot=15
+    fewshot=4
     if [[ ${expensive} == true ]]; then
         fewshot=4
     fi
     max_num_examples=1000
     max_generation_len=256
+elif [[ ${dataset} == '2wikihop_interleave' ]]; then
+    prompt_type="--prompt_type cot_interleave"
+    dataset="2wikihop"
+    input="--input data/2wikimultihopqa/dev_beir"
+    engine=elasticsearch
+    index_name=wikipedia_dpr
+    fewshot=15
+    if [[ ${expensive} == true ]]; then
+        fewshot=8
+    fi
+    max_num_examples=1000
+    max_generation_len=256
 elif [[ ${dataset} == 'eli5' ]]; then
     input=""  # "--input data/eli5/val_astarget_selfprov_evidence.json.beir_dedup"
+    engine=elasticsearch
     index_name=wikipedia_dpr
     fewshot=8
     if [[ ${expensive} == true ]]; then
@@ -53,7 +79,21 @@ elif [[ ${dataset} == 'eli5' ]]; then
     max_num_examples=1000000
     max_generation_len=256
 elif [[ ${dataset} == 'asqa' ]]; then
+    prompt_type="--prompt_type general_hint_in_output"
     input="--input data/asqa/ASQA.json"
+    engine=elasticsearch
+    index_name=wikipedia_dpr
+    fewshot=8
+    if [[ ${expensive} == true ]]; then
+        fewshot=8
+    fi
+    max_num_examples=1000000
+    max_generation_len=256
+elif [[ ${dataset} == 'asqa_hint' ]]; then
+    prompt_type="--prompt_type general_hint_in_input"
+    dataset=asqa
+    input="--input data/asqa/ASQA.json"
+    engine=elasticsearch
     index_name=wikipedia_dpr
     fewshot=8
     if [[ ${expensive} == true ]]; then
@@ -63,18 +103,21 @@ elif [[ ${dataset} == 'asqa' ]]; then
     max_generation_len=256
 elif [[ ${dataset} == 'asqa_annotation' ]]; then
     input="--input data/asqa/ASQA.json"
+    engine=elasticsearch
     index_name=wikipedia_dpr
     fewshot=13
     max_num_examples=1000000
     max_generation_len=256
 elif [[ ${dataset} == 'wow' ]]; then
     input=""  # "--input data/wow/val_astarget_selfprov_evidence.json.beir_dedup"
+    engine=elasticsearch
     index_name=wikipedia_dpr
     fewshot=8
     max_num_examples=1000
     max_generation_len=256
 elif [[ ${dataset} == 'wow_train_1k' ]]; then
     input="--input data/wow/train_with_ref.1008.jsonl"
+    engine=elasticsearch
     index_name=wikipedia_dpr
     fewshot=8
     if [[ ${expensive} == true ]]; then
@@ -84,6 +127,7 @@ elif [[ ${dataset} == 'wow_train_1k' ]]; then
     max_generation_len=256
 elif [[ ${dataset} == 'wikisum_all_beir' ]]; then
     input="--input data/wikisum/wikisum_all_beir"
+    engine=elasticsearch
     index_name=wikisum_all_beir
     fewshot=8
     if [[ ${expensive} == true ]]; then
@@ -92,8 +136,8 @@ elif [[ ${dataset} == 'wikisum_all_beir' ]]; then
     max_num_examples=1000
     max_generation_len=512
 elif [[ ${dataset} == 'wikiasp' ]]; then
-    input="--input \"data/wikiasp/matched_with_bing_test.500.annotated\""
-    #input="--input \"data/wikiasp/matched_with_bing_test.improved.*\""
+    input="--input \"data/wikiasp/matched_with_bing_test.500.annotated\""  # input="--input \"data/wikiasp/matched_with_bing_test.improved.*\""
+    engine=bing
     index_name=wikiasp
     fewshot=8
     if [[ ${expensive} == true ]]; then
@@ -103,6 +147,7 @@ elif [[ ${dataset} == 'wikiasp' ]]; then
     max_generation_len=512
 elif [[ ${dataset} == 'arxiv' ]]; then
     input="--input data/pile/sliding_window_512/ArXiv_test.window.jsonl"
+    engine=elasticsearch
     index_name=arxiv00
     fewshot=0
     max_num_examples=1000
@@ -110,6 +155,7 @@ elif [[ ${dataset} == 'arxiv' ]]; then
     dataset=lmdata
 elif [[ ${dataset} == 'mmlu' ]]; then
     input=""
+    engine=elasticsearch
     index_name=wikipedia_dpr
     fewshot=4
     max_num_examples=1000
@@ -123,14 +169,16 @@ else
 fi
 
 if [[ ${expensive} == true && ${dataset} != *_annotation ]]; then
-    max_num_examples=$(( max_num_examples < 500 ? max_num_examples : 500 ))
+    max_num_examples=$(( max_num_examples < donwsample ? max_num_examples : donwsample ))
 fi
 
 if [[ ${index_name} == "test" && ${input} != "none" ]]; then  # build index
     BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
         --model ${model} \
-        --dataset ${dataset} ${input} \
+        --dataset ${dataset} ${input} ${prompt_type} \
+        --config_file ${config_file} \
         --fewshot ${fewshot} \
+        --search_engine ${engine} \
         --index_name ${index_name} \
         --openai_keys ${test_key} \
         --build_index
@@ -141,8 +189,10 @@ fi
 if [[ ${debug} == "true" ]]; then
     BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
         --model ${model} \
-        --dataset ${dataset} ${input} \
+        --dataset ${dataset} ${input} ${prompt_type} \
+        --config_file ${config_file} \
         --fewshot ${fewshot} \
+        --search_engine ${engine} \
         --index_name ${index_name} \
         --max_num_examples 100 \
         --max_generation_len ${max_generation_len} \
@@ -175,8 +225,10 @@ for (( run=0; run<${consistency}; run++ )); do
     #file_lock=$(mktemp)
     BING_SEARCH_V7_SUBSCRIPTION_KEY=${bing_key} python -m models.openai_api \
         --model ${model} \
-        --dataset ${dataset} ${input} \
+        --dataset ${dataset} ${input} ${prompt_type} \
+        --config_file ${config_file} \
         --fewshot ${fewshot} \
+        --search_engine ${engine} \
         --index_name ${index_name} \
         --max_num_examples ${max_num_examples} \
         --max_generation_len ${max_generation_len} \
@@ -198,9 +250,6 @@ retrieval_kwargs = {
     'use_ctx': False,
     'frequency': 0,
     'boundary': [],
-    #'boundary': ['Intermediate answer:'],
-    #'boundary': ['")]'],
-    #'boundary': ['. '],
     'use_gold': False,
     'use_gold_iterative': False,
     'max_query_length': 16,
@@ -213,9 +262,6 @@ retrieval_kwargs = {
     'look_ahead_boundary': [],
     'only_use_look_ahead': False,
     'retrieval_trigers': [],
-    #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
-    #'retrieval_trigers': [('\[Search\("', '")]')],
-    #'retrieval_trigers': [(None, '. ')],
     'force_generate': None,
     'forbid_generate_step': 0,
     'truncate_at_prob': 0.0,
@@ -240,9 +286,6 @@ retrieval_kwargs = {
     'use_ctx': True,
     'frequency': 1,
     'boundary': [],
-    #'boundary': ['Intermediate answer:'],
-    #'boundary': ['")]'],
-    #'boundary': ['. '],
     'use_gold': False,
     'use_gold_iterative': False,
     'max_query_length': 16,
@@ -255,9 +298,6 @@ retrieval_kwargs = {
     'look_ahead_boundary': [],
     'only_use_look_ahead': False,
     'retrieval_trigers': [],
-    #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
-    #'retrieval_trigers': [('\[Search\("', '")]')],
-    #'retrieval_trigers': [(None, '. ')],
     'force_generate': None,
     'forbid_generate_step': 0,
     'truncate_at_prob': 0.0,
@@ -282,9 +322,6 @@ retrieval_kwargs = {
     'use_ctx': True,
     'frequency': 64,
     'boundary': [],
-    #'boundary': ['Intermediate answer:'],
-    #'boundary': ['")]'],
-    #'boundary': ['. '],
     'use_gold': False,
     'use_gold_iterative': False,
     'max_query_length': 64,
@@ -298,9 +335,6 @@ retrieval_kwargs = {
     'look_ahead_boundary': [],
     'only_use_look_ahead': True,
     'retrieval_trigers': [],
-    #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
-    #'retrieval_trigers': [('\[Search\("', '")]')],
-    #'retrieval_trigers': [(None, '. ')],
     'force_generate': None,
     'forbid_generate_step': None,
     'truncate_at_prob': 0.0,

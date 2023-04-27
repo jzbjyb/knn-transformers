@@ -791,6 +791,7 @@ def compare(
     ):
     raw_data = json.load(open('data/asqa/ASQA.json'))
     get_ans = lambda x: x.strip().rsplit(' ', 1)[-1][:-1].lower()
+
     with open(file1) as fin1, open(file2) as fin2:
         id2examples1 = [json.loads(l) for l in fin1]
         id2examples2 = [json.loads(l) for l in fin2]
@@ -823,6 +824,37 @@ def compare(
             o1a = get_ans(o1)
             o2a = get_ans(o2)
             ga = get_ans(a)
+
+            '''
+            def choose_final_answer(example):
+                answers = [example['answer']]
+                for i, answer in enumerate(answers):
+                    for pattern in ['answer is (.*)']:
+                        if not pattern:
+                            continue
+                        find = re.compile(pattern).search(answer)
+                        if find:
+                            answer = find.group(1)
+                            answers[i] = answer
+                return answers if len(answers) > 1 else answers[0]
+            def get_final_answer_from_pred(pred: str):
+                final_ans = []
+                for at in ['answer is (.*)']:
+                    find = re.compile(at).search(pred)
+                    if find:
+                        final_ans.append(find.group(1))
+                return ' '.join(final_ans).strip()
+
+            final_ans1 = choose_final_answer(example1)
+            final_ans2 = choose_final_answer(example2)
+            ans_id1 = example1['answer_id']
+            ans_id2 = example2['answer_id']
+            pred_ans1 = get_final_answer_from_pred(example1['output'])
+            pred_ans2 = get_final_answer_from_pred(example2['output'])
+
+            em1 = WikiMultiHopQA.exact_match_score(pred_ans1, final_ans1, ground_truth_id=ans_id1)['correct']
+            em2 = WikiMultiHopQA.exact_match_score(pred_ans2, final_ans2, ground_truth_id=ans_id2)['correct']
+            '''
 
             if only_first_right:
                 show = only_first_right and o1a == ga and o2a != ga
@@ -1099,7 +1131,7 @@ def eval(
     beir_dir: str = None,
     consistency_suffix: str = 'run',
     use_multi_ref: bool = True,
-    debug: bool = True,
+    debug: bool = False,
 ):
     if not anchor_text:
         anchor_text = []
