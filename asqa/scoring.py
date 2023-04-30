@@ -181,9 +181,10 @@ def str_em(predictions, asqa, target_keys=None):
     for i, qa_pair in enumerate(asqa[key]['qa_pairs']):
       ep = _exact_presence(qa_pair['short_answers'], context)
       loc_acc.append(ep)
-      if ep:
-        print('+', key, i, qa_pair, sep='\t')
+      #if ep:
+      #  print('+', key, i, qa_pair, sep='\t')
 
+    print('+', key, np.mean(loc_acc), sep='\t')
     acc.append(np.mean(loc_acc))
 
   return 100 * np.mean(acc)
