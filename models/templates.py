@@ -830,7 +830,6 @@ class RetrievalInstruction:
         'retrieval': 'Skill 1. Use the Search API to look up relevant information by writing "[Search(term)]" where "term" is the search term you want to look up. For example:',
         'task': 'Skill 2. Answer questions by thinking step-by-step. First, write out the reasoning steps, then draw the conclusion. For example:',
         'ensemble': 'Now, combine the aforementioned two skills. First, write out the reasoning steps, then draw the conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible.',
-        #'ensemble': '3. Now, you should combine the aforementioned two abilities. You should first write out the reasoning steps and then draw you conclusion, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible. However, you should not directly copy chunks of words from "reference".',
         'examplars': [
             {
                 'question': 'But what are the risks during production of nanomaterials?',
@@ -848,6 +847,11 @@ class RetrievalInstruction:
                 'answer': '[Search(Metformin first-line drug)] patients with type 2 diabetes and obesity.'
             }
         ]
+    }
+
+    strategyqa_instruction: Dict[str, Any] = {
+        'task': 'Skill 2. Answer questions by thinking step-by-step. First, write out the reasoning steps, then generate a yes or no answer. For example:',
+        'ensemble': 'Now, combine the aforementioned two skills. First, write out the reasoning steps, then generate a yes or no answer, where the reasoning steps should also utilize the Search API "[Search(term)]" whenever possible.',
     }
 
     summary_instruction: Dict[str, Any] = {

@@ -336,6 +336,11 @@ class StrategyQA(BaseDataset):
     cot_demo_input_template = cot_test_input_template = lambda self, ques: f'Generate a yes or no answer to the following question.\nQuestion: {ques}\nAnswer:'
     cot_output_template = lambda self, cot, ans: f'{cot} So the final answer is {ans}.'
 
+    cot_ret_examplars = cot_examplars
+    cot_ret_demo_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step):'
+    cot_ret_test_input_template = lambda self, ques: f'Question: {ques}\nAnswer (with step-by-step & Search):'
+    cot_ret_output_template = cot_output_template
+
     sa_ctx_examplars: List[Dict] = [
         {
             'cot': ('Follow up: What types of animal are hamsters?\n',
@@ -432,7 +437,7 @@ class StrategyQA(BaseDataset):
     tool_output_template = lambda self, cot, ans: f'{cot} So the final answer is {ans}.'
 
     def __init__(self, beir_dir: str, prompt_type: str = 'cot'):
-        assert prompt_type in {'cot', 'sa_ctx', 'tool'}
+        assert prompt_type in {'cot', 'sa_ctx', 'tool', 'cot_ret'}
         self.demo_input_template = getattr(self, f'{prompt_type}_demo_input_template')
         self.test_input_template = getattr(self, f'{prompt_type}_test_input_template')
         self.output_template = getattr(self, f'{prompt_type}_output_template')
@@ -1270,7 +1275,7 @@ class WikiAsp(BaseDataset):
             "id": "train-50-1349",
             "question": "Echo School (Oregon) including the following aspects: academics, history",
             "answer_raw": "# academics\nin 2008 , 91 % of the school ' s seniors received their high school diploma . of 66 students , 60 graduated , 1 dropped out , 3 received a modified diploma , and 2 were still in high school in 2009 .\n# history\nthe class of 2008 was the 100th class in the school ' s history .",
-            "answer": "# Academics\nIn 2008, 91% of the school' s seniors received their high school diploma. Of 66 students, 60 graduated, 1 dropped out, 3 received a modified diploma, and 2 were still in high school in 2009.\n# History\nThe class of 2008 was the 100th class in the school's history.",
+            "answer": "# Academics\nIn 2008, 91% of the school's seniors received their high school diploma. Of 66 students, 60 graduated, 1 dropped out, 3 received a modified diploma, and 2 were still in high school in 2009.\n# History\nThe class of 2008 was the 100th class in the school's history.",
             "domain": "educational_institution"
         },
         {

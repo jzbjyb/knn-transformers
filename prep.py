@@ -799,6 +799,7 @@ def compare(
         id2examples2 = {e['qid']: e for e in id2examples2}
 
         for _id in id2examples1:
+
             example1 = id2examples1[_id]
             example2 = id2examples2[_id]
 
@@ -1103,20 +1104,26 @@ def tsv_to_beir(
 
     save_beir_format(beir_dir, qid2dict, did2dict, split2qiddid)
 
-def self_consistency(examples: List[Dict], anchor_text: str):
+def self_consistency(examples: List[Dict], anchor_text: List[str]):
     if len(examples) == 1:
         return examples[0]
     answer2indices: Dict[str, List[int]] = defaultdict(list)
     for i, example in enumerate(examples):
+        find = None
         pred = example['output'].split('\n\n', 1)[0].strip()
-        position = pred.find(anchor_text)
-        if position != -1:
-            ans = pred[position + len(anchor_text):].strip().lower()
+        for pat in anchor_text:
+            find = re.compile(pat).search(pred)
+            if find:
+                pred = find.group(1)
+                break
+        if find:
+            ans = pred.strip().lower()
             answer2indices[ans].append(i)
     answer2indices: List[Tuple[str, List[int]]] = sorted(answer2indices.items(), key=lambda x: -len(x[1]) + random.random() / 2)
     if len(answer2indices):
         candidates = answer2indices[0][1]
-        return examples[candidates[random.randint(0, len(candidates) - 1)]]
+        return_e = examples[candidates[random.randint(0, len(candidates) - 1)]]
+        return return_e
     else:  # all format error
         return examples[random.randint(0, len(examples) - 1)]
 
@@ -1195,6 +1202,7 @@ def eval(
             find = re.compile(at).search(pred)
             if find:
                 final_ans.append(find.group(1))
+                break
         return ' '.join(final_ans).strip()
 
     metric_func = evaluate.load('rouge')
@@ -1218,9 +1226,11 @@ def eval(
 
     root_file = None
     if len(jsonl_files) > 1:  # consistency
+        print(f'consistency of {len(jsonl_files)} files')
         for jf in jsonl_files:
             assert jf.rsplit('.', 1)[1].startswith(consistency_suffix)
         root_file = jsonl_files[0].rsplit('.', 1)[0]
+
 
     examples_all_files = [[json.loads(l) for l in open(jf)] for jf in jsonl_files]
     assert len(set([len(examples) for examples in examples_all_files])) == 1
@@ -1301,6 +1311,7 @@ def eval(
             elif dataset in {'eli5'}:
                 add_metric_kvs(ELI5.entity_f1_score(pred_ans, final_ans))
             elif dataset in {'asqa'}:
+                print('qid', qid, ASQA.entity_f1_score(pred_ans, final_ans))
                 add_metric_kvs(ASQA.entity_f1_score(pred_ans, final_ans))
             elif dataset in {'wow'}:
                 add_metric_kvs(WoW.entity_f1_score(pred_ans, final_ans))
@@ -1314,7 +1325,7 @@ def eval(
         if has_search:
             search_per_example.append(len(re.findall('\[Search\(', pred)))
 
-        if debug and wrongformat:
+        if debug:
             print('ID->', qid)
             print('Q->', question)
             print()
