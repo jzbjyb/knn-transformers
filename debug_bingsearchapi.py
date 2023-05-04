@@ -14,7 +14,7 @@ Documentation: https://docs.microsoft.com/en-us/bing/search-apis/bing-web-search
 
 def bing_search(query):
     # subscription_key = "YOUR_OWN_API_KEY"
-    subscription_key = ""
+    subscription_key = open('bing_api_key.txt').read().strip()
     endpoint = "https://api.bing.microsoft.com/" + "v7.0/search"
     
     # Construct a request
