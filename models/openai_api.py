@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Union
 import argparse
 import random
 import numpy as np
@@ -17,18 +17,17 @@ from multiprocessing.managers import BaseManager
 from transformers import AutoTokenizer, GPT2TokenizerFast
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.search.lexical import BM25Search
+from tenacity import retry, stop_after_attempt, wait_random_exponential, wait_fixed
 import openai
 from .retriever import BM25
 from .templates import CtxPrompt, ApiReturn, RetrievalInstruction
-from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, ELI5, WoW, WoWLong, ASQA, LMData
+from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, WikiAsp, ELI5, WoW, WoWLong, ASQA, ASQAAnnotation, MMLU, LMData
+from .utils import Utils, NoKeyAvailable, openai_api_call
+
 from .cohere_api import cohere_generate
 from .ai21_api import ai21_generate
 
 logging.basicConfig(level=logging.INFO)
-
-
-class KeyBrokenException(Exception):
-    pass
 
 
 class CustomManager(BaseManager):
@@ -43,12 +42,15 @@ class KeyManager:
         self.keys = keys
         self.next_available_key_ind = 0
         self.key2times: Dict[str, List[float]] = defaultdict(list)
+        self.forbid_keys: Set[str] = set()
 
     def __len__(self):
         return len(self.keys)
 
     def get_key(self):
         logging.info(f'get key {self.next_available_key_ind}')
+        if self.next_available_key_ind is None:
+            raise NoKeyAvailable()
         # get key not in use
         to_return = self.keys[self.next_available_key_ind]
         assert not self.key2inuse[to_return]
@@ -65,22 +67,25 @@ class KeyManager:
         logging.info(f'get key {to_return[-5:]} next avai {self.next_available_key_ind}')
         return to_return
 
-    def return_key(self, key, time_spent: float = None):
+    def return_key(self, key, time_spent: float = None, forbid: bool = False):
         logging.info('return key')
-        # return key
+        # check
         assert self.key2inuse[key]
-        self.key2inuse[key] = False
         if time_spent:
             self.key2times[key].append(time_spent)
-        # set index
-        if self.next_available_key_ind is None:
-            self.next_available_key_ind = self.key2ind[key]
+        # return key
+        if not forbid:
+            self.key2inuse[key] = False
+            if self.next_available_key_ind is None:
+                self.next_available_key_ind = self.key2ind[key]
+        else:
+            self.forbid_keys.add(key)
         logging.info('return key done')
 
     def get_report(self):
         report: List[str] = []
         for key in self.keys:
-            report.append(f'{key}\t{len(self.key2times[key])}\t{np.mean(self.key2times[key])}')
+            report.append(f'{key}\t{len(self.key2times[key])}\t{np.mean(self.key2times[key])}\t{key in self.forbid_keys}')
         return '\n'.join(report)
 
 
@@ -120,8 +125,9 @@ class QueryAgent:
         self.look_ahead_truncate_at_boundary = retrieval_kwargs.get('look_ahead_truncate_at_boundary', None)
         self.look_ahead_filter_prob = retrieval_kwargs.get('look_ahead_filter_prob', 0)
         self.look_ahead_mask_prob = retrieval_kwargs.get('look_ahead_mask_prob', 0)
-        self.look_ahead_pre_retrieval = retrieval_kwargs.get('look_ahead_pre_retrieval', False)
-        assert self.look_ahead_pre_retrieval in {False, 'first', 'all'}
+        self.look_ahead_mask_method = retrieval_kwargs.get('look_ahead_mask_method', 'simple')
+        self.look_ahead_pre_retrieval = retrieval_kwargs.get('look_ahead_pre_retrieval', '')
+        assert self.look_ahead_pre_retrieval in {'', 'first', 'first-keep', 'all'}
         self.max_query_length = retrieval_kwargs.get('max_query_length', None)
         self.use_full_input_as_query = retrieval_kwargs.get('use_full_input_as_query', False)
         self.only_use_look_ahead = retrieval_kwargs.get('only_use_look_ahead', False)
@@ -132,6 +138,7 @@ class QueryAgent:
         self.forbid_generate_step = retrieval_kwargs.get('forbid_generate_step', 0)
         self.use_gold_iterative = retrieval_kwargs.get('use_gold_iterative', False)
         self.append_retrieval = retrieval_kwargs.get('append_retrieval', False)
+        self.reinit_ctx = retrieval_kwargs.get('reinit_ctx', False)
 
         self.ret_topk = retrieval_kwargs.get('topk', 1)
         self.debug = retrieval_kwargs.get('debug', False)
@@ -146,7 +153,7 @@ class QueryAgent:
         self.frequency_penalty_in_prompt = retrieval_kwargs.get('frequency_penalty_in_prompt', 0.0)
 
         self.prefix_method = retrieval_kwargs.get('prefix_method', None)
-        if self.prefix_method in {'sentence', 'all'} or self.prefix_method.startswith('freq:'):  # no truncation when computing PPL
+        if self.prefix_method in {'sentence', 'all'} or (self.prefix_method and self.prefix_method.startswith('freq:')):  # no truncation when computing PPL
             self.truncate_at_prob = 0
             self.truncate_at_boundary = None
             self.max_generation_len = 100000  # no limit
@@ -159,62 +166,99 @@ class QueryAgent:
         assert topk >= 1
         tokenized = self.tokenizer(text, return_offsets_mapping=True)
         ids, offsets = tokenized['input_ids'][:topk], tokenized['offset_mapping'][:topk]
-        #prefix = self.tokenizer.decode(ids)  # not revertable
         last_position = offsets[-1][1]
         prefix = text[:last_position]
         return prefix, last_position
 
-    def retrieve(self, queries: List[str], is_question: bool = False):
+    @retry(wait=wait_fixed(3), stop=stop_after_attempt(3))
+    def retrieve(
+        self,
+        queries: List[Union[str, List[str]]],
+        is_question: bool = False,
+        debug: bool = False
+    ):
         mql = None if (self.use_full_input_as_query and is_question) else self.max_query_length
-        ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
-            decoder_texts=queries,
-            topk=self.ret_topk,
-            max_query_length=mql)
+        if len(queries) and type(queries[0]) is list:  # nested queries
+            flatten = sum(queries, [])
+            _ctx_ids, _ctx_texts = self.retriever.retrieve_and_prepare(
+                decoder_texts=flatten,
+                topk=self.ret_topk,
+                max_query_length=mql)
+            ctx_ids, ctx_texts = [], []
+            # merge results
+            prev_ind = 0
+            for i in range(len(queries)):
+                ctx_ids.append([])
+                ctx_texts.append([])
+
+                nqi = len(queries[i])
+                cids, ctxts = _ctx_ids[prev_ind:prev_ind + nqi], _ctx_texts[prev_ind:prev_ind + nqi]
+                assert cids.shape[-1] == ctxts.shape[-1] == self.ret_topk
+                for j in range(self.ret_topk):
+                    for k in range(nqi):  # TODO: sort by score?
+                        if cids[k, j] not in ctx_ids[-1]:
+                            ctx_ids[-1].append(cids[k, j])
+                            ctx_texts[-1].append(ctxts[k, j])
+                ctx_ids[-1] = ctx_ids[-1][:self.ret_topk]
+                ctx_texts[-1] = ctx_texts[-1][:self.ret_topk]
+                prev_ind = prev_ind + nqi
+                if debug:
+                    print('-------------- ret -------------')
+                    print(queries[i])
+                    print(ctx_ids[-1])
+                    print(ctx_texts[-1])
+                    print('-------------- ret -------------')
+            ctx_ids = np.array(ctx_ids)
+            ctx_texts = np.array(ctx_texts)
+            assert ctx_ids.shape == ctx_texts.shape == (len(queries), self.ret_topk), f'{ctx_ids.shape}, {ctx_texts.shape}, {queries}'
+        else:
+            ctx_ids, ctx_texts = self.retriever.retrieve_and_prepare(
+                decoder_texts=queries,
+                topk=self.ret_topk,
+                max_query_length=mql)
         return ctx_ids, ctx_texts
 
     def complete(
         self,
         queries: List[CtxPrompt],
         params: Dict[str, Any],
-        max_num_req_per_min: int = 10,
-        max_retry: int = 5,  # retry before switching keys
-        max_keys: int = 5,  # max number of keys tried before raising exceptions
-        key_tried: int = 0,  # number of keys tried
         force_generate: int = None,
         forbid_generate: int = None,
-        api_key: str = None,
         is_lookahead: bool = False,
+        api_key: str = None,
     ) -> List[ApiReturn]:
-        is_chat_model = 'turbo' in self.model
+        # check model
+        is_chat_model = Utils.is_chat(self.model)
+        is_code_model = Utils.is_code(self.model)
+        if is_chat_model:
+            assert len(queries) == 1, 'chatgpt doesn\'t support batching'
+            if 'max_tokens' in params:
+                params['max_tokens'] = max(1, params['max_tokens'])  # 0 is not allowed for chatgpt
+            def process_chatgpt(message: str):
+                if message:
+                    return ' ' + message
+                return message
+        else:
+            if 'max_tokens' in params:
+                params['max_tokens'] = max(2, params['max_tokens'])  # TODO: OPT doesn't have this bug, but openai returns nothing if set to 1
 
-        # check num of keys tried
-        if key_tried >= max_keys:
-            logging.error(f'skip {len(queries)} examples because of key broken')
-            raise KeyBrokenException()
 
-        # init tracking variables
-        min_sleep = 60 / max_num_req_per_min
-        add_sleep = 3
-        expbf = 2
-        retry = 0
-
-        # init param
-        if 'max_tokens' in params:  # TODO: OPT doesn't have this bug
-            params['max_tokens'] = max(2, params['max_tokens'])  # openai returns nothing if set to 1
+        # logit bias
         logit_bias = dict()
-
         if force_generate:
             logit_bias={f'{force_generate[0]}': force_generate[1]}
         elif forbid_generate:
             logit_bias={f'{forbid_generate[0]}': -100}
 
         # format to get the final prompt
-        prompts: List[Tuple[str, int]] = [q.format(use_ctx=self.use_ctx) for q in queries]
+        prompts: List[Tuple[str, int, List[str]]] = [q.format(use_ctx=self.use_ctx, is_chat_model=is_chat_model, api_key=api_key) for q in queries]
         prompts_to_issue: List[str] = list(map(itemgetter(0), prompts))
+        demo_for_chat: List[str] = list(map(itemgetter(2), prompts))
 
         # get prefix
         echo = False
-        if self.prefix_method and not is_lookahead:  # prefix is not allowed to use in look ahead
+        use_prefix = (self.prefix_method and self.prefix_method.startswith('sentence_first:')) or (self.prefix_method and not is_lookahead)
+        if use_prefix:  # prefix is not allowed to use in look ahead
             echo = True
             prefixes: List[Tuple[str, int]] = [q.get_prefix(qagent=self, prefix_method=self.prefix_method) for q in queries]
             to_gen_len = set(map(itemgetter(1), prefixes))
@@ -229,7 +273,7 @@ class QueryAgent:
         # add penalty
         if self.frequency_penalty_in_prompt:
             assert len(queries) == 1, 'batching is not supported'
-            current_cases: List[str] = [q[-l:] if l else '' for q, l in prompts]  # only use the generated content
+            current_cases: List[str] = [q[-l:] if l else '' for q, l, _ in prompts]  # only use the generated content
             counter = Counter(sum(self.tokenizer(current_cases)['input_ids'], []))
             tokid2count: Dict[int, int] = dict(sorted(counter.items(), key=lambda x: (-x[1], x[0]))[:200])  # penalize at most 200 tokens
             for tokid, count in tokid2count.items():
@@ -237,113 +281,76 @@ class QueryAgent:
                     logit_bias[str(tokid)] = 0
                 logit_bias[str(tokid)] -= self.frequency_penalty_in_prompt * count
 
-        # init key
-        ori_api_key = api_key
-        get_key_func = return_key_func = None
-        if type(ori_api_key) is tuple:  # get and return function
-            get_key_func, return_key_func = ori_api_key
-        else:  # a specific key or none
-            api_key = ori_api_key or os.getenv('OPENAI_API_KEY')
-        if get_key_func:  # get key
-            start_t = time.time()
-            api_key = get_key_func()
+        # API call
+        if is_chat_model:
+            messages=[  # system
+                #{'role': 'system', 'content': 'Follow the given examples and answer the question.'},
+                #{'role': 'system', 'content': 'You are a helpful assistant.'}
+            ] + [  # demo
+                {'role': 'user', 'content': demo.rsplit('The original question', 1)[0].strip()} if role == 'user' else {'role': 'assistant', 'content': 'The original question' + demo.rsplit('The original question', 1)[1]}  # TODO: better code?
+                for demo in demo_for_chat[0] for role in ['user', 'assistant']
+            ] + [  # current example
+                {'role': 'user', 'content': prompts_to_issue[0]},
+            ]
+            #print(json.dumps(messages, indent=True))
+            responses = openai_api_call(
+                api_key=api_key,
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                logit_bias=logit_bias,
+                frequency_penalty=self.frequency_penalty,
+                **params)
 
-        # error-tolerant querying
-        while True:
-            try:
-                logging.info(f'start query with key {api_key[-5:]}')
-                if is_chat_model:
-                    assert len(queries) == 1, ''
-                    responses = openai.Completion.create(
-                        api_key=api_key,
-                        model=self.model,
-                        messages=[{'role': 'user', 'content': prompts_to_issue[0]}],
-                        temperature=self.temperature,
-                        top_p=self.top_p,
-                        logprobs=0,
-                        logit_bias=logit_bias,
-                        frequency_penalty=self.frequency_penalty,
-                        echo=echo,
-                        **params)
+            generations = [ApiReturn(
+                prompt=q,
+                text=(prefixes[0][0] + process_chatgpt(r['message']['content'])) if echo else process_chatgpt(r['message']['content']),  # TODO: corner case where space does not work?
+                finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
+                model=responses['model'],
+                skip_len=0) for r, (q, _, _) in zip(responses['choices'], prompts)]
+        else:
+            # TODO: handle prompt too long
+            '''
+            # retry on prompt being too long
+            except openai.error.InvalidRequestError as e:
+                if e.json_body is not None and 'error' in e.json_body and 'message' in e.json_body['error'] and 'maximum context length' in e.json_body['error']['message']:
+                    # remove one example
                 else:
-                    responses = openai.Completion.create(
-                        api_key=api_key,
-                        model=self.model,
-                        prompt=prompts_to_issue,
-                        temperature=self.temperature,
-                        top_p=self.top_p,
-                        logprobs=0,
-                        logit_bias=logit_bias,
-                        frequency_penalty=self.frequency_penalty,
-                        echo=echo,
-                        **params)
+                    raise e
+            '''
+            responses = openai_api_call(
+                api_key=api_key,
+                model=self.model,
+                prompt=prompts_to_issue,
+                temperature=self.temperature,
+                top_p=self.top_p,
+                logprobs=0,
+                logit_bias=logit_bias,
+                frequency_penalty=self.frequency_penalty,
+                echo=echo,
+                **params)
 
-                generations = [ApiReturn(
-                    prompt=q,
-                    text=r['message']['content'] if is_chat_model else r['text'],
-                    tokens=[] if is_chat_model else r['logprobs']['tokens'],
-                    probs=[] if is_chat_model else [np.exp(lp) if lp is not None else lp for lp in r['logprobs']['token_logprobs']],
-                    offsets=[] if is_chat_model else r['logprobs']['text_offset'],
-                    finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
-                    skip_len=len(q) if echo else 0) for r, (q, _) in zip(responses['choices'], prompts)]
+            generations = [ApiReturn(
+                prompt=q,
+                text=r['text'],
+                tokens=r['logprobs']['tokens'],
+                probs=[np.exp(lp) if lp is not None else lp for lp in r['logprobs']['token_logprobs']],
+                offsets=r['logprobs']['text_offset'],
+                finish_reason='length' if echo else r['finish_reason'],  # never stop in echo mode
+                model=responses['model'],
+                skip_len=len(q) if echo else 0) for r, (q, _, _) in zip(responses['choices'], prompts)]
 
-                logging.info(f'finish query with key {api_key[-5:]}')
-                if self.debug:
-                    print('Params ->', params)
-                    print('Prompt ->', generations[0].prompt)
-                    print('Output ->', generations[0].text)
-                    print('Stop ->', generations[0].finish_reason)
-                    print('Tokens ->', generations[0].tokens)
-                    print('Probs ->', generations[0].probs)
-                    print('Gold ->', queries[0].gold_output)
-                    input('-' * 50 + '\n')
-            except (openai.error.RateLimitError, openai.error.ServiceUnavailableError, openai.error.APIError, openai.error.Timeout) as e:  # limit-related errors
-                if retry >= max_retry:
-                    if return_key_func:  # return key
-                        end_t = time.time()
-                        return_key_func(api_key, time_spent=end_t - start_t)
-                    return self.complete(
-                        queries,
-                        params,
-                        max_num_req_per_min=max_num_req_per_min,
-                        max_retry=max_retry,
-                        max_keys=max_keys,
-                        key_tried=key_tried + 1,
-                        force_generate=force_generate,
-                        forbid_generate=forbid_generate,
-                        api_key=ori_api_key)
-                retry += 1
-                logging.info(f'sleep for rate {add_sleep + min_sleep} with key {api_key[-5:]}')
-                time.sleep(add_sleep + min_sleep)
-                add_sleep = add_sleep * expbf
-            except KeyboardInterrupt as e:
-                raise e
-            except Exception as e:  # other errors
-                if retry >= max_retry:
-                    if return_key_func:  # return key
-                        end_t = time.time()
-                        return_key_func(api_key, time_spent=end_t - start_t)
-                    return self.complete(
-                        queries,
-                        params,
-                        max_num_req_per_min=max_num_req_per_min,
-                        max_retry=max_retry,
-                        max_keys=max_keys,
-                        key_tried=key_tried + 1,
-                        force_generate=force_generate,
-                        forbid_generate=forbid_generate,
-                        api_key=ori_api_key)
-                retry += 1
-                logging.info(f'sleep for error {min_sleep} with key {api_key[-5:]}')
-                time.sleep(min_sleep)
-            else:
-                break
+        if self.debug:
+            print('Params ->', params)
+            print('Prompt ->', generations[0].prompt)
+            print('Output ->', generations[0].text)
+            print('Stop ->', generations[0].finish_reason)
+            print('Tokens ->', generations[0].tokens)
+            print('Probs ->', generations[0].token_probs)
+            print('Gold ->', queries[0].gold_output)
+            input('-' * 50 + '\n')
 
-        if return_key_func:  # return key
-            end_t = time.time()
-            return_key_func(api_key, time_spent=end_t - start_t)
-
-        time.sleep(min_sleep)
         return generations
 
     def prompt(
@@ -352,9 +359,10 @@ class QueryAgent:
         api_key: str = None,
     ):
         # update retrieval for ctx
-        for q in queries:
-            for d in q.demo:
-                d.update_retrieval(d.get_all_ctxs(), method=self.ctx_increase)
+        if self.use_ctx_for_examplars:
+            for q in queries:
+                for d in q.demo:
+                    d.update_retrieval(d.get_all_ctxs(), method=self.ctx_increase)
         if self.use_retrieval:
             return self.ret_prompt(queries, api_key=api_key)
         else:  # directly generate all without gold context
@@ -363,7 +371,7 @@ class QueryAgent:
                 params={'max_tokens': self.max_generation_len, 'stop': self.final_stop_sym},
                 api_key=api_key)
             outputs = [ar.text for ar in ars]
-            probs = [ar.probs for ar in ars]
+            probs = [ar.token_probs for ar in ars]
             traces = [[(ar.prompt, ar.text)] for ar in ars]
             return outputs, probs, None, traces
 
@@ -374,7 +382,7 @@ class QueryAgent:
         max_iteration: int = 10000,  # TODO: too high?
     ):
         batch_size = len(queries)
-        final_retrievals: List[List[List[str]]] = [[] for _ in range(len(queries))]  # (bs, n_ret_steps, ret_topk)
+        final_retrievals: List[List[Tuple[str, List[str]]]] = [[] for _ in range(len(queries))]  # (bs, n_ret_steps, ret_topk)
         final_outputs: List[str] = [''] * len(queries)
         final_probs: List[List[float]] = [[] for _ in range(len(queries))]
         final_queries: List[CtxPrompt] = [None] * len(queries)
@@ -386,19 +394,30 @@ class QueryAgent:
         first_ret = True
         step_ind = 0
         while len(queries) and max_gen_len < self.max_generation_len and step_ind <= max_iteration:
+            # reinit ctx to empty
+            if self.reinit_ctx:
+                for i, q in queries:
+                    q.reinit_ctx()
+
             # retrieve
             look_aheads: List[str] = [''] * len(queries)
             if self.look_ahead_steps:  # generate a fixed number tokens for retrieval
-                if (self.look_ahead_pre_retrieval == 'first' and step_ind == 0) or self.look_ahead_pre_retrieval == 'all':  # pre-retrieval for look ahead
-                    ctx_ids, ctx_texts = self.retrieve([q.get_query_for_retrieval() for i, q in queries], is_question=first_ret)
+                if (self.look_ahead_pre_retrieval in {'first', 'first-keep'} and step_ind == 0) or self.look_ahead_pre_retrieval == 'all':  # pre-retrieval for look ahead
+                    queries_to_issue = [q.get_query_for_retrieval() for i, q in queries]
+                    ctx_ids, ctx_texts = self.retrieve(queries_to_issue, is_question=first_ret)
                     for _i, (i, q) in enumerate(queries):
                         ret_id, ret_text = ctx_ids[_i].tolist(), ctx_texts[_i].tolist()
-                        final_retrievals[i].append(ret_id)
+                        final_retrievals[i].append((queries_to_issue[_i], ret_id))
                         if self.append_retrieval:
                             q.ctx = None
                             q.append_retrieval(ret_text, add_index=False)
                         else:
-                            q.update_retrieval(ret_text, method=self.ctx_increase)
+                            q.update_retrieval(list(zip(ret_id, ret_text)), method=self.ctx_increase)
+                        if 'keep' in self.look_ahead_pre_retrieval:
+                            q._ctxs = list(zip(ret_id, ret_text))
+                # check ctx and kept ctx
+                for i, q in queries:
+                    q.check_ctx(method=self.ctx_increase)
                 apireturns = self.complete(
                     list(map(itemgetter(1), queries)),
                     params={'max_tokens': self.look_ahead_steps, 'stop': self.final_stop_sym},
@@ -406,7 +425,12 @@ class QueryAgent:
                     is_lookahead=True)
                 if self.look_ahead_truncate_at_boundary:
                     apireturns = [ar.truncate_at_boundary(self.look_ahead_truncate_at_boundary) for ar in apireturns]
-                look_aheads = [ar.use_as_query(low=self.look_ahead_filter_prob, mask=self.look_ahead_mask_prob) for ar in apireturns]
+                look_aheads = [ar.use_as_query(
+                    low_prob=self.look_ahead_filter_prob,
+                    mask_prob=self.look_ahead_mask_prob,
+                    mask_method=self.look_ahead_mask_method,
+                    n_gen_char_in_prompt=q.gen_len,
+                    api_key=api_key) for ar, (_, q) in zip(apireturns, queries)]
             elif self.look_ahead_boundary:  # generate tokens until boundary for retrieval
                 apireturns = self.complete(
                     list(map(itemgetter(1), queries)),
@@ -425,12 +449,10 @@ class QueryAgent:
                     assert len(generate_queries) == len(queries)
                     queries_to_issue = [lh if self.only_use_look_ahead else (gq + lh) for gq, lh in zip(generate_queries, look_aheads)]
                 else:
-                    # TODO: only use question
-                    #queries_to_issue = [lh if self.only_use_look_ahead else (q.case.split('\n')[0].split(':', 1)[1].strip() + lh)
-                    #    for (i, q), lh in zip(queries, look_aheads)]
                     queries_to_issue = [lh if self.only_use_look_ahead else (q.get_query_for_retrieval() + lh) for (i, q), lh in zip(queries, look_aheads)]
                 if self.debug:
                     print(f'Query -> !{queries_to_issue[0]}!')
+                assert len(queries_to_issue) == len(queries)
                 nonemp_queries_to_issue = [q for q in queries_to_issue if q]
                 if nonemp_queries_to_issue and (not self.retrieval_at_beginning or first_ret):
                     # (bs, ret_topk) * 2
@@ -445,13 +467,16 @@ class QueryAgent:
                                 ret_id = [ret_id]
                             else:
                                 ret_id, ret_text = ctx_ids[idx].tolist(), ctx_texts[idx].tolist()
-                            final_retrievals[i].append(ret_id)
+                            final_retrievals[i].append((queries_to_issue[_i], ret_id))
                             if self.append_retrieval:
                                 q.ctx = None
                                 q.append_retrieval(ret_text, add_index=False)
                             else:
-                                q.update_retrieval(ret_text, method=self.ctx_increase)
+                                q.update_retrieval(list(zip(ret_id, ret_text)), method=self.ctx_increase)
             generate_queries = []
+            # check ctx and kept ctx
+            for i, q in queries:
+                q.check_ctx(method=self.ctx_increase)
 
             # complete
             if self.ret_frequency:
@@ -475,31 +500,38 @@ class QueryAgent:
                     ar.truncate_at_substring(self.final_stop_sym)
             elif self.ret_boundary:
                 if self.forbid_generate_step and self.retrieval_trigers and step_ind > 0:  # start from the second step to forbid the force_generate token
-                    apireturns = self.complete(
+                    _apireturns = self.complete(
                         list(map(itemgetter(1), queries)),
                         params={'max_tokens': min(self.max_generation_len - max_gen_len, self.forbid_generate_step), 'stop': self.final_stop_sym},
                         forbid_generate=self.force_generate,
                         api_key=api_key)
-                    for (i, query), ar in zip(queries, apireturns):
-                        cont = ar.text
-                        final_outputs[i] += cont
-                        final_probs[i].extend(ar.probs)
-                        final_queries[i] = query
-                        traces[i].append((ar.prompt, cont))
-                        query.add_generation(cont)
+                    for (i, query), ar in zip(queries, _apireturns):
+                        if not ar.is_empty:
+                            cont = ar.text
+                            final_outputs[i] += cont
+                            final_probs[i].extend(ar.token_probs or [])
+                            final_queries[i] = query
+                            traces[i].append((ar.prompt, cont))
+                            query.add_generation(cont)
                 apireturns = self.complete(
                     list(map(itemgetter(1), queries)),
                     params={'max_tokens': self.max_generation_len - max_gen_len, 'stop': self.ret_boundary},
                     force_generate=self.force_generate,
                     api_key=api_key)
+                if self.forbid_generate_step and self.retrieval_trigers and step_ind > 0:  # if the previous generation is empty, no need to continue
+                    assert len(apireturns) == len(_apireturns)
+                    apireturns = [_ar if _ar.is_empty else ar for ar, _ar in zip(apireturns, _apireturns)]
+
                 # used to collect the generation with ret_boundary
                 min_cont_len = 100000
                 for i, ar in enumerate(apireturns):
                     cont, reason = ar.text, ar.finish_reason
-                    if ar.has_endoftext:  # 003 stops proactively by returning endoftext
+                    if ar.has_endoftext or ar.is_empty:  # 003 stops proactively by returning endoftext or when nothing is generated
+                        reason = 'stop'
                         if self.retrieval_trigers:
                             generate_queries.append('')
                     elif reason == 'stop' and self.final_stop_sym not in cont:  # stop at ret_boundary
+                        reason = 'boundary'
                         remove_query = False
                         if self.retrieval_trigers:  # extract queries from generation
                             assert len(self.retrieval_trigers) == 1
@@ -513,13 +545,13 @@ class QueryAgent:
                                     generate_queries.append(cont[found_query.span()[1]:].strip())
                                     if self.forbid_generate_step:
                                         remove_query = True
-                                        cont = cont[:found_query.span()[0]]  # remove queries
-                                else:
+                                        cont = cont[:found_query.span()[0]].rstrip()  # remove queries
+                                else:  # no retrieval query deteced, the generation is finished
                                     generate_queries.append('')
+                                    reason = 'stop'
                         assert len(self.ret_boundary) == 1
-                        if not remove_query:
+                        if not remove_query and reason == 'boundary':
                             cont += self.ret_boundary[0]
-                        reason = 'boundary'
                         #assert len(cont) > 0, 'empty generation will cause dead lock'
                     else:
                         if self.retrieval_trigers:
@@ -543,7 +575,7 @@ class QueryAgent:
             for _i, ((i, query), ar) in enumerate(zip(queries, apireturns)):
                 cont, reason = ar.text, ar.finish_reason
                 final_outputs[i] += cont
-                final_probs[i].extend(ar.probs)
+                final_probs[i].extend(ar.token_probs)
                 final_queries[i] = query
                 traces[i].append((ar.prompt, cont))
                 if reason == 'stop':
@@ -569,7 +601,7 @@ class QueryAgent:
             for i, (query, ar) in enumerate(zip(final_queries, apireturns)):
                 cont, reason = ar.text, ar.finish_reason
                 final_outputs[i] = cont
-                final_probs[i] = ar.probs
+                final_probs[i] = ar.token_probs
                 traces[i].append((ar.prompt, cont))
 
         return final_outputs, final_probs, final_retrievals, traces
@@ -619,8 +651,8 @@ def write_worker(output_file: str, output_queue: Queue, size: int = None):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', type=str, default='strategyqa', choices=
-                        ['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'eli5', 'wow', 'wow_train_1k', 'asqa', 'lmdata'])
-    parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003'])
+                        ['strategyqa', 'hotpotqa', '2wikihop', 'wikisum_all_beir', 'wikiasp', 'eli5', 'wow', 'wow_train_1k', 'asqa', 'asqa_annotation', 'mmlu', 'lmdata'])
+    parser.add_argument('--model', type=str, default='code-davinci-002', choices=['code-davinci-002', 'text-davinci-002', 'text-davinci-003', 'gpt-3.5-turbo-0301', 'text-curie-001'])
     parser.add_argument('--input', type=str, default=None)
     parser.add_argument('--output', type=str, default=None)
     parser.add_argument('--index_name', type=str, default='test')
@@ -629,12 +661,17 @@ if __name__ == '__main__':
     parser.add_argument('--prompt_type', type=str, default='cot', choices=['cot', 'sa', 'sa_ctx'])
     parser.add_argument('--file_lock', type=str, default=None)
     parser.add_argument('--openai_keys', type=str, default=[], help='openai keys', nargs='+')
+    parser.add_argument('--config_file', type=str, default=None, help='config file')
+    parser.add_argument('--config_kvs', type=str, default=None, help='extra config json, used to override config_file')
+    parser.add_argument('--search_engine', type=str, default='elasticsearch', choices=['bing', 'elasticsearch'])
+    parser.add_argument('--prompt_type', type=str, default=None, help='used to override config_file')
 
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--max_num_examples', type=int, default=None)
     parser.add_argument('--fewshot', type=int, default=0)
     parser.add_argument('--max_generation_len', type=int, default=128)
     parser.add_argument('--temperature', type=float, default=0.0)
+    parser.add_argument('--final_stop_sym', type=str, default=None, help='stop symbol')
 
     parser.add_argument('--build_index', action='store_true')
     parser.add_argument('--seed', type=int, default=2022)
@@ -664,68 +701,139 @@ if __name__ == '__main__':
         use_decoder_input_ids=True,
         engine='elasticsearch',
         file_lock=FileLock(args.file_lock) if args.file_lock else None)
-
-    # no ret: freq 0, boundary [], use gold false, retrieval_triggers [] retrieval_at_beginning': False
-    # gold ret: freq 0, boundary [], use gold true retrieval_at_beginning': False
-    # ret once: freq 0, boundary [], use gold false, retrieval_at_beginning': True
-    # ret every 16 tokens: freq 16, boundary [], use gold false
-
     retrieval_kwargs = {
-        'retriever': retriever,
-        'prefix_method': 'freq:32',
-        'topk': 10,
-        'use_ctx': True,
-        'frequency': 64,
+        'topk': 1,
+        'use_ctx': False,
+        'frequency': 0,
         'boundary': [],
-        #'boundary': ['Intermediate answer:'],
-        #'boundary': ['")]'],
-        #'boundary': ['. '],
         'use_gold': False,
         'use_gold_iterative': False,
-        'max_query_length': 32,
+        'max_query_length': 16,
         'use_full_input_as_query': False,
         'retrieval_at_beginning': False,
-        'look_ahead_steps': 16,
-        'look_ahead_pre_retrieval': False,
+        'look_ahead_steps': 0,
+        'look_ahead_pre_retrieval': '',
         'look_ahead_truncate_at_boundary': None,
-        'look_ahead_filter_prob': None,
-        'look_ahead_mask_prob': None,
+        'look_ahead_filter_prob': 0.0,
+        'look_ahead_mask_prob': 0.0,
+        'look_ahead_mask_method': 'simple',
         'look_ahead_boundary': [],
         'only_use_look_ahead': False,
         'retrieval_trigers': [],
-        #'retrieval_trigers': [('Follow up:', 'Intermediate answer:')],
-        #'retrieval_trigers': [('\[Search\("', '")]')],
-        #'retrieval_trigers': [(None, '. ')],
         'force_generate': None,
-        'forbid_generate_step': None,
+        'forbid_generate_step': 0,
         'truncate_at_prob': 0.0,
         'truncate_at_boundary': None,
         'append_retrieval': False,
-        'use_ctx_for_examplars': 'gold',
+        'reinit_ctx': False,
+        'use_ctx_for_examplars': False,
         'use_retrieval_instruction': False,
-        'format_reference_method': 'default',
+        'use_instruction': False,
+        'format_reference_method': 'searchresultsrank',
         'ctx_position': 'before_case',
-        'prompt_type': 'none',
+        'prompt_type': 'cot',
         'ctx_increase': 'replace',
         'add_ref_suffix': None,
         'add_ref_prefix': None,
-        'debug': args.debug,
     }
-    retrieval_kwargs['final_stop_sym'] = '!@#$%^&*()\n\n)(*&^%$#@!' if args.dataset == 'lmdata' else '\n\n'
+    if args.prompt_type:
+        retrieval_kwargs['prompt_type'] = args.prompt_type
+    if args.config_file:
+        with open(args.config_file) as fin:
+            for k, v in json.load(fin).items():
+                retrieval_kwargs[k] = v
+    if args.config_kvs:  # highest overriede
+        for k, v in json.loads(args.config_kvs).items():
+            retrieval_kwargs[k] = v
+
+    retriever = BM25(
+        tokenizer=prompt_tokenizer,
+        dataset=(corpus, queries, qrels),
+        index_name=args.index_name,
+        use_decoder_input_ids=True,
+        engine=args.search_engine,
+        exclude_domains=['wikipedia.org', 'wikiwand.com', 'wiki2.org', 'wikimedia.org'],
+        file_lock=FileLock(args.file_lock) if args.file_lock else None)
+    retrieval_kwargs['retriever'] = retriever
+    retrieval_kwargs['debug'] = args.debug
+
+    logging.info('=== retrieval kwargs ===')
+    logging.info(retrieval_kwargs)
+
+    if args.final_stop_sym:
+        retrieval_kwargs['final_stop_sym'] = args.final_stop_sym
+    else:
+        retrieval_kwargs['final_stop_sym'] = '!@#$%^&*()\n\n)(*&^%$#@!' if Utils.no_stop(model=args.model, dataset=args.dataset) else '\n\n'
     qagent = QueryAgent(
         model=args.model,
         tokenizer=prompt_tokenizer,
         max_generation_len=args.max_generation_len,
         retrieval_kwargs=retrieval_kwargs,
         temperature=args.temperature)
+
+    # load data
+    if args.dataset == 'strategyqa':
+        data = StrategyQA(args.input, prompt_type=retrieval_kwargs['prompt_type'])
+    elif args.dataset == 'hotpotqa':
+        data = HotpotQA('validation', prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = HotpotQA.get_gold_ctxs
+    elif args.dataset == '2wikihop':
+        data = WikiMultiHopQA(args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = WikiMultiHopQA.get_gold_ctxs
+    elif args.dataset == 'eli5':
+        data = ELI5(prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = ELI5.get_gold_ctxs
+    elif args.dataset == 'asqa':
+        data = ASQA(json_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = ASQA.get_gold_ctxs
+    elif args.dataset == 'asqa_annotation':
+        data = ASQAAnnotation(json_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = ASQAAnnotation.get_gold_ctxs
+    elif args.dataset == 'wow':
+        data = WoW(prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = WoW.get_gold_ctxs
+    elif args.dataset == 'wow_train_1k':
+        data = WoWLong(jsonl_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = WoWLong.get_gold_ctxs
+    elif args.dataset == 'wikisum_all_beir':
+        data = WikiSum(args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = WikiSum.get_gold_ctxs
+    elif args.dataset == 'wikiasp':
+        data = WikiAsp(args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = WikiAsp.get_gold_ctxs
+    elif args.dataset == 'mmlu':
+        data = MMLU(tasks=MMLU.hard_tasks, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = MMLU.get_gold_ctxs
+    elif args.dataset == 'lmdata':
+        data = LMData(args.input, prompt_type=retrieval_kwargs['prompt_type'])
+        use_gold_func = LMData.get_gold_ctxs
+    else:
+        raise NotImplementedError
+    if qagent.use_ctx_for_examplars == 'gold':
+        logging.info('gold ctx for examplars')
+        data.retrieval_augment_examplars(qagent, use_gold=use_gold_func)
+    elif qagent.use_ctx_for_examplars == 'ret':
+        logging.info('retrieve ctx for examplars')
+        data.retrieval_augment_examplars(qagent)
+    elif qagent.use_ctx_for_examplars == False:
+        pass
+    else:
+        raise NotImplementedError
+    data.format(fewshot=args.fewshot)
+
+    # modify prompt properities
     if retrieval_kwargs['use_retrieval_instruction']:
         CtxPrompt.ret_instruction = RetrievalInstruction(method=retrieval_kwargs['use_retrieval_instruction'])
+    if retrieval_kwargs['use_instruction']:
+        CtxPrompt.instruction = data.instruction
     CtxPrompt.retrieval_kwargs = retrieval_kwargs
     CtxPrompt.format_reference_method = retrieval_kwargs['format_reference_method']
+    CtxPrompt.clean_reference = retrieval_kwargs['clean_reference'] if 'clean_reference' in retrieval_kwargs else False
     CtxPrompt.ctx_position = retrieval_kwargs['ctx_position']
     CtxPrompt.add_ref_suffix = retrieval_kwargs['add_ref_suffix']
     CtxPrompt.add_ref_prefix = retrieval_kwargs['add_ref_prefix']
 
+    # multiprocess
     if args.multiprocess:  # start query processes
         lock = Lock()
         CustomManager.register('KeyManager', KeyManager)
@@ -744,49 +852,8 @@ if __name__ == '__main__':
     else:
         key_manager = KeyManager(args.openai_keys)
 
-    # load data
-    if args.dataset == 'strategyqa':
-        data = StrategyQA(args.input, prompt_type=retrieval_kwargs['prompt_type'])
-    elif args.dataset == 'hotpotqa':
-        data = HotpotQA('validation', prompt_type=retrieval_kwargs['prompt_type'])
-        use_gold_func = HotpotQA.get_gold_ctxs
-    elif args.dataset == '2wikihop':
-        data = WikiMultiHopQA(args.input, prompt_type=retrieval_kwargs['prompt_type'])
-        use_gold_func = WikiMultiHopQA.get_gold_ctxs
-    elif args.dataset == 'eli5':
-        data = ELI5(prompt_type=retrieval_kwargs['prompt_type'])
-        use_gold_func = ELI5.get_gold_ctxs
-    elif args.dataset == 'asqa':
-        data = ASQA(json_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
-        use_gold_func = ASQA.get_gold_ctxs
-    elif args.dataset == 'wow':
-        data = WoW(prompt_type=retrieval_kwargs['prompt_type'])
-        use_gold_func = WoW.get_gold_ctxs
-    elif args.dataset == 'wow_train_1k':
-        data = WoWLong(jsonl_file=args.input, prompt_type=retrieval_kwargs['prompt_type'])
-        use_gold_func = WoWLong.get_gold_ctxs
-    elif args.dataset == 'wikisum_all_beir':
-        data = WikiSum(args.input, prompt_type=retrieval_kwargs['prompt_type'])
-        use_gold_func = WikiSum.get_gold_ctxs
-    elif args.dataset == 'lmdata':
-        data = LMData(args.input, prompt_type=retrieval_kwargs['prompt_type'])
-        use_gold_func = LMData.get_gold_ctxs
-    else:
-        raise NotImplementedError
-    if qagent.use_ctx_for_examplars == 'gold':
-        logging.info('gold ctx for examplars')
-        data.retrieval_augment_examplars(qagent, use_gold=use_gold_func)
-    elif qagent.use_ctx_for_examplars == 'ret':
-        logging.info('retrieve ctx for examplars')
-        data.retrieval_augment_examplars(qagent)
-    elif qagent.use_ctx_for_examplars == False:
-        pass
-    else:
-        raise NotImplementedError
-    data.format(fewshot=args.fewshot)
-    data = data.dataset
-
     # downsample
+    data = data.dataset
     if args.max_num_examples and args.max_num_examples < len(data):
         data = data.shuffle()
         data = data.select(range(args.max_num_examples))

@@ -5,16 +5,7 @@ import json
 from inspiredco import critique
 
 
-metric = "rouge"
-config = {
-    "variety": "rouge_1"
-}
 
-metric = "uni_eval"
-config = {
-    "task": "summarization",
-    "evaluation_aspect": "relevance",
-}
 
 metric = "bert_score"
 config = {
@@ -28,6 +19,17 @@ config = {
     "variety": "reference_target_bidirectional",
     "model": "facebook/bart-large-cnn",
     "language": "eng"
+}
+
+metric = "rouge"
+config = {
+    "variety": "rouge_1"
+}
+
+metric = "uni_eval"
+config = {
+    "task": "summarization",
+    "evaluation_aspect": "relevance",
 }
 
 def extract_source_target_ref(input_file: str):

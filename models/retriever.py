@@ -1,6 +1,7 @@
 from typing import List, Dict, Tuple, Callable
 import time
 import tqdm
+import uuid
 import numpy as np
 import torch
 from filelock import FileLock
@@ -13,15 +14,23 @@ from .brave import get_batch_brave_search_results
 from .bing import search_bing_batch
 
 
+def get_random_doc_id():
+    return f'_{uuid.uuid4()}'
+
+
 class SearchEngineConnector:
     def __init__(
         self,
         engine: str,
-        file_lock: FileLock = None
+        only_domain: str = None,
+        exclude_domains: List[str] = [],
+        file_lock: FileLock = None,
     ):
         self.fake_score = 0
         assert engine in {'brave', 'bing'}
         self.engine = engine
+        self.only_domain = only_domain
+        self.exclude_domains = exclude_domains
         self.file_lock = file_lock
 
     def retrieve(
@@ -37,12 +46,13 @@ class SearchEngineConnector:
             if self.engine == 'brave':
                 se_results = get_batch_brave_search_results(qs)
             elif self.engine == 'bing':
-                se_results = search_bing_batch(qs)
+                se_results = search_bing_batch(
+                    qs, only_domain=self.only_domain, exclude_domains=self.exclude_domains)
             else:
                 raise NotImplementedError
             results: Dict[int, Dict[str, Tuple[float, str]]] = {}
             for (qid, query), ser in zip(queries.items(), se_results):
-                results[qid] = {str(did): (self.fake_score, r['snippet']) for did, r in enumerate(ser)}
+                results[qid] = {str(r['url']) + get_random_doc_id(): (self.fake_score, r['snippet']) for did, r in enumerate(ser)}
             return results
         finally:
             if self.file_lock is not None:
@@ -61,6 +71,7 @@ class BM25:
         use_encoder_input_ids: bool = False,
         use_decoder_input_ids: bool = True,
         file_lock: FileLock = None,
+        **search_engine_kwargs,
     ):
         self.tokenizer = tokenizer
         self.collator = collator
@@ -73,8 +84,8 @@ class BM25:
                 BM25Search(index_name=index_name, hostname='localhost', initialize=False, number_of_shards=1),
                 k_values=[self.max_ret_topk])
         else:
-            self.max_ret_topk = 10
-            self.retriever = SearchEngineConnector(engine, file_lock=file_lock)
+            self.max_ret_topk = 50
+            self.retriever = SearchEngineConnector(engine, file_lock=file_lock, **search_engine_kwargs)
 
         self.encode_retrieval_in = encode_retrieval_in
         assert encode_retrieval_in in {'encoder', 'decoder'}
@@ -156,9 +167,9 @@ class BM25:
                 self.tokenizer.padding_side = ori_ps
                 self.tokenizer.truncation_side = ori_ts
                 queries = self.tokenizer.batch_decode(tokenized, skip_special_tokens=True)
-                print('Query ------> ', queries[0], max_query_length)
 
             # retrieve
+            #print('REAL QUERY:', queries[0])
             results: Dict[str, Dict[str, Tuple[float, str]]] = self.retriever.retrieve(self.corpus, dict(zip(range(len(queries)), queries)), disable_tqdm=True)
 
             # prepare outputs
@@ -174,7 +185,7 @@ class BM25:
                         if len(_docids) >= topk:
                             break
                 if len(_docids) < topk:  # add dummy docs
-                    _docids += ['-1'] * (topk - len(_docids))
+                    _docids += [get_random_doc_id() for _ in range(topk - len(_docids))]
                     _docs += [''] * (topk - len(_docs))
                 docids.extend(_docids)
                 docs.extend(_docs)
@@ -232,7 +243,6 @@ def bm25search_search(self, corpus: Dict[str, Dict[str, str]], queries: Dict[str
         results = self.es.lexical_multisearch(
             texts=queries[start_idx:start_idx+self.batch_size],
             top_hits=top_k)
-
         for (query_id, hit) in zip(query_ids_batch, results):
             scores = {}
             for corpus_id, score, text in hit['hits']:
@@ -273,7 +283,6 @@ def elasticsearch_lexical_multisearch(self, texts: List[str], top_hits: int, ski
                     },
                 "size": skip + top_hits, # The same paragraph will occur in results
                 }
-
             request.extend([req_head, req_body])
 
         res = self.es.msearch(body = request)
