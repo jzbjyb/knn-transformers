@@ -126,6 +126,8 @@ class QueryAgent:
         self.look_ahead_mask_method = retrieval_kwargs.get('look_ahead_mask_method', 'simple')
         self.look_ahead_pre_retrieval = retrieval_kwargs.get('look_ahead_pre_retrieval', '')
         assert self.look_ahead_pre_retrieval in {'', 'first', 'first-keep', 'all'}
+        self.pre_retrieval = retrieval_kwargs.get('pre_retrieval', '')
+        assert self.pre_retrieval in {'', 'first-keep'}
         self.max_query_length = retrieval_kwargs.get('max_query_length', None)
         self.use_full_input_as_query = retrieval_kwargs.get('use_full_input_as_query', False)
         self.only_use_look_ahead = retrieval_kwargs.get('only_use_look_ahead', False)
@@ -455,7 +457,6 @@ class QueryAgent:
                 if nonemp_queries_to_issue and (not self.retrieval_at_beginning or first_ret):
                     # (bs, ret_topk) * 2
                     ctx_ids, ctx_texts = self.retrieve(nonemp_queries_to_issue, is_question=first_ret)
-                    first_ret = False
                     idx = -1
                     for _i, (i, q) in enumerate(queries):
                         if queries_to_issue[_i]:
@@ -471,6 +472,10 @@ class QueryAgent:
                                 q.append_retrieval(ret_text, add_index=False)
                             else:
                                 q.update_retrieval(list(zip(ret_id, ret_text)), method=self.ctx_increase)
+                            if first_ret and 'first-keep' in self.pre_retrieval:
+                                q._ctxs = list(zip(ret_id, ret_text))
+                    first_ret = False
+
             generate_queries = []
             # check ctx and kept ctx
             for i, q in queries:
@@ -703,6 +708,7 @@ if __name__ == '__main__':
         'max_query_length': 16,
         'use_full_input_as_query': False,
         'retrieval_at_beginning': False,
+        'pre_retrieval': '',
         'look_ahead_steps': 0,
         'look_ahead_pre_retrieval': '',
         'look_ahead_truncate_at_boundary': None,
