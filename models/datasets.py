@@ -4,7 +4,6 @@ import csv
 import json
 import random
 import logging
-from operator import itemgetter
 from collections import Counter, defaultdict
 import re
 from urllib.parse import unquote
@@ -16,7 +15,6 @@ import spacy
 import stanza
 from datasets import Dataset, load_dataset, concatenate_datasets, load_from_disk
 from beir.datasets.data_loader import GenericDataLoader
-import openai
 from .templates import CtxPrompt
 logging.basicConfig(level=logging.INFO)
 

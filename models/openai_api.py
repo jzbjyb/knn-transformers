@@ -8,7 +8,6 @@ import os
 import re
 import time
 import json
-import copy
 from operator import itemgetter
 from collections import defaultdict, Counter
 from filelock import FileLock
@@ -17,8 +16,7 @@ from multiprocessing.managers import BaseManager
 from transformers import AutoTokenizer, GPT2TokenizerFast
 from beir.datasets.data_loader import GenericDataLoader
 from beir.retrieval.search.lexical import BM25Search
-from tenacity import retry, stop_after_attempt, wait_random_exponential, wait_fixed
-import openai
+from tenacity import retry, stop_after_attempt, wait_fixed
 from .retriever import BM25
 from .templates import CtxPrompt, ApiReturn, RetrievalInstruction
 from .datasets import StrategyQA, HotpotQA, WikiMultiHopQA, WikiSum, WikiAsp, ELI5, WoW, WoWLong, ASQA, ASQAAnnotation, MMLU, LMData
