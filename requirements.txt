@@ -4,7 +4,7 @@ datasets
 tqdm
 scipy
 sacrebleu
-evaluate==0.2.2
+evaluate==0.3.0
 rouge_score==0.1.2
 openai
 chardet==5.1.0
